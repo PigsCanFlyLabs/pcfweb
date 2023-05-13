@@ -1,0 +1,273 @@
+{% load easy_thumbnails_tags %}
+{% load static_thumbnails %}
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <meta name="description" content="">
+    <meta name="author" content="">
+    <link href="https://fonts.googleapis.com/css?family=Poppins:100,200,300,400,500,600,700,800,900&display=swap" rel="stylesheet">
+
+    <title>{{ title }}</title>
+
+
+    <!-- Additional CSS Files -->
+    <link rel="stylesheet" type="text/css" href="{% static 'assets/css/bootstrap.min.css' %}">
+
+    <link rel="stylesheet" type="text/css" href="{% static 'assets/css/font-awesome.css' %}">
+
+    <link rel="stylesheet" href="{% static 'assets/css/main.css' %}">
+
+    <link rel="stylesheet" href="{% static 'assets/css/owl-carousel.css' %}">
+
+    <link rel="stylesheet" href="{% static 'assets/css/lightbox.css' %}">
+
+    <link rel="stylesheet" href="{% static 'assets/css/social-icons.css' %}">
+
+    <link rel="stylesheet" href="{% static 'assets/css/faq-section.css' %}">
+
+    {% block custom_css %}
+
+    {% endblock custom_css %}
+    {% load cookie_consent_tags %}
+    <script type="text/javascript" src={% static "cookie_consent/cookiebar.js" %}></script>
+    {% if request|cookie_group_accepted:"analytics" or request.user_agent.is_bot  %}
+    <!-- Google tag (gtag.js) - Google Analytics -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-2EDT623L0V"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      
+      gtag('config', 'G-2EDT623L0V');
+      gtag('config', 'G-2EDT623L0V');
+      gtag('config', 'AW-11060726723');
+      gtag('config', 'UA-10047168-1');
+    </script>
+    <!-- reddit -->
+    <!-- Reddit Pixel -->
+    <script>
+      !function(w,d){if(!w.rdt){var p=w.rdt=function(){p.sendEvent?p.sendEvent.apply(p,arguments):p.callQueue.push(arguments)};p.callQueue=[];var t=d.createElement("script");t.src="https://www.redditstatic.com/ads/pixel.js",t.async=!0;var s=d.getElementsByTagName("script")[0];s.parentNode.insertBefore(t,s)}}(window,document);rdt('init','t2_6bfy', {"optOut":false,"useDecimalCurrencyValues":true});rdt('track', 'PageVisit');
+    </script>
+    <!-- DO NOT MODIFY UNLESS TO REPLACE A USER IDENTIFIER -->
+    <!-- End Reddit Pixel -->
+    {% endif %}
+</head>
+
+    <body>
+    <!-- ***** Preloader Start ***** -->
+    <div id="preloader">
+	<div class="jumper">
+	    <div></div>
+	    <div></div>
+	    <div></div>
+	</div>
+    </div>
+    <!-- ***** Preloader End ***** -->
+
+
+    <!-- ***** Header Area Start ***** -->
+    <header class="header-area header-sticky">
+	<div class="container">
+	    <div class="row">
+		<div class="col-12">
+		    <nav class="main-nav">
+			<!-- ***** Logo Start ***** -->
+			<a href="{% url 'home' %}" class="logo">
+			    <img src="{% static_thumbnail 'assets/logo-cropped.png' 100x53 %}" class="img-fluid" width="100">
+			</a>
+			<!-- ***** Logo End ***** -->
+			<!-- ***** Menu Start ***** -->
+			<ul class="nav">
+			    <li><a href="{% url 'home' %}">Home</a></li>
+			    <li><a href="{% url 'about' %}">About Us</a></li>
+			    <li><a href="{% url 'contact' %}">Contact Us</a></li>
+			    <li><a href="{% url 'products' %}">Products</a></li>
+			    <li><a href="{% url 'subscribe' %}">Subscribe</a></li>
+
+			    {% if request.user.is_authenticated %}
+				<li><a href="{% url 'logout' %}">Log Out</a></li>
+				<li><a href="{% url 'cart' %}"><i class="fa fa-shopping-cart"></i> Cart</a></li>
+			    {% else %}
+				<li><a href="{% url 'signup' %}">Sign Up</a></li>
+				<li><a href="{% url 'login' %}">Log In</a></li>
+			    {% endif %}
+			</ul>
+			<a class='menu-trigger'>
+			    <span>Menu</span>
+			</a>
+			<!-- ***** Menu End ***** -->
+		    </nav>
+		</div>
+	    </div>
+	</div>
+    </header>
+    <!-- ***** Header Area End ***** -->
+    {% block pre-roll %}
+    {% endblock pre-roll %}
+
+    <!-- Actual content -->
+    {% block content %}
+
+    {% endblock content %}
+    <!-- End of content block. Phew that was short -->
+
+    {% block foot-roll %}
+    {% endblock foot-roll %}
+    <!-- ***** Footer Start ***** -->
+    <footer>
+	<div class="container">
+	    <div class="row">
+		<div class="col-lg-3">
+		    <div class="first-item">
+			<div class="logo">
+			    <img src="{% static 'assets/logo-cropped.png' %}" alt="Pigs Can Fly Labs" width="200">
+			</div>
+			<!-- <ul>
+			    <li><a href="#">San Francisco, CA, United States</a></li>
+			    <li><a href="#">info@company.com</a></li>
+			    <li><a href="#">010-020-0340</a></li>
+			</ul> -->
+		    </div>
+		</div>
+		<div class="col-lg-3">
+		    <h4>Useful Links</h4>
+		    <ul>
+			<li><a href="{% url 'home' %}">Homepage</a></li>
+			<li><a href="{% url 'about' %}">About Us</a></li>
+			<li><a href="{% url 'contact' %}">Contact Us</a></li>
+			<li><a href="{% url 'products' %}">Products</a></li>
+		    </ul>
+		</div>
+		<!--
+		<div class="col-lg-3">
+		    <h4>Products</h4>
+		    <ul>
+			<li><a href="#">Space Beaver</a></li>
+			<li><a href="#">Books</a></li>
+			<li><a href="#">Brake Light Controller</a></li>
+			<li><a href="#">Services</a></li>
+		    </ul>
+		</div>
+		-->
+		<div class="col-lg-3">
+		    <h4>Legal-ish</h4>
+		    <ul>
+			<li><a href="{% url 'tos' %}">Terms of Service</a></li>
+			<li><a href="{% url 'privacy' %}">Privacy</a></l>i
+			<li><a href="{% url 'returns' %}">Returns</a></li>
+		    </ul>
+		</div>
+		<div class="col-lg-3">
+		    <h4>Help &amp; Information</h4>
+		    <ul>
+			<li><a href="{% url 'contact' %}">Help</a></li>
+			<li><a href="{% url 'about' %}">FAQ's</a></li>
+			<li><a href="{% url 'subscribe' %}">Subscribe</a></li>
+		    </ul>
+		</div>
+		<div class="col-lg-12">
+		    <div class="under-footer">
+			<p>Copyright © 2022-2023 Pigs Can Fly Labs Co., LLC. All Rights Reserved.
+
+			<ul>
+			    <li><a href="#"><i class="fa fa-facebook"></i></a></li>
+			    <li><a href="#"><i class="fa fa-twitter"></i></a></li>
+			    <li><a href="#"><i class="fa fa-linkedin"></i></a></li>
+			</ul>
+		    </div>
+		</div>
+	    </div>
+	</div>
+    </footer>
+
+
+    <!-- jQuery -->
+    <script src="{% static 'assets/js/jquery-2.1.0.min.js' %}"></script>
+
+    <!-- Bootstrap -->
+    <script src="{% static 'assets/js/popper.js' %}"></script>
+    <script src="{% static 'assets/js/bootstrap.min.js' %}"></script>
+
+    <!-- Plugins -->
+    <script src="{% static 'assets/js/owl-carousel.js' %}"></script>
+    <script src="{% static 'assets/js/accordions.js' %}"></script>
+    <script src="{% static 'assets/js/datepicker.js' %}"></script>
+    <script src="{% static 'assets/js/scrollreveal.min.js' %}"></script>
+    <script src="{% static 'assets/js/waypoints.min.js' %}"></script>
+    <script src="{% static 'assets/js/jquery.counterup.min.js' %}"></script>
+    <script src="{% static 'assets/js/imgfix.min.js' %}"></script>
+    <script src="{% static 'assets/js/slick.js' %}"></script>
+    <script src="{% static 'assets/js/lightbox.js' %}"></script>
+    <script src="{% static 'assets/js/isotope.js' %}"></script>
+
+    <!-- Global Init -->
+    <script src="{% static 'assets/js/custom.js' %}"></script>
+
+    <script>
+
+	$(function() {
+	    var selectedClass = "";
+	    $("p").click(function(){
+	    selectedClass = $(this).attr("data-rel");
+	    $("#portfolio").fadeTo(50, 0.1);
+		$("#portfolio div").not("."+selectedClass).fadeOut();
+	    setTimeout(function() {
+	      $("."+selectedClass).fadeIn();
+	      $("#portfolio").fadeTo(50, 1);
+	    }, 500);
+
+	    });
+	});
+
+    </script>
+
+    {% if request|cookie_consent_enabled %}
+      {% not_accepted_or_declined_cookie_groups request as cookie_groups %}
+
+      {% if cookie_groups %}
+	{% url "cookie_consent_cookie_group_list" as url_cookies %}
+	{% cookie_consent_accept_url cookie_groups as url_accept %}
+	{% cookie_consent_decline_url cookie_groups as url_decline %}
+	<script type="text/javascript">
+	  var cookie_groups = [];
+	  {% for cookie_group in cookie_groups %}
+	    cookie_groups.push("{{ cookie_group.varname }}");
+	  {% endfor %}
+
+	  function ready(fn) {
+		  if (document.readyState != 'loading') {
+		    fn();
+		  } else if (document.addEventListener) {
+		    document.addEventListener('DOMContentLoaded', fn);
+		  } else {
+		    document.attachEvent('onreadystatechange', function() {
+			  if (document.readyState != 'loading')
+			    fn();
+		    });
+		  }
+	  }
+
+	  ready(function() {
+		  showCookieBar({
+	      content: "{% filter escapejs %}{% with cookie_groups=cookie_groups|join:", " %}<div class="cookie-bar">Do you agree to use cookies? <a href="{{ url_accept }}" class="cc-cookie-accept">Accept</a> <a href="{{ url_decline }}" class="cc-cookie-decline">Decline</a> This site uses {{ cookie_groups }} cookies for better performance and user experience. <a href="{{ url_cookies }}">Cookies info</a></div>{% endwith %}{% endfilter %}",
+	      cookie_groups: cookie_groups,
+	      cookie_decline: "{% get_decline_cookie_groups_cookie_string request cookie_groups %}",
+	      beforeDeclined: function() {
+		document.cookie = "{% get_decline_cookie_groups_cookie_string request cookie_groups %}";
+	      }
+	    });
+	  });
+	</script>
+      {% endif %}
+    {% endif %}
+    {% block custom_js %}
+
+    {% endblock custom_js %}
+
+  </body>
+</html>

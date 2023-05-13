@@ -1,0 +1,110 @@
+<?xml version="1.0"?>
+<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">
+<channel>
+<title>Pigs Can Fly Labs Products</title>
+<link>https://www.pigscanfly.ca</link>
+<description>Pigs Can Fly Labs Google Product Feed</description>
+
+
+<item>
+<g:id>1</g:id>
+<g:title>100 farts</g:title>
+<g:description>FartsNo description.</g:description>
+<g:link>/product/1</g:link>
+<g:image_link>/media/data_here/IMG_0757_8mFUGMW.jpg</g:image_link>
+<g:availability>[in_stock]</g:availability>
+
+
+
+<g:price>100.00 USD</g:price>
+<g:brand>Pigs Can Fly Labs</g:brand>
+<g:gender>Unisex</g:gender>
+
+
+
+
+<g:shipping>US:San Francisco:Local Delivery:0.00 USD:1:7:2:3</g:shipping>
+<g:shipping>US::Shipping:10.00 USD:1:7:1:14</g:shipping>
+<g:shipping>US::Shipping:30.00 USD:1:7:1:10</g:shipping>
+<g:shipping>CA::Shipping:10.00 USD:1:7:5:30</g:shipping>
+</item>
+
+
+
+<item>
+<g:id>2</g:id>
+<g:title>200 farts</g:title>
+<g:description>200 fartsNo description.</g:description>
+<g:link>/product/2</g:link>
+<g:image_link>/static/assets/images/macmini1.jpg</g:image_link>
+<g:availability>[in_stock]</g:availability>
+
+
+
+<g:price>0.00 USD</g:price>
+<g:brand>Pigs Can Fly Labs</g:brand>
+<g:gender>Unisex</g:gender>
+
+
+
+
+<g:shipping>US:San Francisco:Local Delivery:0.00 USD:1:7:2:3</g:shipping>
+<g:shipping>US::Shipping:10.00 USD:1:7:1:14</g:shipping>
+<g:shipping>US::Shipping:30.00 USD:1:7:1:10</g:shipping>
+<g:shipping>CA::Shipping:10.00 USD:1:7:5:30</g:shipping>
+</item>
+
+
+
+<item>
+<g:id>3</g:id>
+<g:title>3090</g:title>
+<g:description>No description.</g:description>
+<g:link>/product/3</g:link>
+<g:image_link>/static/assets/images/macmini1.jpg</g:image_link>
+<g:availability>[in_stock]</g:availability>
+
+
+
+<g:price>0.00 USD</g:price>
+<g:brand>Pigs Can Fly Labs</g:brand>
+<g:gender>Unisex</g:gender>
+
+
+
+
+<g:shipping>US:San Francisco:Local Delivery:0.00 USD:1:7:2:3</g:shipping>
+<g:shipping>US::Shipping:10.00 USD:1:7:1:14</g:shipping>
+<g:shipping>US::Shipping:30.00 USD:1:7:1:10</g:shipping>
+<g:shipping>CA::Shipping:10.00 USD:1:7:5:30</g:shipping>
+</item>
+
+
+
+<item>
+<g:id>4</g:id>
+<g:title>faaarts</g:title>
+<g:description>faaartsNo description.</g:description>
+<g:link>/product/4</g:link>
+<g:image_link>/static/assets/images/macmini1.jpg</g:image_link>
+<g:availability>[in_stock]</g:availability>
+
+
+
+<g:price>0.00 USD</g:price>
+<g:brand>Pigs Can Fly Labs</g:brand>
+<g:gender>Unisex</g:gender>
+
+
+
+
+<g:shipping>US:San Francisco:Local Delivery:0.00 USD:1:7:2:3</g:shipping>
+<g:shipping>US::Shipping:10.00 USD:1:7:1:14</g:shipping>
+<g:shipping>US::Shipping:30.00 USD:1:7:1:10</g:shipping>
+<g:shipping>CA::Shipping:10.00 USD:1:7:5:30</g:shipping>
+</item>
+
+
+</channel>
+</rss>
+</xml>

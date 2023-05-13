@@ -1,0 +1,164 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-primary
+  namespace: pcfweb
+  labels:
+    app: web-primary
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web-primary
+  template:
+    metadata:
+      labels:
+        app: web-primary
+    spec:
+      volumes:
+        - name: client-secret
+          secret:
+            secretName: client-secret
+            optional: false
+      containers:
+        - image: holdenk/pcfweb:v0.9.10a
+          name: pcfweb
+          volumeMounts:
+            - name: client-secret
+              mountPath: "/opt/app/client_secret/"
+              readOnly: true
+          env:
+          - name: OAUTHLIB_RELAX_TOKEN_SCOPE
+            value: "1"
+          - name: PRIMARY
+            value: "1"
+          - name: ATOMIC_REQUESTS
+            value: "False"
+          envFrom:
+          - secretRef:
+              name: pcfweb-secret
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+              name: web
+          livenessProbe:
+            httpGet:
+              httpHeaders:
+                - name: Host
+                  value: "www.pigscanfly.ca"
+              path: /
+              port: 80
+            periodSeconds: 180
+          startupProbe:
+            httpGet:
+              httpHeaders:
+                - name: Host
+                  value: "www.pigscanfly.ca"
+              path: /
+              port: 80
+            periodSeconds: 10
+            failureThreshold: 30
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: pcfweb
+  labels:
+    app: pcfweb
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: pcfweb
+  template:
+    metadata:
+      labels:
+        app: pcfweb
+    spec:
+      volumes:
+        - name: client-secret
+          secret:
+            secretName: client-secret
+            optional: false
+      containers:
+        - image: holdenk/pcfweb:v0.9.10a
+          name: pcfweb
+          volumeMounts:
+            - name: client-secret
+              mountPath: "/opt/app/client_secret/"
+              readOnly: true
+          env:
+          - name: OAUTHLIB_RELAX_TOKEN_SCOPE
+            value: "1"
+          - name: ATOMIC_REQUESTS
+            value: "False"
+          envFrom:
+          - secretRef:
+              name: pcfweb-secret
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+              name: web
+          livenessProbe:
+            httpGet:
+              httpHeaders:
+                - name: Host
+                  value: "www.pigscanfly.ca"
+              path: /
+              port: 80
+            periodSeconds: 180
+          startupProbe:
+            httpGet:
+              httpHeaders:
+                - name: Host
+                  value: "www.pigscanfly.ca"
+              path: /
+              port: 80
+            periodSeconds: 10
+            failureThreshold: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: pcfweb
+  name: web-svc
+  namespace: pcfweb
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: web
+  selector:
+    app: pcfweb
+  sessionAffinity: None
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pcfweb-ingress
+  namespace: pcfweb
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    cert-manager.io/issue-temporary-certificate: "true"
+    acme.cert-manager.io/http01-edit-in-place: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+      - www.pigscanfly.ca
+    secretName: pcf-tls-secret
+  rules:
+    - host: www.pigscanfly.ca
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name:  web-svc
+                port:
+                  number: 80

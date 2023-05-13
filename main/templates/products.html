@@ -1,0 +1,66 @@
+{% extends 'base.html' %}
+{% load easy_thumbnails_tags %}
+{% load static_thumbnails %}
+{% load static %}
+{% block content %}
+
+    <!-- ***** Main Banner Area Start ***** -->
+    <div class="page-heading" id="top"
+       style="{{extra_style}}">
+        <div class="container">
+            <div class="row">
+                <div class="col-lg-12">
+                    <div class="inner-content">
+                        <h2>{{ type }}</h2>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- ***** Main Banner Area End ***** -->
+
+
+    <!-- ***** Products Area Starts ***** -->
+    <section class="section" id="products">
+        <div class="container">
+            <div class="row">
+                <div class="col-lg-12">
+                    <div class="section-heading">
+                        <h2>Our Latest {{ type }}</h2>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="container">
+            <div class="row">
+                {% for product in products %}
+                    <div class="col-lg-4">
+                        <div class="item">
+                            <div class="thumb">
+                                <div class="hover-content">
+                                    <ul>
+                                        <li><a href="{% url 'product' product.pk %}"><i class="fa fa-eye"></i></a></li>
+                                        <li><a href="{% url 'product' product.pk %}"><i class="fa fa-star"></i></a></li>
+                                        <li><a href="{% url 'product' product.pk %}"><i class="fa fa-shopping-cart"></i></a></li>
+                                    </ul>
+                                </div>
+				<a href="{% url 'product' product.pk %}">
+                                  <img src="{{ product.get_thumb }}" alt="">
+				</a>
+                            </div>
+                            <div class="down-content">
+                                <h4>{{product.name}}</h4>
+                                <span>
+				  {{product.get_display_price}}
+				</span>
+                            </div>
+                        </div>
+                    </div>
+                {% endfor %}
+
+            {% include 'components/faq.html' %}
+        </div>
+    </section>
+    <!-- ***** Products Area Ends ***** -->
+
+{% endblock content %}

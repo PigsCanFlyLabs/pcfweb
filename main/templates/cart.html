@@ -1,0 +1,76 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block custom_css %}
+<link rel="stylesheet" href="{% static 'assets/css/cart.css' %}">
+{% endblock custom_css %}
+
+{% block content %}
+<section class="mt-5" style="margin-bottom: 110px;">
+    <div class="container section">
+
+        <div class="cart">
+            <div class="table-responsive">
+                <table class="table">
+                    <thead class="thead-dark">
+                        <tr>
+                            <th scope="col" class="text-white">Product</th>
+                            <th scope="col" class="text-white">Price</th>
+                            <th scope="col" class="text-white">Quantity</th>
+                            <th scope="col" class="text-white">Total</th>
+                            <th scope="col" class="text-white">Remove</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for product in products %}
+                            <tr>
+                                <td>
+                                    <div class="main">
+                                        <div class="des">
+                                            <p>{{ product.product.name }}</p>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td>
+                                    <h6>${{ product.product.get_display_price }}</h6>
+                                </td>
+                                <td>
+                                    <h6>{{ product.quantity }}</h6>
+                                </td>
+                                <td>
+                                    <h6>{{ product.total_display_price }}</h6>
+                                </td>
+                                <td class="main-border-button">
+                                    <a href="{% url 'remove-from-cart' product.pk %}" class="" style="margin-top: 0;">X</button>
+                                </td>
+                            </tr>
+                        {% endfor %}
+
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-lg-4 offset-lg-8">
+                <div class="checkout">
+                    <ul>
+                        <li class="subtotal">subtotal
+                            <span>{{ total_price }}</span>
+                        </li>
+                        <li class="cart-total">Total
+                            <span>{{ total_price }}</span>
+                        </li>
+                    </ul>
+		    <form method="POST" action="{% url 'checkout' %}">
+                      {% csrf_token %}
+		      Coupon (optional): <input type="text" name="coupon" />
+                      <button type="submit" class="proceed-btn">Proceed to Checkout</a>
+		    </form>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</section>
+{% endblock content %}

@@ -1,0 +1,33 @@
+<!-- ***** Subscribe Area Starts ***** -->
+<div class="subscribe">
+    <div class="container">
+        <div class="row">
+            <div class="col-lg-8">
+                <div class="section-heading">
+                    <h2>Subscribe to our newsletter</h2>
+                    <span>We never spam or sell your email address to third parties. Your data is safe with us.</span>
+                </div>
+		<form enctype="multipart/form-data" method="post" action="/newsletter/[NAME-OF-NEWSLETTER]/subscribe/">
+{% csrf_token %}
+<label for="id_email_field">E-mail:</label> <input type="email" name="email_field" required="" id="id_email_field">
+<button id="form-submit" name="submit" value="Subscribe" type="submit" class="main-dark-button"><i class="fa fa-paper-plane"></i></button>
+</form>
+            </div>
+            <div class="col-lg-4">
+                <div class="row">
+                    <div class="col-6">
+                        <ul>
+                            <li>Office Location:<br><span>San Francisco CA</span></li>
+                        </ul>
+                    </div>
+                    <div class="col-6">
+                        <ul>
+                            <li>Email:<br><span>support@pigscanfly.ca</span></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- ***** Subscribe Area Ends ***** -->

@@ -1,0 +1,125 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block custom_css %}
+<link rel="stylesheet" href="{% static 'assets/css/product_reviews.css' %}">
+<link rel="stylesheet" href="{% static 'assets/css/disclosures.css' %}">
+
+<style>
+    input::-webkit-outer-spin-button,
+    input::-webkit-inner-spin-button {
+	-webkit-appearance: none;
+	margin: 0;
+    }
+
+    input[type=number] {
+	-moz-appearance: textfield;
+	/* Firefox */
+    }
+
+    .disclosures li {
+	list-style: decimal;
+	margin-bottom: 15px;
+    }
+</style>
+
+{% endblock custom_css %}
+
+{% block content %}
+
+<!-- ***** Main Banner Area Start ***** -->
+<!-- <div class="page-heading" id="top">
+	<div class="container">
+	    <div class="row">
+		<div class="col-lg-12">
+		    <div class="inner-content">
+			<h2>Single Product Page</h2>
+		    </div>
+		</div>
+	    </div>
+	</div>
+    </div> -->
+<!-- ***** Main Banner Area End ***** -->
+
+
+<!-- ***** Product Area Starts ***** -->
+<section class="section" id="product" style="margin-top: 150px;">
+    <div class="container">
+	<div class="row">
+	    <div class="col-lg-8">
+		<div class="left-images">
+		    <img src="{{ product.get_image_url }}" alt="">
+		</div>
+	    </div>
+	    <div class="col-lg-4">
+		<div class="right-content">
+		    <h4>{{ product.name }} {{ product.stock_description }}</h4>
+		    <span class="price">{{ product.get_display_price }}</span>
+		    <span>
+		      {% autoescape off %}
+		      {{ product.get_display_text }}
+		      {% endautoescape %}
+		    </span>
+		    <div class="quantity-content">
+			<div class="left-content">
+			    <h6>No. of Orders</h6>
+			</div>
+			<div class="right-content">
+			    <div class="quantity buttons_added">
+				<input type="button" value="-" class="minus" onclick="subtractQuantity()">
+				<input type="number" step="1" min="1" max="" name="quantity" id="quantity" onchange="calculateTotal()" value="1"
+				    title="Qty" class="input-text qty text" size="4" pattern="" inputmode="">
+				<input type="button" value="+" class="plus" onclick="addQuantity()">
+			    </div>
+			</div>
+		    </div>
+		    <div class="total">
+			<h4 class="calc-total">Total: </h4>
+			{% if not product.noorder %}
+			<div class="main-border-button"><button onclick="addToCart()" style="margin-top: 0;">
+			    {{product.buy_text}}
+			</button></div>
+			{% endif %}
+			{% for alt_link_name, alt_link in product.get_alt_links %}
+			<div class="main-border-button"><a href="{{alt_link}}" class="altbtn">{{alt_link_name}}</a></div>
+			{% endfor %}
+		    </div>
+		</div>
+	    </div>
+	</div>
+    </div>
+</section>
+<!-- ***** Product Area Ends ***** -->
+
+{% endblock content %}
+
+{% block custom_js %}
+<script>
+    const quantityInput = $("input#quantity");
+    calculateTotal(); // once at page load.
+
+    function addQuantity() {
+	quantityInput.val(parseInt(quantityInput.val()) + 1);
+	calculateTotal();
+    }
+
+    function subtractQuantity() {
+	if (quantityInput.val() > 1) {
+	    quantityInput.val(parseInt(quantityInput.val()) - 1);
+	    calculateTotal();
+	}
+    }
+
+    function calculateTotal() {
+	let total = (quantityInput.val() * parseFloat("{{ product.get_display_price }}")).toFixed(2);
+	document.querySelector('h4.calc-total').innerHTML = `Total: $${total}`;
+	return total;
+    }
+
+    function addToCart() {
+	price = calculateTotal();
+	window.location.href = `{% url 'add-to-cart' product_id=product.pk quantity="qholder" %}`.replace('qholder', quantityInput.val());
+    }
+
+</script>
+{% endblock custom_js %}

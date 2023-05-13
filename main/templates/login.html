@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block custom_css %}
+<link rel="stylesheet" href="{% static 'assets/css/signup_form.css' %}">
+{% endblock custom_css %}
+
+{% block content %}
+<div class="container">
+    <section class="section">
+	<div class="d-flex justify-content-center mt-4">
+
+	    <div class="sign-up-form-container col-lg-6" id="container">
+	      <div class="form-container sign-in-container">
+		<form method="POST" action="{% url 'login' %}">
+		  {% csrf_token %}
+		  <div class="section-heading">
+		    <h2>Sign In</h2>
+		  </div>
+		  <input type="email" placeholder="Email" name="email" required />
+		  <input type="password" placeholder="Password" name="password" required />
+		  {% if valid == 'false' %}
+		  <p class="text-danger error-msg">Invalid credentials.</p>
+		  {% endif %}
+		  <div class="main-border-button">
+		    <button type="submit">Sign In</button>
+		  </div>
+		<div class="section-heading">
+		  <p><a href="{% url 'signup' %}">Don't have an account? Sign up!</a></p>
+		  <p><a href="{% url 'password_reset' %}">Forgot password? Reset Password</a></p>
+		</div>
+		</form>
+	      </div>
+	    </div>
+	</div>
+    </section>
+</div>
+{% endblock content %}
+
+{% block custom_js %}
+
+{% endblock custom_js %}

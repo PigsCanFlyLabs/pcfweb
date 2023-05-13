@@ -1,0 +1,37 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block custom_css %}
+<link rel="stylesheet" href="{% static 'assets/css/signup_form.css' %}">
+{% endblock custom_css %}
+
+{% block content %}
+<div class="container">
+    <section class="section">
+        <div class="d-flex justify-content-center mt-4">
+
+            <div class="sign-up-form-container col-lg-6" id="container">
+                <div class="form-container sign-up-container">
+                    <form method="POST" action="{% url 'signup' %}">
+                        {% csrf_token %}
+                        <div class="section-heading">
+                            <h2>Sign Up</h2>
+                        </div>
+                        <input type="email" placeholder="Email" name="email" required />
+                        <input type="password" placeholder="Password" name="password" required />
+
+                        {% if in_use == 'true' %}
+                            <p class="error-msg text-danger">This email is already in use</p>
+                        {% endif %}
+
+                        <div class="main-border-button">
+                            <button type="submit">Sign Up</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+        </div>
+    </section>
+</div>
+{% endblock content %}

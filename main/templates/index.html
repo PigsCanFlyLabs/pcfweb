@@ -1,0 +1,121 @@
+{% extends 'base.html' %}
+{% load easy_thumbnails_tags %}
+{% load static_thumbnails %}
+{% load static %}
+{% block content %}
+<!-- ***** Main Banner Area Start ***** -->
+    <div class="page-heading about-page-heading" id="top">
+	<div class="container">
+	    <div class="row">
+		<div class="col-lg-12">
+		    <div class="inner-content">
+			<h2>Pigs Can Fly Labs</h2>
+			{% include 'components/headline.html' %}
+		    </div>
+		</div>
+	    </div>
+	</div>
+    </div>
+    <!-- ***** Main Banner Area End ***** -->
+
+    <!-- ***** Space Beaver Area Starts ***** -->
+    <section class="" id="explore">
+	<div class="container">
+	    <div class="row">
+		<div class="col-lg-6">
+		    <div class="left-content">
+			<h2>Welcome to Pigs Can Fly Labs</h2>
+			<span>
+			  Pigs Can Fly Labs is a San Francisco trans-owned company providing value-priced queer and nerdy stuff, including IP transit in FMT2, and soon to launch open-source programmable satellite messaging, technical books, high viz gear, and light controllers to help you be seen, and queer merch.
+			</span>
+			<div class="quote">
+			  <i class="fa fa-quote-left"></i>
+			  <p>
+			    Before Pigs Can Fly Labs I had no idea where to buy satellite communication devices and pasties at the same time. -- A hypothetical customer.
+			  </p>
+			</div>
+			<div class="main-border-button">
+			    <a href="{% url 'products' %}">Products</a>
+			</div>
+			<div class="main-border-button">
+			    <a href="{% url 'services' %}">Services</a>
+			</div>
+		    </div>
+		</div>
+		<div class="col-lg-6">
+		    <div class="right-content">
+			<div class="row">
+			    <div class="col-lg-6">
+				<div class="leather">
+				    <h4>Space Beaver</h4>
+				    <span>Open Source Programmable Satellite Communication</span>
+				</div>
+			    </div>
+			    <div class="col-lg-6">
+				<div class="first-image">
+				    <img src="{% static_thumbnail 'assets/images/spacebeaver-logo.png' 200x200 %}" alt="SpaceBeaver Logo" style="width:200px;height:200px">
+				</div>
+			    </div>
+			    <div class="col-lg-6">
+			      <div class="second-image">
+				<a href="{% url 'services' %}">
+				  <img src="{% static_thumbnail 'assets/images/servers.jpg' 200x200 %}" alt="SpaceBeaver Logo" style="width:200px;height:200px">
+				  </a>
+				</div>
+			    </div>
+			    <div class="col-lg-6">
+			      <div class="types">
+				<a href="{% url 'services' %}">
+				    <h4>IP Transit</h4>
+				    <span>Low-Commit backup transit in FMT2</span>
+				    </a>
+				</div>
+			    </div>
+			</div>
+		    </div>
+		</div>
+	    </div>
+	</div>
+    </section>
+    <!-- ***** Space Beaver Area Ends ***** -->
+    {% for cat_label, products in highlights %}
+    <section class="" id="books">
+	<div class="container">
+	    <div class="row">
+		<div class="col-lg-6">
+		    <div class="section-heading">
+		      <h2><a href="{% url 'products' cat_label.0 %}"> Our {{cat_label.1}}</a></h2>
+		    </div>
+		</div>
+	    </div>
+	</div>
+	<div class="container">
+	    <div class="row">
+		<div class="col-lg-12">
+		    <div class="books-item-carousel">
+			<div class="owl-books-item owl-carousel">
+			  {% for product in products %}
+				<a href="{% url 'product' product.pk %}">
+				<div class="item">
+				    <div class="thumb">
+				      <img src="{{ product.get_thumb }}" alt="">
+				    </div>
+				    <div class="down-content">
+					<h4>{{ product.name }}</h4>
+					<span>{{ product.get_display_price }}</span>
+				    </div>
+				</div>
+				</a>
+			    {% endfor %}
+			</div>
+		    </div>
+		</div>
+	    </div>
+	</div>
+    </section>
+    {% endfor %}
+
+
+    {% include 'components/subscribe.html' %}
+
+{% endblock content %}

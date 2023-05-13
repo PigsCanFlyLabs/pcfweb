@@ -1,0 +1,79 @@
+<?xml version="1.0"?>
+<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">
+<channel>
+<title>Pigs Can Fly Labs Products</title>
+<link>https://www.pigscanfly.ca</link>
+<description>Pigs Can Fly Labs Google Product Feed</description>
+{% for product in products %}
+{% for size in product.get_sizes %}
+<item>
+<g:id>{{product.pk}}</g:id>
+<g:title>{{product.name}}</g:title>
+<g:description>{{product.get_display_text}}</g:description>
+<g:link>https://www.pigscanfly.ca{% url 'product' product.pk %}</g:link>
+<g:image_link>https://www.pigscanfly.ca{{ product.get_image_url }}</g:image_link>
+<g:availability>{{ product.get_availability }}</g:availability>
+
+{% if product.date_available is not None %}
+<g:availability_date>{{product.date_available}}</g:availability_date>
+{% endif %}
+
+<g:price>{{product.get_display_price}} USD</g:price>
+<g:brand>{{product.get_brand}}</g:brand>
+<g:gender>Unisex</g:gender>
+
+{% if size is not None %}
+<g:size>{{size}}</g:size>
+{% endif %}
+
+{% if product.get_gtin is not None %}
+<g:gtin>{{product.get_gtin}}</g:gtin>
+{% else %}
+{% if size is not None %}
+<g:mpn>{{product.get_mpn}}{{size}}</g:mpn>
+{% else %}
+<g:mpn>{{product.get_mpn}}</g:mpn>
+{% endif %}
+{% endif %}
+<g:shipping>
+  <g:country>US</g:country>
+  <g:region>941*</g:region>
+  <g:service>SF Local Delivery</g:service>
+  <g:price>0.0 USD</g:price>
+  <g:min_handling_time>1</g:min_handling_time>
+  <g:max_handling_time>7</g:max_handling_time>
+  <g:min_transit_time>1</g:min_transit_time>
+  <g:max_transit_time>3</g:max_transit_time>
+</g:shipping>
+<g:shipping>
+  <g:country>US</g:country>
+  <g:service>US Economy Shipping</g:service>
+  <g:price>10.0 USD</g:price>
+  <g:min_handling_time>1</g:min_handling_time>
+  <g:max_handling_time>7</g:max_handling_time>
+  <g:min_transit_time>1</g:min_transit_time>
+  <g:max_transit_time>14</g:max_transit_time>
+</g:shipping>
+<g:shipping>
+  <g:country>US</g:country>
+  <g:service>Faster US Shipping</g:service>
+  <g:price>30.0 USD</g:price>
+  <g:min_handling_time>1</g:min_handling_time>
+  <g:max_handling_time>7</g:max_handling_time>
+  <g:min_transit_time>1</g:min_transit_time>
+  <g:max_transit_time>7</g:max_transit_time>
+</g:shipping>
+<g:shipping>
+  <g:country>CA</g:country>
+  <g:service>CA Economy Shipping</g:service>
+  <g:price>10.0 USD</g:price>
+  <g:min_handling_time>1</g:min_handling_time>
+  <g:max_handling_time>7</g:max_handling_time>
+  <g:min_transit_time>1</g:min_transit_time>
+  <g:max_transit_time>21</g:max_transit_time>
+</g:shipping>
+</item>
+{% endfor %}
+{% endfor %}
+</channel>
+</rss>

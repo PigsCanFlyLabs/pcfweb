@@ -1,0 +1,150 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block content %}
+
+<!-- ***** Main Banner Area Start ***** -->
+<div class="page-heading about-page-heading" id="top">
+    <div class="container">
+        <div class="row">
+            <div class="col-lg-12">
+                <div class="inner-content">
+                  <h2>About Our Company</h2>
+		  {% include 'components/headline.html' %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- ***** Main Banner Area End ***** -->
+
+<!-- ***** Our Team Area Starts ***** -->
+<section class="our-team">
+    <div class="container">
+        <div class="row">
+            <div class="col-lg-12">
+                <div class="section-heading">
+                    <h2>Our Amazing Team</h2>
+                    <span>Mostly Humans!</span>
+                </div>
+            </div>
+            <div class="col-lg-4">
+                <div class="team-item">
+                    <div class="thumb">
+                        <div class="hover-effect">
+                            <div class="inner-content">
+                                <ul>
+                                    <li><a href="#"><i class="fa fa-facebook"></i></a></li>
+                                    <li><a href="#"><i class="fa fa-twitter"></i></a></li>
+                                    <li><a href="#"><i class="fa fa-linkedin"></i></a></li>
+                                </ul>
+                            </div>
+                        </div>
+                        <img src="{% static 'assets/images/holden.png' %}">
+                    </div>
+                    <div class="down-content">
+                        <h4>Holden Karau</h4>
+                        <span>Everything Else</span>
+			<span>Holden was born in Ottawa, Ontario, and has worked for Amazon, Apple, and Google on big data, search, and recommendation problems – while also writing technical books (many of which we have for sale). She relocated to America and then San Francisco shortly after graduating. She has a passion for building queer communities, motorcycles, and teaching. 
+</span>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-4">
+                <div class="team-item">
+                    <div class="thumb">
+                        <div class="hover-effect">
+                            <div class="inner-content">
+                                <ul>
+                                    <li><a href="#"><i class="fa fa-facebook"></i></a></li>
+                                    <li><a href="#"><i class="fa fa-twitter"></i></a></li>
+                                    <li><a href="#"><i class="fa fa-linkedin"></i></a></li>
+                                </ul>
+                            </div>
+                        </div>
+                        <img src="{% static 'assets/images/beth.png' %}">
+                    </div>
+                    <div class="down-content">
+                        <h4>Beth Le</h4>
+                        <span>Design Engineer</span>
+			<span>Beth Le was born in San Francisco and has worked at various local companies. She is responsible for much of our 3-D modeling & design-for-manufacturing. She has a passion for renewable resources and motorcycles.</span>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-4">
+                <div class="team-item">
+                    <div class="thumb">
+                        <div class="hover-effect">
+                            <div class="inner-content">
+                                <ul>
+                                    <li><a href="#"><i class="fa fa-facebook"></i></a></li>
+                                    <li><a href="#"><i class="fa fa-twitter"></i></a></li>
+                                    <li><a href="#"><i class="fa fa-linkedin"></i></a></li>
+                                </ul>
+                            </div>
+                        </div>
+                        <img src="{% static 'assets/images/timbit.png' %}">
+                    </div>
+                    <div class="down-content">
+                        <h4>Timbit</h4>
+                        <span>The Best</span>
+			<span>
+			  Timbit has a passion for chasing balls and long naps. Timbit was born in North Carolina and graduated from <a href="https://www.smartypup.com/">SmartyPup</a>. He is an inspiration to us all and also guards our top-secret laboratory and manufacturing facilities.*
+			</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+<!-- ***** Our Team Area Ends ***** -->
+
+<!-- ***** About Area Starts ***** -->
+<div class="about-us">
+    <div class="container">
+        <div class="row">
+            <div class="col-lg-12">
+              <h4>About Us</h4>
+              <span>
+		<p>
+		  Pigs Can Fly Labs LLC was initially created by Holden after graduating from the University of Waterloo. We are proud to work with other wonderful humans (and a dog) in San Francisco and around the world.
+</p>
+		      <p>
+			At Pigs Can Fly Labs, our goals are to help people keep in touch, be visible (both in the queer and reflective senses of the word), and share our skills so we can all improve. These three tenets have informed our choice of projects: from satellite communication & IP transit, to reflective trans stickers, books, and many things in between. These goals also inform how we try and provide our services, with much of our design, writing, and source code available under "open source" or "share alike" licenses to encourage sharing.
+		      </p>
+<p>
+In our hardware projects, much of the design has been done in Kyiv, along with some of the web work. Boards and components are sourced from around the world, with final assembly and quality checking artisanally performed in San Francisco using solar power (when the sun cooperates). The story behind each of our hardware projects' motivations can be found on its page.
+</p>
+<p>
+Our queer merch designs are sourced from members of the queer community throughout the world. All printing, cutting, embroidery, 3-D printing, and fulfillment are done on-site using solar power (when the sun cooperates). We started making queer merch in 2015 after Holden couldn't find any (affordable) trans-flag patches to sew on her motorcycle jacket. In fact, one of Holden and her wife's first dates involved <a href="https://www.workshopsf.org/">screen printing at Workshop SF</a>.
+</p>
+<p>
+We started carrying pasties after one-too-many "incidents" of being asked to "cover-up" (<a href="https://www.abc.ca.gov/education/merchant-education/on-sale-licensee-informational-guide/attire-entertainers-and-conduct/">California's ABC is not cool with nipples, one wonders who scared them</a>).
+		      </p>
+		      <p>
+Our books are written throughout the world (co-written mainly by Holden in between her day job) and printed in a variety of locations. You <a href="https://www.youtube.com/user/holdenkarau">can see some of her writing process on YouTube</a>. There is limited consulting and training available on these same topics. <a href="{% url 'contact' %}">Contact us</a> for more details if you are interested. Even if we are not the right people to help, we'd be happy to suggest someone who might be.
+		      </p>
+			<p>
+Our IP transit and colocation services are in HE's FMT2 building, with multiple tier-two providers. Our core routing/switching uses a combination of Mikrotik & Netronome devices. Our rack is loveling hand-tended by Holden in her spare time (she has a passion for BGP after taking her CCNA back in High School in Ottawa, Ontario, Canada). We started offering Mac-Mini colocation after a friend asked, and our transit offering came from a desire for increased network reliability and realizing all of the options required large commitments. 
+		      </p>
+		      <p>
+Pigs Can Fly Labs took over the domain name business from Pigs Can Fly, where Holden had been selling domain since she was old enough. As it stands, we are not an accredited registrar but partner with DirectI to offer registration services.
+		      </p>
+			<p>
+We also rent Motorcycles and Vespas through <a href="http://www.riders-share.com/welcome/Holdenk+EspDC">Riders Share to share our joy of riding</a>.
+		      </p>
+		      <p>
+For physical orders, fulfillment occurs weekly(ish) in batches as we all have "day jobs" to pay the rent in San Francisco.
+		      </p>
+                        Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod kon tempor incididunt ut
+                        labore.
+</span>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- ***** About Area Ends ***** -->
+
+
+{% include 'components/subscribe.html' %}
+
+{% endblock content %}
