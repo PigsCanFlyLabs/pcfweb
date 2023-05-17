@@ -57,7 +57,7 @@ class ProductsView(View):
             return render(request, 'products.html', context={
                 'title': 'Products',
                 'type': 'producs',
-                'products': Product.objects.all()
+                'products': Product.objects.exclude(noorder=True)
             })
         else:
             cat = category or request.GET["category"]
@@ -80,7 +80,7 @@ class ProductsView(View):
 
 class ServicesView(View):
     def get(self, request):
-        products = Product.objects.filter(cat=Product.Categories.SERVICES)
+        products = Product.objects.filter(cat=Product.Categories.SERVICES).exclude(noorder=True)
         return render(request, 'products.html', context={
             'title': 'Services',
             'type': "Services",
