@@ -21,7 +21,7 @@ spec:
             secretName: client-secret
             optional: false
       containers:
-        - image: holdenk/pcfweb:v0.9.11b
+        - image: holdenk/pcfweb:v0.10.0
           name: pcfweb
           volumeMounts:
             - name: client-secret
@@ -32,8 +32,22 @@ spec:
             value: "1"
           - name: PRIMARY
             value: "1"
-          - name: ATOMIC_REQUESTS
-            value: "False"
+          - name: DJANGO_CONFIGURATION
+            value: "Prod"
+          # Explicit env beats envFrom, so the DB wiring below wins over any
+          # stale values in pcfweb-secret. The database itself is deployed by
+          # pg-bootstrap.yaml (CloudNativePG); -rw is the write Service.
+          - name: DBHOST
+            value: "pcfweb-pg-rw"
+          - name: DBNAME
+            value: "pigscanfly"
+          - name: DBUSER
+            value: "pigscanfly"
+          - name: DBPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: pcfweb-internal-pg-secret
+                key: password
           envFrom:
           - secretRef:
               name: pcfweb-secret
@@ -82,7 +96,7 @@ spec:
             secretName: client-secret
             optional: false
       containers:
-        - image: holdenk/pcfweb:v0.9.11b
+        - image: holdenk/pcfweb:v0.10.0
           name: pcfweb
           volumeMounts:
             - name: client-secret
@@ -91,8 +105,22 @@ spec:
           env:
           - name: OAUTHLIB_RELAX_TOKEN_SCOPE
             value: "1"
-          - name: ATOMIC_REQUESTS
-            value: "False"
+          - name: DJANGO_CONFIGURATION
+            value: "Prod"
+          # Explicit env beats envFrom, so the DB wiring below wins over any
+          # stale values in pcfweb-secret. The database itself is deployed by
+          # pg-bootstrap.yaml (CloudNativePG); -rw is the write Service.
+          - name: DBHOST
+            value: "pcfweb-pg-rw"
+          - name: DBNAME
+            value: "pigscanfly"
+          - name: DBUSER
+            value: "pigscanfly"
+          - name: DBPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: pcfweb-internal-pg-secret
+                key: password
           envFrom:
           - secretRef:
               name: pcfweb-secret
