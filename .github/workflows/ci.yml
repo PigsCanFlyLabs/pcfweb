@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          # Installed from a sibling checkout in the Docker image; from git here.
+          pip install git+https://github.com/holdenk/cal-sync-magic.git
+      - name: Collect static assets
+        # Page tests thumbnail collected statics, so collect before testing.
+        run: python manage.py collectstatic --no-input
+      - name: Django system checks
+        run: python manage.py check
+      - name: Migrations are committed
+        run: python manage.py makemigrations --check --dry-run
+      - name: Migrate and load fixtures
+        run: |
+          python manage.py migrate
+          python manage.py loaddata initial_products
+      - name: Tests
+        run: python manage.py test main
+      - name: Validate templates
+        run: python manage.py validate_templates --ignore-app newsletter
+      - name: Type check
+        run: mypy -p main -p pigscanfly
+      - name: Kubernetes manifests parse
+        run: python -c "import yaml; list(yaml.safe_load_all(open('pg-bootstrap.yaml'))); list(yaml.safe_load_all(open('deploy.yaml')))"
