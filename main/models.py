@@ -24,6 +24,10 @@ class Product(models.Model):
     kickstarter = models.CharField(max_length=200, blank=True, null=True)
     kindle_link = models.CharField(max_length=200, blank=True, null=True)
     amazon_link = models.CharField(max_length=200, blank=True, null=True)
+    bookshop_link = models.CharField(max_length=250, blank=True, null=True)
+    # Shown to visitors detected as being in India.
+    amazon_in_link = models.CharField(max_length=250, blank=True, null=True)
+    flipkart_link = models.CharField(max_length=250, blank=True, null=True)
     preorder_only = models.BooleanField(default=False, null=False)
     noorder = models.BooleanField(default=False, null=False)
     backorder = models.BooleanField(default=False, null=False)
@@ -128,12 +132,25 @@ class Product(models.Model):
     def __repr__(self) -> str:
         return f'<Product: {self.name}>'
 
-    def get_alt_links(self):
+    def get_alt_links(self, country: Optional[str] = None):
         links = []
+        if country == "IN":
+            if self.amazon_in_link:
+                links.append((
+                    "Buy on Amazon.in (print)",
+                    self.amazon_in_link))
+            if self.flipkart_link:
+                links.append((
+                    "Buy on Flipkart (print)",
+                    self.flipkart_link))
         if self.amazon_link:
             links.append((
                 "Buy on Amazon (print)",
                 self.amazon_link))
+        if self.bookshop_link:
+            links.append((
+                "Buy on Bookshop.org (support local bookstores)",
+                self.bookshop_link))
         if self.isbn:
             links.append((
                 "Read on O'Reilly Safari (free trial)",

@@ -188,6 +188,11 @@ class Base(Configuration):
 
     DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+    # GeoIP (country detection for region-specific buy links). The directory
+    # holds GeoLite2-Country.mmdb; when it's absent, country detection is
+    # disabled and visitors just get the default links.
+    GEOIP_PATH = os.getenv("GEOIP_PATH", os.path.join(BASE_DIR, 'geoip'))
+
     # STRIPE SETTINGS
     # Test key for dev; Prod overrides with STRIPE_LIVE_SECRET_KEY.
     STRIPE_API_KEY = os.getenv("STRIPE_TEST_SECRET_KEY", "")

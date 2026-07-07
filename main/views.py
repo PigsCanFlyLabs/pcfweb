@@ -11,7 +11,7 @@ from django.views import View
 
 from main.models import Cart, CartProduct, Product
 from main.payments import Payments
-from main.utils import generate_username
+from main.utils import generate_username, get_country_code
 
 
 # Create your views here.
@@ -95,7 +95,11 @@ class SubscribeView(View):
 class ProductView(View):
     def get(self, request, pk):
         product = Product.objects.get(pk=pk)
-        return render(request, 'single-product.html', context={'title': product.name, 'product': product})
+        return render(request, 'single-product.html', context={
+            'title': product.name,
+            'product': product,
+            'alt_links': product.get_alt_links(country=get_country_code(request)),
+        })
 
 class BaseCartView():
     """Common base cart view."""

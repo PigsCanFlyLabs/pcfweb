@@ -1,10 +1,11 @@
+# syntax=docker/dockerfile:1
 FROM python:3.13-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1
 
-# install nginx
+# install nginx (+ curl for the GeoLite2 download below)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nginx \
+    && apt-get install -y --no-install-recommends nginx curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY /conf/nginx.default /etc/nginx/sites-available/default
 RUN ln -sf /dev/stdout /var/log/nginx/access.log \
@@ -16,6 +17,19 @@ RUN mkdir -p /opt/app/libs/cal-sync-magic
 COPY requirements.txt /opt/app/
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r /opt/app/requirements.txt
+
+# GeoLite2 country database for region-specific buy links. Optional: pass
+# the MaxMind license key as a BuildKit secret (see build.sh); without it
+# the image still works, just without country detection.
+ENV GEOIP_PATH=/opt/app/geoip
+RUN --mount=type=secret,id=maxmind \
+    mkdir -p /opt/app/geoip && \
+    if [ -s /run/secrets/maxmind ]; then \
+      curl -sSfL "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=$(cat /run/secrets/maxmind)&suffix=tar.gz" \
+        | tar -xz --strip-components=1 -C /opt/app/geoip; \
+    else \
+      echo "No maxmind secret provided; skipping GeoLite2 bundle (country detection disabled)"; \
+    fi
 COPY main /opt/app/main
 COPY cal-sync-magic/*.py /opt/app/libs/cal-sync-magic
 COPY cal-sync-magic/*.cfg /opt/app/libs/cal-sync-magic

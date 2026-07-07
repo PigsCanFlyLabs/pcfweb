@@ -20,6 +20,10 @@
     price: 3999
     isbn: "9781449358624"
     amazon_link: "https://www.amazon.com/dp/1449358624"
+    # 2015 1st edition has no bookshop.org product page; link to its search.
+    bookshop_link: "https://bookshop.org/search?keywords=9781449358624"
+    amazon_in_link: "https://www.amazon.in/dp/1449358624"
+    flipkart_link: "https://www.flipkart.com/search?q=9781449358624"
     image_name: "learning_spark_1ed.jpg"
     brand: "O'Reilly"
     cat: "B"
@@ -38,6 +42,9 @@
     price: 4999
     isbn: "9781491943205"
     amazon_link: "https://www.amazon.com/dp/1491943203"
+    bookshop_link: "https://bookshop.org/p/books/high-performance-spark-best-practices-for-scaling-and-optimizing-apache-spark-holden-karau/8133976"
+    amazon_in_link: "https://www.amazon.in/dp/1491943203"
+    flipkart_link: "https://www.flipkart.com/high-performance-spark-best-practices-scaling-optimizing-apache-english-paperback-rachel-warren-holden-karau/p/itm644125ec1f0e0"
     image_name: "high_performance_spark.jpg"
     brand: "O'Reilly"
     cat: "B"
@@ -56,6 +63,9 @@
     price: 4999
     isbn: "9781492050124"
     amazon_link: "https://www.amazon.com/dp/1492050121"
+    bookshop_link: "https://bookshop.org/books/kubeflow-for-machine-learning-from-lab-to-production/9781492050124"
+    amazon_in_link: "https://www.amazon.in/dp/1492050121"
+    flipkart_link: "https://www.flipkart.com/search?q=9781492050124"
     image_name: "kubeflow_for_ml.jpg"
     brand: "O'Reilly"
     cat: "B"
@@ -73,6 +83,9 @@
     price: 6599
     isbn: "9781098118808"
     amazon_link: "https://www.amazon.com/dp/1098118804"
+    bookshop_link: "https://bookshop.org/search?keywords=9781098118808"
+    amazon_in_link: "https://www.amazon.in/dp/1098118804"
+    flipkart_link: "https://www.flipkart.com/search?q=9781098118808"
     image_name: "scaling_python_with_ray.jpg"
     brand: "O'Reilly"
     cat: "B"

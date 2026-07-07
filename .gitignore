@@ -17,6 +17,9 @@ key.pem
 # Dev email backend output
 sent_emails/
 
+# GeoLite2 database downloads (bundled into the image at build time)
+geoip/
+
 # Flask stuff:
 instance/
 .webassets-cache

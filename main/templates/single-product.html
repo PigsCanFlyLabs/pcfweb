@@ -85,7 +85,7 @@
 			    {{product.buy_text}}
 			</button></div>
 			{% endif %}
-			{% for alt_link_name, alt_link in product.get_alt_links %}
+			{% for alt_link_name, alt_link in alt_links %}
 			<div class="main-border-button"><a href="{{alt_link}}" class="altbtn">{{alt_link_name}}</a></div>
 			{% endfor %}
 		    </div>

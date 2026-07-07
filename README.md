@@ -23,7 +23,8 @@ The `Dev` configuration (sqlite, file-based email in `sent_emails/`) is the
 default; set `ENVIRONMENT=Prod` (or `DJANGO_CONFIGURATION=Prod`) for the
 production settings class.
 
-Checks:
+Checks (also run by GitHub Actions on every PR — see
+`.github/workflows/ci.yml`):
 
 ```bash
 ./manage.py test main
@@ -41,6 +42,8 @@ mypy -p main -p pigscanfly
 | `DBHOST` / `DBNAME` / `DBUSER` / `DBPASSWORD` | Prod | Postgres connection; wired in `deploy.yaml` to the in-cluster DB. |
 | `EMAIL_HOST` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | Prod | SMTP. |
 | `GOOGLE_CLIENT_SECRETS_FILE` / `GOOGLE_CLIENT_SECRETS_TEXT` | cal-sync-magic | Calendar sync; optional, warns when absent. |
+| `MAXMIND_LICENSE_KEY` | build.sh (image build) | Bundles the GeoLite2 country DB for region-specific buy links; optional. |
+| `GEOIP_PATH` | all | Directory holding `GeoLite2-Country.mmdb`; defaults to `<repo>/geoip` (set to `/opt/app/geoip` in the image). |
 
 > **Note:** a Stripe *test* key and a mkcert dev key were committed to this
 > repo's history in the past. Both should be treated as burned — rotate the
@@ -58,6 +61,16 @@ Bootstrap products (Holden's books) live in
   admin edits to those pks get overwritten — edit the YAML instead.
 - `external_product_id` (Stripe) is generated lazily on first add-to-cart,
   so loading fixtures needs no Stripe access.
+
+### Region-specific buy links
+
+Books carry `amazon_link` and `bookshop_link` (shown to everyone) plus
+`amazon_in_link` / `flipkart_link`, which are shown first to visitors whose
+IP resolves to India via MaxMind GeoLite2. Country detection needs
+`GeoLite2-Country.mmdb` in `GEOIP_PATH` — the Docker build downloads it when
+`MAXMIND_LICENSE_KEY` is set (passed as a BuildKit secret so it stays out of
+the image history). Without the database the site quietly serves the default
+links only.
 
 ## Deploying
 
