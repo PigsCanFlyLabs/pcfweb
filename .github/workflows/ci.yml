@@ -17,23 +17,6 @@ jobs:
       - name: Install dependencies
         # cal-sync-magic is a private repo, so CI runs without it — the
         # calendar app is optional and turns itself off when not installed.
-        run: pip install -r requirements.txt
-      - name: Collect static assets
-        # Page tests thumbnail collected statics, so collect before testing.
-        run: python manage.py collectstatic --no-input
-      - name: Django system checks
-        run: python manage.py check
-      - name: Migrations are committed
-        run: python manage.py makemigrations --check --dry-run
-      - name: Migrate and load fixtures
-        run: |
-          python manage.py migrate
-          python manage.py loaddata initial_products
-      - name: Tests
-        run: python manage.py test main
-      - name: Validate templates
-        run: python manage.py validate_templates --ignore-app newsletter
-      - name: Type check
-        run: mypy -p main -p pigscanfly
-      - name: Kubernetes manifests parse
-        run: python -c "import yaml; list(yaml.safe_load_all(open('pg-bootstrap.yaml'))); list(yaml.safe_load_all(open('deploy.yaml')))"
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Checks
+        run: ./scripts/checks.sh

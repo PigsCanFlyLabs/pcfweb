@@ -45,6 +45,17 @@ class Product(models.Model):
             self.external_product_id = self.generate_external_product_id()
         super().save(*args, **kwargs)
 
+    def ensure_external_product_id(self) -> str:
+        """Create and persist the Stripe product id if it's missing.
+
+        Fixture rows bypass save() (loaddata uses raw saves), so consumers
+        that need the Stripe id call this before using it.
+        """
+        if not self.external_product_id:
+            self.save()
+        assert self.external_product_id
+        return self.external_product_id
+
     class Modes(models.TextChoices):
         PAYMENT = 'P', 'payment'
         SUBSCRIPTION = 'S', 'subscription'
@@ -133,37 +144,23 @@ class Product(models.Model):
         return f'<Product: {self.name}>'
 
     def get_alt_links(self, country: Optional[str] = None):
-        links = []
+        candidates = []
         if country == "IN":
-            if self.amazon_in_link:
-                links.append((
-                    "Buy on Amazon.in (print)",
-                    self.amazon_in_link))
-            if self.flipkart_link:
-                links.append((
-                    "Buy on Flipkart (print)",
-                    self.flipkart_link))
-        if self.amazon_link:
-            links.append((
-                "Buy on Amazon (print)",
-                self.amazon_link))
-        if self.bookshop_link:
-            links.append((
-                "Buy on Bookshop.org (support local bookstores)",
-                self.bookshop_link))
-        if self.isbn:
-            links.append((
-                "Read on O'Reilly Safari (free trial)",
-                "https://www.tkqlhce.com/click-7645222-14045081"))
-        if self.kindle_link:
-            links.append((
-                "Buy on Kindle (e-book)",
-                self.kindle_link))
-        if self.kickstarter:
-            links.append((
-                "Follow along on Kickstarter",
-                self.kickstarter))
-        return links
+            candidates += [
+                ("Buy on Amazon.in (print)", self.amazon_in_link),
+                ("Buy on Flipkart (print)", self.flipkart_link),
+            ]
+        candidates += [
+            ("Buy on Amazon (print)", self.amazon_link),
+            ("Buy on Bookshop.org (support local bookstores)",
+             self.bookshop_link),
+            ("Read on O'Reilly Safari (free trial)",
+             "https://www.tkqlhce.com/click-7645222-14045081"
+             if self.isbn else None),
+            ("Buy on Kindle (e-book)", self.kindle_link),
+            ("Follow along on Kickstarter", self.kickstarter),
+        ]
+        return [(label, url) for label, url in candidates if url]
 
     def is_physical_good(self) -> bool:
         return (self.mode == Product.Modes.PAYMENT
@@ -176,10 +173,7 @@ class Product(models.Model):
             return self.description
 
     def get_gtin(self):
-        if self.isbn:
-            return self.isbn
-        else:
-            return self.upc
+        return self.isbn or self.upc
 
     def get_availability(self):
         if self.preorder_only:
@@ -214,16 +208,10 @@ class Product(models.Model):
             return "Pigs Can Fly Labs"
 
     def get_sizes(self):
-        if self.sizes:
-            return self.sizes.split(",")
-        else:
-            return [None]
+        return self.sizes.split(",") if self.sizes else [None]
 
     def get_mpn(self):
-        if self.mpn:
-            return self.mpn
-        else:
-            return f"PCF{self.pk}"
+        return self.mpn or f"PCF{self.pk}"
 
 class Cart(models.Model):
     user = models.OneToOneField(
@@ -259,16 +247,13 @@ class CartProduct(models.Model):
     price_id = models.CharField(max_length=250, null=True)
 
     def generate_price_id(self):
-        # Fixture-loaded products skip Product.save() (loaddata uses raw
-        # saves), so generate their Stripe product id on first use.
-        if not self.product.external_product_id:
-            self.product.save()
+        external_product_id = self.product.ensure_external_product_id()
         if self.product.mode == Product.Modes.PAYMENT:
             price_id = Payments.create_price(
-                self.product.external_product_id, self.product.price, currency="usd")
+                external_product_id, self.product.price, currency="usd")
         else:
             price_id = Payments.create_price(
-                self.product.external_product_id, self.product.price, currency="usd",
+                external_product_id, self.product.price, currency="usd",
                 interval="year"
             )
         return price_id

@@ -54,9 +54,7 @@
         {% if has_physical %}
         <div class="row">
             <div class="col-lg-12">
-                <p class="shipping-notice" style="padding: 10px; border: 1px solid #f0ad4e; border-radius: 4px; background-color: #fcf8e3; color: #8a6d3b;">
-                    <strong>Heads up:</strong> shipping times for physical goods are currently long &mdash; please expect delays.
-                </p>
+                {% include 'components/shipping-notice.html' %}
             </div>
         </div>
         {% endif %}

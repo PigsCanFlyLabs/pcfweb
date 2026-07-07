@@ -25,10 +25,8 @@
     amazon_in_link: "https://www.amazon.in/dp/1449358624"
     flipkart_link: "https://www.flipkart.com/search?q=9781449358624"
     image_name: "learning_spark_1ed.jpg"
-    brand: "O'Reilly"
     cat: "B"
     tax_code: "txcd_35010000"
-    mode: "P"
 - model: main.product
   pk: 101
   fields:
@@ -46,10 +44,8 @@
     amazon_in_link: "https://www.amazon.in/dp/1491943203"
     flipkart_link: "https://www.flipkart.com/high-performance-spark-best-practices-scaling-optimizing-apache-english-paperback-rachel-warren-holden-karau/p/itm644125ec1f0e0"
     image_name: "high_performance_spark.jpg"
-    brand: "O'Reilly"
     cat: "B"
     tax_code: "txcd_35010000"
-    mode: "P"
 - model: main.product
   pk: 102
   fields:
@@ -67,10 +63,8 @@
     amazon_in_link: "https://www.amazon.in/dp/1492050121"
     flipkart_link: "https://www.flipkart.com/search?q=9781492050124"
     image_name: "kubeflow_for_ml.jpg"
-    brand: "O'Reilly"
     cat: "B"
     tax_code: "txcd_35010000"
-    mode: "P"
 - model: main.product
   pk: 103
   fields:
@@ -87,7 +81,5 @@
     amazon_in_link: "https://www.amazon.in/dp/1098118804"
     flipkart_link: "https://www.flipkart.com/search?q=9781098118808"
     image_name: "scaling_python_with_ray.jpg"
-    brand: "O'Reilly"
     cat: "B"
     tax_code: "txcd_35010000"
-    mode: "P"

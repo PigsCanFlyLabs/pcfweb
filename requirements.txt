@@ -17,11 +17,6 @@ sorl-thumbnail>=13,<14
 easy-thumbnails>=2.10,<3
 django-user-agents>=0.4,<0.5
 django-extensions>=4.1,<5
-werkzeug>=3.1,<4
-git+https://github.com/holdenk/static-thumbnails.git#egg=static-thumbnails
+git+https://github.com/holdenk/static-thumbnails.git@e19ab5adfca98c94e1405519239640ae974b0f00#egg=static-thumbnails
 # static-thumbnails still imports six (no longer pulled in transitively)
 six>=1.16,<2
-
-# Tooling
-mypy>=1.13,<1.19
-django-stubs==5.2.*

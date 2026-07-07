@@ -6,6 +6,9 @@ from main.models import Product
 from main.utils import get_client_ip
 
 SHIPPING_NOTICE_TEXT = "shipping times for physical goods are currently long"
+AMAZON_IN_LABEL = "Buy on Amazon.in (print)"
+FLIPKART_LABEL = "Buy on Flipkart (print)"
+BOOKSHOP_LABEL = "Buy on Bookshop.org (support local bookstores)"
 
 
 class InitialProductsFixtureTest(TestCase):
@@ -56,15 +59,15 @@ class InitialProductsFixtureTest(TestCase):
     def test_alt_links_without_country_skip_india_stores(self):
         book = Product.objects.get(pk=101)
         names = [name for name, _ in book.get_alt_links()]
-        self.assertNotIn("Buy on Amazon.in (print)", names)
-        self.assertNotIn("Buy on Flipkart (print)", names)
-        self.assertIn("Buy on Bookshop.org (support local bookstores)", names)
+        self.assertNotIn(AMAZON_IN_LABEL, names)
+        self.assertNotIn(FLIPKART_LABEL, names)
+        self.assertIn(BOOKSHOP_LABEL, names)
 
     def test_alt_links_for_india_lead_with_indian_stores(self):
         book = Product.objects.get(pk=101)
         names = [name for name, _ in book.get_alt_links(country="IN")]
-        self.assertEqual(names[0], "Buy on Amazon.in (print)")
-        self.assertEqual(names[1], "Buy on Flipkart (print)")
+        self.assertEqual(names[0], AMAZON_IN_LABEL)
+        self.assertEqual(names[1], FLIPKART_LABEL)
         self.assertIn("Buy on Amazon (print)", names)
 
     @mock.patch("main.views.get_country_code", return_value="IN")
@@ -72,14 +75,14 @@ class InitialProductsFixtureTest(TestCase):
         response = self.client.get("/product/101")
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "https://www.amazon.in/dp/1491943203")
-        self.assertContains(response, "Buy on Flipkart (print)")
+        self.assertContains(response, FLIPKART_LABEL)
 
     def test_book_page_hides_indian_links_by_default(self):
         # No GeoLite2 database in the test environment, so country is None.
         response = self.client.get("/product/101")
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, "amazon.in")
-        self.assertContains(response, "Buy on Bookshop.org (support local bookstores)")
+        self.assertContains(response, BOOKSHOP_LABEL)
 
 
 class ClientIpTest(TestCase):

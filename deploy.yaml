@@ -1,3 +1,18 @@
+# Shared app config for both web Deployments. The database itself is
+# deployed by pg-bootstrap.yaml (CloudNativePG); -rw is the write Service.
+# Listed after pcfweb-secret in envFrom, so these keys win over any stale
+# values in the secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pcfweb-db-config
+  namespace: pcfweb
+data:
+  DJANGO_CONFIGURATION: "Prod"
+  DBHOST: "pcfweb-pg-rw"
+  DBNAME: "pigscanfly"
+  DBUSER: "pigscanfly"
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,17 +47,6 @@ spec:
             value: "1"
           - name: PRIMARY
             value: "1"
-          - name: DJANGO_CONFIGURATION
-            value: "Prod"
-          # Explicit env beats envFrom, so the DB wiring below wins over any
-          # stale values in pcfweb-secret. The database itself is deployed by
-          # pg-bootstrap.yaml (CloudNativePG); -rw is the write Service.
-          - name: DBHOST
-            value: "pcfweb-pg-rw"
-          - name: DBNAME
-            value: "pigscanfly"
-          - name: DBUSER
-            value: "pigscanfly"
           - name: DBPASSWORD
             valueFrom:
               secretKeyRef:
@@ -51,6 +55,8 @@ spec:
           envFrom:
           - secretRef:
               name: pcfweb-secret
+          - configMapRef:
+              name: pcfweb-db-config
           imagePullPolicy: Always
           ports:
             - containerPort: 80
@@ -105,17 +111,6 @@ spec:
           env:
           - name: OAUTHLIB_RELAX_TOKEN_SCOPE
             value: "1"
-          - name: DJANGO_CONFIGURATION
-            value: "Prod"
-          # Explicit env beats envFrom, so the DB wiring below wins over any
-          # stale values in pcfweb-secret. The database itself is deployed by
-          # pg-bootstrap.yaml (CloudNativePG); -rw is the write Service.
-          - name: DBHOST
-            value: "pcfweb-pg-rw"
-          - name: DBNAME
-            value: "pigscanfly"
-          - name: DBUSER
-            value: "pigscanfly"
           - name: DBPASSWORD
             valueFrom:
               secretKeyRef:
@@ -124,6 +119,8 @@ spec:
           envFrom:
           - secretRef:
               name: pcfweb-secret
+          - configMapRef:
+              name: pcfweb-db-config
           imagePullPolicy: Always
           ports:
             - containerPort: 80

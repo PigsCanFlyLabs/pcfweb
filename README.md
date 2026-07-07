@@ -9,9 +9,10 @@ Requires Python 3.13 (matching the Docker image; 3.10+ works).
 
 ```bash
 python3.13 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-# cal-sync-magic is installed from a sibling checkout in the Docker image;
-# for local dev either clone it next to this repo or install from git:
+pip install -r requirements.txt -r requirements-dev.txt
+# cal-sync-magic is a private repo, installed from a sibling checkout in the
+# Docker image; it's optional (the calendar app disables itself when it's
+# missing). For calendar work, clone it next to this repo or:
 pip install git+https://github.com/holdenk/cal-sync-magic.git
 
 ./manage.py migrate
@@ -23,13 +24,11 @@ The `Dev` configuration (sqlite, file-based email in `sent_emails/`) is the
 default; set `ENVIRONMENT=Prod` (or `DJANGO_CONFIGURATION=Prod`) for the
 production settings class.
 
-Checks (also run by GitHub Actions on every PR — see
-`.github/workflows/ci.yml`):
+Checks — one script shared by local dev, `build.sh`, and GitHub Actions
+(`.github/workflows/ci.yml`):
 
 ```bash
-./manage.py test main
-./manage.py makemigrations --check --dry-run
-mypy -p main -p pigscanfly
+./scripts/checks.sh
 ```
 
 ## Environment variables

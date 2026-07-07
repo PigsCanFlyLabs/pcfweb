@@ -218,13 +218,6 @@ class Dev(Base):
     EMAIL_BACKEND = "django.core.mail.backends.filebased.EmailBackend"
     EMAIL_FILE_PATH = os.path.join(BASE_DIR, "sent_emails")
 
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        }
-    }
-
 
 class Prod(Base):
 
@@ -269,8 +262,11 @@ class Prod(Base):
                 "HOST": os.getenv("DBHOST"),
                 "ATOMIC_REQUESTS": False,
                 # psycopg3 native connection pooling; incompatible with
-                # CONN_MAX_AGE so leave that unset.
-                "OPTIONS": {"pool": True},
+                # CONN_MAX_AGE so leave that unset. Workers are single-request
+                # gunicorn sync workers, so keep the per-process pool tiny --
+                # the default min_size of 4 would park ~48 idle connections
+                # across the fleet on a 100-connection Postgres.
+                "OPTIONS": {"pool": {"min_size": 1, "max_size": 2}},
             }
         }
 

@@ -1,0 +1,5 @@
+# Dev / CI tooling; deliberately not installed in the production image.
+mypy>=1.13,<1.19
+django-stubs==5.2.*
+# runserver_plus (run_local.sh)
+werkzeug>=3.1,<4
