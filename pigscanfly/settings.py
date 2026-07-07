@@ -88,9 +88,18 @@ class Base(Configuration):
         'newsletter',
         'cookie_consent',
         'django_extensions',
-        "cal_sync_magic",
         "static_thumbnails",
     ]
+
+    # cal-sync-magic lives in a private repo; the Docker image installs it
+    # from a sibling checkout, but CI and fresh local clones may not have
+    # it. The calendar app (and its urls) simply turn off when absent.
+    try:
+        import cal_sync_magic  # noqa: F401
+        INSTALLED_APPS.append("cal_sync_magic")
+    except ImportError:
+        logger.warning(
+            "cal-sync-magic is not installed; calendar sync is disabled.")
 
     STATICFILES_FINDERS = (
         "django.contrib.staticfiles.finders.FileSystemFinder",
