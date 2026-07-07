@@ -40,8 +40,8 @@
   <g:region>941*</g:region>
   <g:service>SF Local Delivery</g:service>
   <g:price>0.0 USD</g:price>
-  <g:min_handling_time>1</g:min_handling_time>
-  <g:max_handling_time>7</g:max_handling_time>
+  <g:min_handling_time>3</g:min_handling_time>
+  <g:max_handling_time>21</g:max_handling_time>
   <g:min_transit_time>1</g:min_transit_time>
   <g:max_transit_time>3</g:max_transit_time>
 </g:shipping>
@@ -49,8 +49,8 @@
   <g:country>US</g:country>
   <g:service>US Economy Shipping</g:service>
   <g:price>10.0 USD</g:price>
-  <g:min_handling_time>1</g:min_handling_time>
-  <g:max_handling_time>7</g:max_handling_time>
+  <g:min_handling_time>3</g:min_handling_time>
+  <g:max_handling_time>21</g:max_handling_time>
   <g:min_transit_time>1</g:min_transit_time>
   <g:max_transit_time>14</g:max_transit_time>
 </g:shipping>
@@ -58,8 +58,8 @@
   <g:country>US</g:country>
   <g:service>Faster US Shipping</g:service>
   <g:price>30.0 USD</g:price>
-  <g:min_handling_time>1</g:min_handling_time>
-  <g:max_handling_time>7</g:max_handling_time>
+  <g:min_handling_time>3</g:min_handling_time>
+  <g:max_handling_time>21</g:max_handling_time>
   <g:min_transit_time>1</g:min_transit_time>
   <g:max_transit_time>7</g:max_transit_time>
 </g:shipping>
@@ -67,8 +67,8 @@
   <g:country>CA</g:country>
   <g:service>CA Economy Shipping</g:service>
   <g:price>10.0 USD</g:price>
-  <g:min_handling_time>1</g:min_handling_time>
-  <g:max_handling_time>7</g:max_handling_time>
+  <g:min_handling_time>3</g:min_handling_time>
+  <g:max_handling_time>21</g:max_handling_time>
   <g:min_transit_time>1</g:min_transit_time>
   <g:max_transit_time>21</g:max_transit_time>
 </g:shipping>

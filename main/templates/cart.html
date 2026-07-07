@@ -41,7 +41,7 @@
                                     <h6>{{ product.total_display_price }}</h6>
                                 </td>
                                 <td class="main-border-button">
-                                    <a href="{% url 'remove-from-cart' product.pk %}" class="" style="margin-top: 0;">X</button>
+                                    <a href="{% url 'remove-from-cart' product.pk %}" class="" style="margin-top: 0;">X</a>
                                 </td>
                             </tr>
                         {% endfor %}
@@ -50,6 +50,16 @@
                 </table>
             </div>
         </div>
+
+        {% if has_physical %}
+        <div class="row">
+            <div class="col-lg-12">
+                <p class="shipping-notice" style="padding: 10px; border: 1px solid #f0ad4e; border-radius: 4px; background-color: #fcf8e3; color: #8a6d3b;">
+                    <strong>Heads up:</strong> shipping times for physical goods are currently long &mdash; please expect delays.
+                </p>
+            </div>
+        </div>
+        {% endif %}
 
         <div class="row">
             <div class="col-lg-4 offset-lg-8">
@@ -65,7 +75,7 @@
 		    <form method="POST" action="{% url 'checkout' %}">
                       {% csrf_token %}
 		      Coupon (optional): <input type="text" name="coupon" />
-                      <button type="submit" class="proceed-btn">Proceed to Checkout</a>
+                      <button type="submit" class="proceed-btn">Proceed to Checkout</button>
 		    </form>
                 </div>
             </div>
