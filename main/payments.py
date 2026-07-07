@@ -75,8 +75,11 @@ class Payments:
                 ** extras
             )
             return checkout.url
-        except Exception:
-            del extras["discounts"]
+        except stripe.InvalidRequestError:
+            # Only retry when a coupon could have been the problem.
+            if "discounts" not in extras:
+                raise
+            extras.pop("discounts", None)
             checkout = stripe.checkout.Session.create(
                 line_items=items,
                 mode=mode,

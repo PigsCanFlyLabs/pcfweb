@@ -15,6 +15,7 @@ from typing import *
 from pathlib import Path
 
 from configurations import Configuration
+from django.core.exceptions import ImproperlyConfigured
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,9 @@ class Base(Configuration):
     if not os.path.exists(GOOGLE_CLIENT_SECRETS_FILE):
         secret = os.getenv("GOOGLE_CLIENT_SECRETS_TEXT")
         if secret is not None:
+            secrets_dir = os.path.dirname(GOOGLE_CLIENT_SECRETS_FILE)
+            if secrets_dir:
+                os.makedirs(secrets_dir, exist_ok=True)
             with open(GOOGLE_CLIENT_SECRETS_FILE, 'w') as f:
                 f.write(secret)
         else:
@@ -225,7 +229,11 @@ class Prod(Base):
 
     @property
     def SECRET_KEY(self):
-        return os.getenv("SECRET_KEY")
+        key = os.getenv("SECRET_KEY")
+        if not key:
+            raise ImproperlyConfigured(
+                "The SECRET_KEY environment variable must be set in Prod.")
+        return key
 
     @property
     def STRIPE_API_KEY(self):

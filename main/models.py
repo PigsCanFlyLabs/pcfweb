@@ -144,7 +144,7 @@ class Product(models.Model):
                 self.kindle_link))
         if self.kickstarter:
             links.append((
-                "Follow along on kick starter",
+                "Follow along on Kickstarter",
                 self.kickstarter))
         return links
 
