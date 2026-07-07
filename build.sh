@@ -1,15 +1,21 @@
 #!/bin/bash
 set -ex
 mypy -p main -p pigscanfly
+# Migrations must be committed, not generated at deploy time.
+./manage.py makemigrations --check --dry-run
 ./manage.py migrate
-./manage.py makemigrations
-./manage.py migrate
-./manage.py validate_templates --ignore-app newsletter
+./manage.py loaddata initial_products
 # Hack, for now.
 rm -rf ./cal-sync-magic
 cp -af ../cal-sync-magic ./
 rm -rf main/static/assets/images
 cp -af ../pcfweb-assets/images main/static/assets/
+# Tests render pages that thumbnail collected static assets, so collect first.
 ./manage.py collectstatic --no-input
-docker buildx build --platform=linux/amd64,linux/arm64 -t holdenk/pcfweb:v0.9.11b . --push
+./manage.py test main
+./manage.py validate_templates --ignore-app newsletter
+docker buildx build --platform=linux/amd64,linux/arm64 -t holdenk/pcfweb:v0.10.0 . --push
+# Deploy the database first (CloudNativePG cluster), then the app.
+kubectl apply -f pg-bootstrap.yaml
+kubectl wait --for=condition=Ready cluster/pcfweb-pg -n pcfweb --timeout=600s || true
 kubectl apply -f deploy.yaml
