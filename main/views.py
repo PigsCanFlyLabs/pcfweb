@@ -166,7 +166,7 @@ class GoogleProductFeed(View):
 class CartView(View, BaseCartView):
     def get(self, request):
         cart = self.get_cart(request)
-        cart_products = cart.products.all()
+        cart_products = cart.products.select_related("product")
         total_price = sum(map(lambda x: x.total_price(), cart_products))
         total_display_price = "{0:.2f}".format(total_price / 100)
         has_physical = any(cp.product.is_physical_good() for cp in cart_products)

@@ -61,7 +61,10 @@ class Base(Configuration):
             secrets_dir = os.path.dirname(GOOGLE_CLIENT_SECRETS_FILE)
             if secrets_dir:
                 os.makedirs(secrets_dir, exist_ok=True)
-            with open(GOOGLE_CLIENT_SECRETS_FILE, 'w') as f:
+            # Owner-only permissions; this holds an OAuth client secret.
+            fd = os.open(GOOGLE_CLIENT_SECRETS_FILE,
+                         os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w') as f:
                 f.write(secret)
         else:
             # Calendar sync features will fail at use time without this file,
