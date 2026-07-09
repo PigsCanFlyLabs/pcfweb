@@ -13,6 +13,7 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from django.apps import apps
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
@@ -21,10 +22,11 @@ from django.urls import include, path
 urlpatterns = [
     path("accounts/", include("django.contrib.auth.urls")),
     path('admin/', admin.site.urls),
-    path('/', include('main.urls')),
-    path('//', include('main.urls')),
     path('', include('main.urls')),
     path('newsletter/', include('newsletter.urls')),
     path("cookies/", include("cookie_consent.urls")),
-    path("calendar/", include("cal_sync_magic.urls")),
 ]
+
+# Optional private dependency; see the note in settings.INSTALLED_APPS.
+if apps.is_installed("cal_sync_magic"):
+    urlpatterns.append(path("calendar/", include("cal_sync_magic.urls")))

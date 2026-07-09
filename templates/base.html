@@ -34,7 +34,6 @@
 
     {% endblock custom_css %}
     {% load cookie_consent_tags %}
-    <script type="text/javascript" src={% static "cookie_consent/cookiebar.js" %}></script>
     {% if request|cookie_group_accepted:"analytics" or request.user_agent.is_bot  %}
     <!-- Google tag (gtag.js) - Google Analytics -->
     <script async src="https://www.googletagmanager.com/gtag/js?id=G-2EDT623L0V"></script>
@@ -44,9 +43,7 @@
       gtag('js', new Date());
       
       gtag('config', 'G-2EDT623L0V');
-      gtag('config', 'G-2EDT623L0V');
       gtag('config', 'AW-11060726723');
-      gtag('config', 'UA-10047168-1');
     </script>
     <!-- reddit -->
     <!-- Reddit Pixel -->
@@ -158,7 +155,7 @@
 		    <h4>Legal-ish</h4>
 		    <ul>
 			<li><a href="{% url 'tos' %}">Terms of Service</a></li>
-			<li><a href="{% url 'privacy' %}">Privacy</a></l>i
+			<li><a href="{% url 'privacy' %}">Privacy</a></li>
 			<li><a href="{% url 'returns' %}">Returns</a></li>
 		    </ul>
 		</div>
@@ -227,42 +224,30 @@
     </script>
 
     {% if request|cookie_consent_enabled %}
-      {% not_accepted_or_declined_cookie_groups request as cookie_groups %}
-
-      {% if cookie_groups %}
-	{% url "cookie_consent_cookie_group_list" as url_cookies %}
-	{% cookie_consent_accept_url cookie_groups as url_accept %}
-	{% cookie_consent_decline_url cookie_groups as url_decline %}
-	<script type="text/javascript">
-	  var cookie_groups = [];
-	  {% for cookie_group in cookie_groups %}
-	    cookie_groups.push("{{ cookie_group.varname }}");
-	  {% endfor %}
-
-	  function ready(fn) {
-		  if (document.readyState != 'loading') {
-		    fn();
-		  } else if (document.addEventListener) {
-		    document.addEventListener('DOMContentLoaded', fn);
-		  } else {
-		    document.attachEvent('onreadystatechange', function() {
-			  if (document.readyState != 'loading')
-			    fn();
-		    });
-		  }
-	  }
-
-	  ready(function() {
-		  showCookieBar({
-	      content: "{% filter escapejs %}{% with cookie_groups=cookie_groups|join:", " %}<div class="cookie-bar">Do you agree to use cookies? <a href="{{ url_accept }}" class="cc-cookie-accept">Accept</a> <a href="{{ url_decline }}" class="cc-cookie-decline">Decline</a> This site uses {{ cookie_groups }} cookies for better performance and user experience. <a href="{{ url_cookies }}">Cookies info</a></div>{% endwith %}{% endfilter %}",
-	      cookie_groups: cookie_groups,
-	      cookie_decline: "{% get_decline_cookie_groups_cookie_string request cookie_groups %}",
-	      beforeDeclined: function() {
-		document.cookie = "{% get_decline_cookie_groups_cookie_string request cookie_groups %}";
-	      }
-	    });
-	  });
-	</script>
+      {% not_accepted_or_declined_cookie_groups request as undecided_cookie_groups %}
+      {% if undecided_cookie_groups %}
+      {% url "cookie_consent_cookie_group_list" as url_cookies %}
+      <template id="cookie-consent__cookie-bar">
+	<div class="cookie-bar">Do you agree to use cookies?
+	  <a href="#" class="cookie-consent__accept cc-cookie-accept">Accept</a>
+	  <a href="#" class="cookie-consent__decline cc-cookie-decline">Decline</a>
+	  This site uses cookies for better performance and user experience.
+	  <a href="{{ url_cookies }}">Cookies info</a>
+	</div>
+      </template>
+      {% all_cookie_groups 'cookie-consent__cookie-groups' %}
+      <script type="module">
+	import { showCookieBar } from '{% static "cookie_consent/cookiebar.module.js" %}';
+	showCookieBar({
+	  statusUrl: '{% url "cookie_consent_status" %}',
+	  templateSelector: '#cookie-consent__cookie-bar',
+	  cookieGroupsSelector: '#cookie-consent__cookie-groups',
+	  acceptSelector: '.cookie-consent__accept',
+	  declineSelector: '.cookie-consent__decline',
+	  // Analytics tags are gated server-side, so reload to pick them up.
+	  onAccept: () => window.location.reload(),
+	});
+      </script>
       {% endif %}
     {% endif %}
     {% block custom_js %}

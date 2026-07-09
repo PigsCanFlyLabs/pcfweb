@@ -11,7 +11,6 @@ urlpatterns = [
     path('products/<str:category>', views.ProductsView.as_view(), name="products"),
     path('subscribe', views.SubscribeView.as_view(), name="subscribe"),
     path('product/<int:pk>', views.ProductView.as_view(), name="product"),
-    path('product/<str:name>', views.ProductView.as_view(), name="product"),
     path('google_products.xml', views.GoogleProductFeed.as_view(), name='googleproducts'),
 
     # Cart
@@ -38,7 +37,7 @@ urlpatterns = [
     path('about', views.AboutView.as_view(), name="about"),
     path('contact', views.ContactView.as_view(), name="contact"),
     path('tos', views.TosView.as_view(), name='tos'),
-    path('privacy', views.TosView.as_view(), name='privacy'),
+    path('privacy', views.PrivacyView.as_view(), name='privacy'),
     path('returns', views.ReturnView.as_view(), name='returns'),
 
 

@@ -1,7 +1,7 @@
 import stripe
 from django.conf import settings
 from django.urls import reverse
-from typing import Optional
+from typing import Literal, Optional
 
 
 class Payments:
@@ -16,7 +16,8 @@ class Payments:
         return product['id']
 
     @classmethod
-    def create_price(cls, product_id: str, price: int, currency: str = "usd", interval: Optional[str] = None) -> str:
+    def create_price(cls, product_id: str, price: int, currency: str = "usd",
+                     interval: Optional[Literal["day", "week", "month", "year"]] = None) -> str:
         product_price = None
         if interval is None:
             product_price = stripe.Price.create(
@@ -60,7 +61,6 @@ class Payments:
                                    ])
             extras["shipping_options"] = list(shipping_options)
 
-        print(f"Stuff {extras}")
         if any(map (lambda x: x == Product.Modes.PAYMENT, product_modes)) or mode == "payment":
             extras["shipping_address_collection"] = {"allowed_countries": ["US", "CA"]}
 
@@ -75,8 +75,11 @@ class Payments:
                 ** extras
             )
             return checkout.url
-        except:
-            del extras["discounts"]
+        except stripe.InvalidRequestError:
+            # Only retry when a coupon could have been the problem.
+            if "discounts" not in extras:
+                raise
+            extras.pop("discounts", None)
             checkout = stripe.checkout.Session.create(
                 line_items=items,
                 mode=mode,

@@ -11,7 +11,7 @@ from django.views import View
 
 from main.models import Cart, CartProduct, Product
 from main.payments import Payments
-from main.utils import generate_username
+from main.utils import generate_username, get_country_code
 
 
 # Create your views here.
@@ -95,7 +95,11 @@ class SubscribeView(View):
 class ProductView(View):
     def get(self, request, pk):
         product = Product.objects.get(pk=pk)
-        return render(request, 'single-product.html', context={'title': product.name, 'product': product})
+        return render(request, 'single-product.html', context={
+            'title': product.name,
+            'product': product,
+            'alt_links': product.get_alt_links(country=get_country_code(request)),
+        })
 
 class BaseCartView():
     """Common base cart view."""
@@ -127,7 +131,6 @@ class BaseCartView():
 class SignupView(View):
     def get(self, request):
         in_use = request.GET.get('in_use', 'false')
-        print(in_use)
         return render(request, 'signup.html', context={'title': 'Sign Up', 'in_use': in_use})
 
     def post(self, request):
@@ -163,10 +166,16 @@ class GoogleProductFeed(View):
 class CartView(View, BaseCartView):
     def get(self, request):
         cart = self.get_cart(request)
-        print(f"Got cart {cart} with {cart.products.all()}")
-        total_price = sum(map(lambda x: x.total_price(), cart.products.all()))
+        cart_products = cart.products.select_related("product")
+        total_price = sum(map(lambda x: x.total_price(), cart_products))
         total_display_price = "{0:.2f}".format(total_price / 100)
-        return render(request, 'cart.html', context={'title': 'Cart', 'products': cart.products.all(), 'total_price': total_display_price})
+        has_physical = any(cp.product.is_physical_good() for cp in cart_products)
+        return render(request, 'cart.html', context={
+            'title': 'Cart',
+            'products': cart_products,
+            'total_price': total_display_price,
+            'has_physical': has_physical,
+        })
 
 
 class AddToCartView(View, BaseCartView):

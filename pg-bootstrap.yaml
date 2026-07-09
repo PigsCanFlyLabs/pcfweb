@@ -1,0 +1,127 @@
+# In-cluster Postgres for pcfweb, managed by the CloudNativePG operator.
+#
+# Prerequisites (out of band, never committed here):
+#   * The CloudNativePG operator is installed cluster-wide
+#     (https://cloudnative-pg.io/).
+#   * The `encrypted-local-path` StorageClass exists.
+#   * These Secrets exist in the `pcfweb` namespace:
+#       - pcfweb-superuser-pg-secret  (kubernetes.io/basic-auth:
+#         username=postgres, password=...)
+#       - pcfweb-internal-pg-secret   (kubernetes.io/basic-auth:
+#         username=pigscanfly, password=...)
+#       - pg-backup                   (PG_ACCESS_KEY_ID / PG_ACCESS_SECRET_KEY
+#         for the pcfweb-pg-backup B2 bucket)
+#
+# The app connects through the operator-created `pcfweb-pg-rw` Service
+# (see deploy.yaml env wiring).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pcfweb-pg
+  namespace: pcfweb
+spec:
+  # Three Postgres instances spread across nodes as much as possible
+  instances: 3
+
+  #############################################################
+  # Storage
+  #############################################################
+  storage:
+    pvcTemplate:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+      storageClassName: encrypted-local-path
+      volumeMode: Filesystem
+
+  #############################################################
+  # Anti-affinity (spread pods across nodes when possible)
+  #############################################################
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: preferred
+    topologyKey: kubernetes.io/hostname
+
+  #############################################################
+  # Monitoring
+  #############################################################
+  monitoring:
+    enablePodMonitor: false
+
+  #############################################################
+  # Superuser
+  # (this Secret must contain {username,password})
+  #############################################################
+  superuserSecret:
+    name: pcfweb-superuser-pg-secret
+
+  #############################################################
+  # Bootstrap with an app database + app user from your secret
+  #############################################################
+  bootstrap:
+    initdb:
+      # Name of the database the app uses
+      database: pigscanfly
+      # Postgres ROLE to create; username + password come from the Secret
+      owner: pigscanfly
+      secret:
+        name: pcfweb-internal-pg-secret
+
+  #############################################################
+  # Declarative Role Management
+  # (keeps the app user's role + password in sync)
+  #############################################################
+  managed:
+    roles:
+      - name: pigscanfly
+        ensure: present
+        login: true
+        superuser: false
+        createdb: false
+        createrole: false
+        inherit: true
+        replication: false
+        passwordSecret:
+          name: pcfweb-internal-pg-secret
+
+  backup:
+    barmanObjectStore:
+      destinationPath: "s3://pcfweb-pg-backup/"
+      endpointURL: "https://s3.us-west-004.backblazeb2.com"
+      s3Credentials:
+        accessKeyId:
+          name: pg-backup
+          key: PG_ACCESS_KEY_ID
+        secretAccessKey:
+          name: pg-backup
+          key: PG_ACCESS_SECRET_KEY
+
+      wal:
+        compression: bzip2
+        maxParallel: 4
+
+      data:
+        compression: bzip2
+    retentionPolicy: "30d"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Backup
+metadata:
+  name: pcfweb-pg-backup-manual
+  namespace: pcfweb
+spec:
+  cluster:
+    name: pcfweb-pg
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: pcfweb-pg-nightly
+  namespace: pcfweb
+spec:
+  schedule: "0 0 0 * * *"
+  backupOwnerReference: self
+  cluster:
+    name: pcfweb-pg

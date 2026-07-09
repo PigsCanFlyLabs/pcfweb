@@ -1,3 +1,18 @@
+# Shared app config for both web Deployments. The database itself is
+# deployed by pg-bootstrap.yaml (CloudNativePG); -rw is the write Service.
+# Listed after pcfweb-secret in envFrom, so these keys win over any stale
+# values in the secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pcfweb-db-config
+  namespace: pcfweb
+data:
+  DJANGO_CONFIGURATION: "Prod"
+  DBHOST: "pcfweb-pg-rw"
+  DBNAME: "pigscanfly"
+  DBUSER: "pigscanfly"
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,7 +36,7 @@ spec:
             secretName: client-secret
             optional: false
       containers:
-        - image: holdenk/pcfweb:v0.9.11b
+        - image: holdenk/pcfweb:v0.10.0
           name: pcfweb
           volumeMounts:
             - name: client-secret
@@ -32,11 +47,16 @@ spec:
             value: "1"
           - name: PRIMARY
             value: "1"
-          - name: ATOMIC_REQUESTS
-            value: "False"
+          - name: DBPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: pcfweb-internal-pg-secret
+                key: password
           envFrom:
           - secretRef:
               name: pcfweb-secret
+          - configMapRef:
+              name: pcfweb-db-config
           imagePullPolicy: Always
           ports:
             - containerPort: 80
@@ -82,7 +102,7 @@ spec:
             secretName: client-secret
             optional: false
       containers:
-        - image: holdenk/pcfweb:v0.9.11b
+        - image: holdenk/pcfweb:v0.10.0
           name: pcfweb
           volumeMounts:
             - name: client-secret
@@ -91,11 +111,16 @@ spec:
           env:
           - name: OAUTHLIB_RELAX_TOKEN_SCOPE
             value: "1"
-          - name: ATOMIC_REQUESTS
-            value: "False"
+          - name: DBPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: pcfweb-internal-pg-secret
+                key: password
           envFrom:
           - secretRef:
               name: pcfweb-secret
+          - configMapRef:
+              name: pcfweb-db-config
           imagePullPolicy: Always
           ports:
             - containerPort: 80

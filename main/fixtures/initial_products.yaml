@@ -1,0 +1,85 @@
+# Bootstrap products: Holden's books.
+#
+# These rows are fixture-owned: they use pks 100+ so they don't collide with
+# products created directly in prod, and they are re-loaded on every deploy
+# (web-primary runs `manage.py loaddata initial_products` after migrate), so
+# edits made in the admin to these pks will be overwritten -- edit this file
+# instead.
+#
+# external_product_id is intentionally unset; the Stripe product id is
+# generated lazily on first add-to-cart (see CartProduct.generate_price_id).
+- model: main.product
+  pk: 100
+  fields:
+    name: "Learning Spark (1st edition)"
+    description: >-
+      Data in all domains is getting bigger, and Apache Spark makes working
+      with it fast and expressive. Written by the early Spark team (including
+      Holden Karau), this book introduces Spark's core APIs in Python, Java,
+      and Scala -- from simple batch jobs to streaming and MLlib.
+    price: 3999
+    isbn: "9781449358624"
+    amazon_link: "https://www.amazon.com/dp/1449358624"
+    # 2015 1st edition has no bookshop.org product page; link to its search.
+    bookshop_link: "https://bookshop.org/search?keywords=9781449358624"
+    amazon_in_link: "https://www.amazon.in/dp/1449358624"
+    flipkart_link: "https://www.flipkart.com/search?q=9781449358624"
+    image_name: "learning_spark_1ed.jpg"
+    cat: "B"
+    tax_code: "txcd_35010000"
+- model: main.product
+  pk: 101
+  fields:
+    name: "High Performance Spark"
+    description: >-
+      Best practices for scaling and optimizing Apache Spark. If you've used
+      Spark to solve medium-sized problems but still struggle to realize the
+      promise of unparalleled performance on big data, this book by Holden
+      Karau and Rachel Warren shows you how to make your queries run faster,
+      handle larger data sizes, and use fewer resources.
+    price: 4999
+    isbn: "9781491943205"
+    amazon_link: "https://www.amazon.com/dp/1491943203"
+    bookshop_link: "https://bookshop.org/p/books/high-performance-spark-best-practices-for-scaling-and-optimizing-apache-spark-holden-karau/8133976"
+    amazon_in_link: "https://www.amazon.in/dp/1491943203"
+    flipkart_link: "https://www.flipkart.com/high-performance-spark-best-practices-scaling-optimizing-apache-english-paperback-rachel-warren-holden-karau/p/itm644125ec1f0e0"
+    image_name: "high_performance_spark.jpg"
+    cat: "B"
+    tax_code: "txcd_35010000"
+- model: main.product
+  pk: 102
+  fields:
+    name: "Kubeflow for Machine Learning"
+    description: >-
+      From lab to production: a practical guide to building production-grade
+      machine learning implementations with Kubeflow, the Kubernetes-native ML
+      toolkit -- covering data preparation, model training, and serving. By
+      Trevor Grant, Holden Karau, Boris Lublinsky, Richard Liu, and Ilan
+      Filonenko.
+    price: 4999
+    isbn: "9781492050124"
+    amazon_link: "https://www.amazon.com/dp/1492050121"
+    bookshop_link: "https://bookshop.org/books/kubeflow-for-machine-learning-from-lab-to-production/9781492050124"
+    amazon_in_link: "https://www.amazon.in/dp/1492050121"
+    flipkart_link: "https://www.flipkart.com/search?q=9781492050124"
+    image_name: "kubeflow_for_ml.jpg"
+    cat: "B"
+    tax_code: "txcd_35010000"
+- model: main.product
+  pk: 103
+  fields:
+    name: "Scaling Python with Ray"
+    description: >-
+      Adventures in cloud and serverless patterns: Holden Karau and Boris
+      Lublinsky show you how to scale your Python applications and ML
+      pipelines with Ray -- from your laptop to a cluster -- without the
+      complexity of traditional distributed systems.
+    price: 6599
+    isbn: "9781098118808"
+    amazon_link: "https://www.amazon.com/dp/1098118804"
+    bookshop_link: "https://bookshop.org/search?keywords=9781098118808"
+    amazon_in_link: "https://www.amazon.in/dp/1098118804"
+    flipkart_link: "https://www.flipkart.com/search?q=9781098118808"
+    image_name: "scaling_python_with_ray.jpg"
+    cat: "B"
+    tax_code: "txcd_35010000"

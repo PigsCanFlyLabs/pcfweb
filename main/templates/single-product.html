@@ -60,6 +60,9 @@
 		      {{ product.get_display_text }}
 		      {% endautoescape %}
 		    </span>
+		    {% if product.is_physical_good %}
+		    {% include 'components/shipping-notice.html' %}
+		    {% endif %}
 		    <div class="quantity-content">
 			<div class="left-content">
 			    <h6>No. of Orders</h6>
@@ -80,7 +83,7 @@
 			    {{product.buy_text}}
 			</button></div>
 			{% endif %}
-			{% for alt_link_name, alt_link in product.get_alt_links %}
+			{% for alt_link_name, alt_link in alt_links %}
 			<div class="main-border-button"><a href="{{alt_link}}" class="altbtn">{{alt_link_name}}</a></div>
 			{% endfor %}
 		    </div>
