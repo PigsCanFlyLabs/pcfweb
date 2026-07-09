@@ -1,5 +1,5 @@
 .git
-cal-sync-magic/.git
+cal-sync-magic
 db.sqlite3
 db.sqlite3-journal
 sent_emails

@@ -43,26 +43,11 @@ COPY conf/nginx.default /etc/nginx/sites-available/default
 RUN ln -sf /dev/stdout /var/log/nginx/access.log \
     && ln -sf /dev/stderr /var/log/nginx/error.log
 
-# The app dir itself stays www-data-writable (settings can materialize the
-# Google client secret file there when configured via env).
-RUN mkdir -p /opt/app /opt/app/media && chown www-data:www-data /opt/app /opt/app/media
+# media/ holds admin-uploaded files (e.g. product images).
+RUN mkdir -p /opt/app/media && chown www-data:www-data /opt/app/media
 COPY requirements.txt /opt/app/
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r /opt/app/requirements.txt
-
-# cal-sync-magic is a private repo that build.sh stages into the build
-# context. On a clean clone the [c] glob matches nothing, the
-# requirements.txt anchor keeps COPY satisfied, and the calendar app is
-# simply left out of the image (it's optional in settings too). Installed
-# before the app source so code changes don't re-resolve its dependencies.
-COPY requirements.txt cal-sync-magi[c] /opt/app/libs/cal-sync-magic/
-RUN if [ -e /opt/app/libs/cal-sync-magic/setup.py ] \
-      || [ -e /opt/app/libs/cal-sync-magic/setup.cfg ] \
-      || [ -e /opt/app/libs/cal-sync-magic/pyproject.toml ]; then \
-      pip install --no-cache-dir -e /opt/app/libs/cal-sync-magic; \
-    else \
-      echo "cal-sync-magic not in build context; calendar app disabled"; \
-    fi
 
 ENV GEOIP_PATH=/opt/app/geoip
 COPY --from=geoip --chown=www-data:www-data /geoip /opt/app/geoip

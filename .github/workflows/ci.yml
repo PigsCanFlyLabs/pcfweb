@@ -15,8 +15,6 @@ jobs:
           python-version: "3.13"
           cache: pip
       - name: Install dependencies
-        # cal-sync-magic is a private repo, so CI runs without it — the
-        # calendar app is optional and turns itself off when not installed.
         run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Checks
         run: ./scripts/checks.sh

@@ -10,10 +10,6 @@ Requires Python 3.13 (matching the Docker image; 3.10+ works).
 ```bash
 python3.13 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
-# cal-sync-magic is a private repo, installed from a sibling checkout in the
-# Docker image; it's optional (the calendar app disables itself when it's
-# missing). For calendar work, clone it next to this repo or:
-pip install git+https://github.com/holdenk/cal-sync-magic.git
 
 ./manage.py migrate
 ./manage.py loaddata initial_products
@@ -40,7 +36,6 @@ Checks — one script shared by local dev, `build.sh`, and GitHub Actions
 | `STRIPE_LIVE_SECRET_KEY` | Prod | Live Stripe key. |
 | `DBHOST` / `DBNAME` / `DBUSER` / `DBPASSWORD` | Prod | Postgres connection; wired in `deploy.yaml` to the in-cluster DB. |
 | `EMAIL_HOST` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | Prod | SMTP. |
-| `GOOGLE_CLIENT_SECRETS_FILE` / `GOOGLE_CLIENT_SECRETS_TEXT` | cal-sync-magic | Calendar sync; optional, warns when absent. |
 | `MAXMIND_LICENSE_KEY` | build.sh (image build) | Bundles the GeoLite2 country DB for region-specific buy links; optional. |
 | `GEOIP_PATH` | all | Directory holding `GeoLite2-Country.mmdb`; defaults to `<repo>/geoip` (set to `/opt/app/geoip` in the image). |
 
@@ -103,7 +98,6 @@ Service; `DBHOST`/`DBNAME`/`DBUSER` are set directly in `deploy.yaml` and
    - `pg-backup` — `PG_ACCESS_KEY_ID` / `PG_ACCESS_SECRET_KEY` for the
      `pcfweb-pg-backup` B2 bucket (use a bucket dedicated to pcfweb).
    - `pcfweb-secret` — the app env (SECRET_KEY, Stripe, email, …).
-   - `client-secret` — the Google OAuth client json volume.
 
 ### One-time MySQL → Postgres data migration
 
@@ -111,7 +105,10 @@ The site previously ran against an external MySQL. To carry data over:
 
 1. From a checkout of the last pre-Postgres revision (which still has the
    MySQL settings) with access to the old DB:
-   `./manage.py dumpdata --natural-foreign -e contenttypes -e auth.Permission -e sessions -o prod-dump.json`
+   `./manage.py dumpdata --natural-foreign -e contenttypes -e auth.Permission -e sessions -e cal_sync_magic -o prod-dump.json`
+   (calendar sync no longer ships in this repo, so its rows can't be loaded
+   here; drop `-e cal_sync_magic` if that old checkout doesn't have the
+   calendar app installed.)
 2. On this revision: `kubectl -n pcfweb port-forward svc/pcfweb-pg-rw 5432:5432`,
    set `DBHOST=127.0.0.1` etc., then `./manage.py migrate` and
    `./manage.py loaddata prod-dump.json`.
