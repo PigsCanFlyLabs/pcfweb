@@ -1,8 +1,6 @@
 #!/bin/bash
 set -ex
 # Hack, for now.
-rm -rf ./cal-sync-magic
-cp -af ../cal-sync-magic ./
 rm -rf main/static/assets/images
 cp -af ../pcfweb-assets/images main/static/assets/
 ./scripts/checks.sh

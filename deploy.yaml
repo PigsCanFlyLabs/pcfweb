@@ -30,21 +30,10 @@ spec:
       labels:
         app: web-primary
     spec:
-      volumes:
-        - name: client-secret
-          secret:
-            secretName: client-secret
-            optional: false
       containers:
         - image: holdenk/pcfweb:v0.10.0
           name: pcfweb
-          volumeMounts:
-            - name: client-secret
-              mountPath: "/opt/app/client_secret/"
-              readOnly: true
           env:
-          - name: OAUTHLIB_RELAX_TOKEN_SCOPE
-            value: "1"
           - name: PRIMARY
             value: "1"
           - name: DBPASSWORD
@@ -96,21 +85,10 @@ spec:
       labels:
         app: pcfweb
     spec:
-      volumes:
-        - name: client-secret
-          secret:
-            secretName: client-secret
-            optional: false
       containers:
         - image: holdenk/pcfweb:v0.10.0
           name: pcfweb
-          volumeMounts:
-            - name: client-secret
-              mountPath: "/opt/app/client_secret/"
-              readOnly: true
           env:
-          - name: OAUTHLIB_RELAX_TOKEN_SCOPE
-            value: "1"
           - name: DBPASSWORD
             valueFrom:
               secretKeyRef:

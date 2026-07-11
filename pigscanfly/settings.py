@@ -7,7 +7,6 @@ Select one with the DJANGO_CONFIGURATION environment variable (see manage.py).
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
-import logging
 import os
 
 from typing import *
@@ -16,8 +15,6 @@ from pathlib import Path
 
 from configurations import Configuration
 from django.core.exceptions import ImproperlyConfigured
-
-logger = logging.getLogger(__name__)
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -44,35 +41,6 @@ class Base(Configuration):
 
     ALLOWED_HOSTS: List[str] = ['localhost', '127.0.0.1']
 
-    GOOGLE_CLIENT_SECRETS_FILE = os.getenv(
-        "GOOGLE_CLIENT_SECRETS_FILE",
-        "client_secret.json")
-
-    if not os.path.exists(GOOGLE_CLIENT_SECRETS_FILE):
-        GOOGLE_CLIENT_SECRETS_FILE = "../cal-sync-magic/client_secret.json"
-
-    if not os.path.exists(GOOGLE_CLIENT_SECRETS_FILE):
-        GOOGLE_CLIENT_SECRETS_FILE = "client_secret/client_secret.json"
-
-    # If we don't have a secret file but we have the text make it.
-    if not os.path.exists(GOOGLE_CLIENT_SECRETS_FILE):
-        secret = os.getenv("GOOGLE_CLIENT_SECRETS_TEXT")
-        if secret is not None:
-            secrets_dir = os.path.dirname(GOOGLE_CLIENT_SECRETS_FILE)
-            if secrets_dir:
-                os.makedirs(secrets_dir, exist_ok=True)
-            # Owner-only permissions; this holds an OAuth client secret.
-            fd = os.open(GOOGLE_CLIENT_SECRETS_FILE,
-                         os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, 'w') as f:
-                f.write(secret)
-        else:
-            # Calendar sync features will fail at use time without this file,
-            # but everything else (manage.py, tests, the store) should work.
-            logger.warning(
-                "No Google client secret file or GOOGLE_CLIENT_SECRETS_TEXT "
-                "env var found; calendar sync will be unavailable.")
-
     # Application definition
 
     SITE_ID=1
@@ -93,16 +61,6 @@ class Base(Configuration):
         'django_extensions',
         "static_thumbnails",
     ]
-
-    # cal-sync-magic lives in a private repo; the Docker image installs it
-    # from a sibling checkout, but CI and fresh local clones may not have
-    # it. The calendar app (and its urls) simply turn off when absent.
-    try:
-        import cal_sync_magic  # noqa: F401
-        INSTALLED_APPS.append("cal_sync_magic")
-    except ImportError:
-        logger.warning(
-            "cal-sync-magic is not installed; calendar sync is disabled.")
 
     STATICFILES_FINDERS = (
         "django.contrib.staticfiles.finders.FileSystemFinder",
