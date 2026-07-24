@@ -1,8 +1,6 @@
 .git
 .env
 *.pem
-cert.pem
-key.pem
 db.sqlite3
 db.sqlite3-journal
 sent_emails

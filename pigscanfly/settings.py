@@ -193,9 +193,13 @@ class Prod(Base):
     SECURE_SSL_REDIRECT = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
+    # Ramp HSTS gradually: 3600 -> 86400 -> 31536000 after HTTPS is stable.
+    # Only add includeSubDomains/preload after verifying every current and
+    # planned pigscanfly.ca subdomain serves HTTPS; preload is effectively
+    # irreversible. Silence the deploy checks that ask for those flags during
+    # this conservative ramp.
     SECURE_HSTS_SECONDS = 3600
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
+    SILENCED_SYSTEM_CHECKS = ["security.W005", "security.W021"]
     CSRF_TRUSTED_ORIGINS = [
         "https://www.pigscanfly.ca",
         "https://pigscanfly.ca",
