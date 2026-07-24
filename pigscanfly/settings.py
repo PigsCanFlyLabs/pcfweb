@@ -25,7 +25,6 @@ class Base(Configuration):
     COOKIE_CONSENT_LOG_ENABLED = True
     LOGIN_URL = 'login'
     LOGIN_REDIRECT_URL = '/'
-    THUMBNAIL_DEBUG = True
 
     # SECURITY WARNING: keep the secret key used in production secret!
     # The fallback is for local development only; Prod requires the env var.
@@ -170,6 +169,7 @@ class Base(Configuration):
 
 class Dev(Base):
     DEBUG = True
+    THUMBNAIL_DEBUG = True
 
     ALLOWED_HOSTS: List[str] = ['*']
 
@@ -190,6 +190,12 @@ class Prod(Base):
     # TLS terminates at the ingress; trust its forwarded proto header so
     # CSRF origin checking sees https.
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 3600
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
     CSRF_TRUSTED_ORIGINS = [
         "https://www.pigscanfly.ca",
         "https://pigscanfly.ca",
