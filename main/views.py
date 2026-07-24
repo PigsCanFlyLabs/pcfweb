@@ -239,6 +239,13 @@ class CartView(View, BaseCartView):
 
 
 class AddToCartView(View, BaseCartView):
+    # What a PositiveBigIntegerField can physically hold. Python ints are
+    # arbitrary precision, so without this a 20-digit quantity parses happily
+    # and then 500s at write time on BIGINT overflow. This is a storage
+    # capacity guard, not a purchase limit -- whether there should be a
+    # product-level cap on quantity is a separate, still-open decision.
+    MAX_QUANTITY = 9223372036854775807
+
     # POST only: a GET here is triggerable cross-site by an <img> tag or a
     # link prefetch, with no CSRF token involved.
     def post(self, request, product_id: int, quantity: int):
@@ -251,8 +258,12 @@ class AddToCartView(View, BaseCartView):
                 quantity = int(posted_quantity)
             except ValueError:
                 return HttpResponseBadRequest("Quantity must be a number.")
+        # Both paths converge here, so neither can disagree about the bounds.
         if quantity < 1:
             return HttpResponseBadRequest("Quantity must be at least 1.")
+        if quantity > self.MAX_QUANTITY:
+            return HttpResponseBadRequest(
+                f"Quantity must be at most {self.MAX_QUANTITY}.")
         product = get_object_or_404(Product, pk=product_id)
         cart = self.get_cart(request)
 

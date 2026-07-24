@@ -7,6 +7,7 @@ from django.test import Client, RequestFactory, TestCase, override_settings
 
 from main.models import Cart, CartProduct, Product
 from main.utils import get_client_ip
+from main.views import AddToCartView
 
 SHIPPING_NOTICE_TEXT = "shipping times for physical goods are currently long"
 AMAZON_IN_LABEL = "Buy on Amazon.in (print)"
@@ -322,6 +323,28 @@ class AddToCartWithoutJavascriptTest(CartTestBase):
             self.client.post("/add-to-cart/100/1", {"quantity": "0"}).status_code,
             400)
         self.assertFalse(CartProduct.objects.exists())
+
+    def test_a_quantity_too_big_for_the_column_is_a_400_not_a_500(self):
+        # Python ints are unbounded; BIGINT is not, so an oversized quantity
+        # used to parse fine and then blow up at write time.
+        too_big = AddToCartView.MAX_QUANTITY + 1
+
+        posted = self.client.post("/add-to-cart/100/1", {"quantity": str(too_big)})
+        self.assertEqual(posted.status_code, 400)
+
+        from_url = self.client.post(f"/add-to-cart/100/{too_big}")
+        self.assertEqual(from_url.status_code, 400)
+
+        self.assertFalse(CartProduct.objects.exists())
+
+    def test_the_largest_storable_quantity_still_works(self):
+        # The bound is the column's capacity, so its exact value is valid.
+        response = self.client.post(
+            "/add-to-cart/100/1", {"quantity": str(AddToCartView.MAX_QUANTITY)})
+
+        self.assertRedirects(response, "/cart")
+        self.assertEqual(
+            CartProduct.objects.get().quantity, AddToCartView.MAX_QUANTITY)
 
     def test_a_non_numeric_posted_quantity_is_a_400(self):
         self.assertEqual(
