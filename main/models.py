@@ -106,7 +106,8 @@ class Product(models.Model):
         else:
             return formatted_price
     def get_absolute_url(self) -> str:
-        return reverse('product', kwargs={'product_id': self.product_id})
+        # The route is product/<int:pk>, so the kwarg has to be pk.
+        return reverse('product', kwargs={'pk': self.pk})
 
     def get_image_url(self) -> Optional[str]:
         try:
@@ -225,7 +226,17 @@ class Cart(models.Model):
         'CartProduct', related_name='cart_products')
 
     def clear(self):
-        self.products.remove(*self.products.all())
+        """Empty the cart.
+
+        Dropping the M2M links alone leaves the CartProduct rows behind
+        forever, so delete the rows too -- both the ones linked through the
+        M2M and any that only carry the cart FK.
+        """
+        cart_product_ids = set(self.products.values_list('pk', flat=True))
+        cart_product_ids |= set(
+            CartProduct.objects.filter(cart=self).values_list('pk', flat=True))
+        self.products.clear()
+        CartProduct.objects.filter(pk__in=cart_product_ids).delete()
 
     def __str__(self) -> str:
         if self.user is not None:
@@ -245,6 +256,15 @@ class CartProduct(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     quantity = models.PositiveBigIntegerField(default=1)
     price_id = models.CharField(max_length=250, null=True)
+
+    class Meta:
+        # Without this, two concurrent adds of the same product race into two
+        # rows, and every later lookup of that (cart, product) blows up with
+        # MultipleObjectsReturned.
+        constraints = [
+            models.UniqueConstraint(
+                fields=['cart', 'product'], name='unique_cart_product'),
+        ]
 
     def generate_price_id(self):
         external_product_id = self.product.ensure_external_product_id()

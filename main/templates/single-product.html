@@ -79,9 +79,13 @@
 		    <div class="total">
 			<h4 class="calc-total">Total: </h4>
 			{% if not product.noorder %}
-			<div class="main-border-button"><button onclick="addToCart()" style="margin-top: 0;">
-			    {{product.buy_text}}
-			</button></div>
+			<form id="add-to-cart-form" method="POST"
+			      data-add-url="{% url 'add-to-cart' product_id=product.pk quantity=0 %}">
+			    {% csrf_token %}
+			    <div class="main-border-button"><button type="submit" style="margin-top: 0;">
+				{{product.buy_text}}
+			    </button></div>
+			</form>
 			{% endif %}
 			{% for alt_link_name, alt_link in alt_links %}
 			<div class="main-border-button"><a href="{{alt_link}}" class="altbtn">{{alt_link_name}}</a></div>
@@ -119,9 +123,18 @@
 	return total;
     }
 
-    function addToCart() {
-	price = calculateTotal();
-	window.location.href = `{% url 'add-to-cart' product_id=product.pk quantity="qholder" %}`.replace('qholder', quantityInput.val());
+    // The quantity lives in the URL path, so point the form at the right one
+    // just before it submits. data-add-url ends in the placeholder quantity
+    // "0", which is a single character to strip off.
+    const addToCartForm = document.querySelector('form#add-to-cart-form');
+    if (addToCartForm) {
+	addToCartForm.addEventListener('submit', function (event) {
+	    event.preventDefault();
+	    calculateTotal();
+	    const baseUrl = addToCartForm.dataset.addUrl.slice(0, -1);
+	    addToCartForm.action = baseUrl + quantityInput.val();
+	    addToCartForm.submit();
+	});
     }
 
 </script>
