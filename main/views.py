@@ -4,6 +4,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.contrib.staticfiles import finders
 from django.contrib.staticfiles.storage import staticfiles_storage
+from django.db import transaction
 from django.db.models import Q
 from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
@@ -156,25 +157,35 @@ class BaseCartView():
         Rows for a product the user cart already holds have their quantity
         added on and are dropped; the rest are reparented. Either way we never
         end up with two rows for the same (cart, product).
+
+        The whole thing is one transaction: adding a quantity onto the
+        surviving row and deleting the row it came from are two statements,
+        and a crash between them would lose the quantity for good. All or
+        nothing means a failed merge leaves the session cart untouched and
+        the next request can just retry it.
         """
-        # Rows are linked to a cart both by FK and by the M2M; take the union
-        # so a row that only made it into one of them still gets merged.
-        session_products = CartProduct.objects.filter(
-            Q(cart=session_cart) | Q(cart_products=session_cart)).distinct()
-        for cart_product in session_products:
-            session_cart.products.remove(cart_product)
-            existing = CartProduct.objects.filter(
-                cart=user_cart, product=cart_product.product).first()
-            if existing is not None:
-                existing.quantity += cart_product.quantity
-                existing.save()
-                user_cart.products.add(existing)
-                cart_product.delete()
-            else:
-                cart_product.cart = user_cart
-                cart_product.save()
-                user_cart.products.add(cart_product)
-        session_cart.delete()
+        with transaction.atomic():
+            # Rows are linked to a cart both by FK and by the M2M; take the
+            # union so a row that only made it into one still gets merged.
+            session_products = CartProduct.objects.filter(
+                Q(cart=session_cart) | Q(cart_products=session_cart)).distinct()
+            for cart_product in session_products:
+                session_cart.products.remove(cart_product)
+                existing = CartProduct.objects.filter(
+                    cart=user_cart, product=cart_product.product).first()
+                if existing is not None:
+                    existing.quantity += cart_product.quantity
+                    existing.save()
+                    user_cart.products.add(existing)
+                    cart_product.delete()
+                else:
+                    cart_product.cart = user_cart
+                    cart_product.save()
+                    user_cart.products.add(cart_product)
+            session_cart.delete()
+        # The session lives outside the transaction, so drop the pointer only
+        # once the merge has actually committed. If the block above rolled
+        # back, the session still points at an intact cart.
         del request.session["cart_id"]
 
 class SignupView(View):
@@ -196,8 +207,8 @@ class SignupView(View):
             user.set_password(password)
             user.save()
 
-            cart = Cart.objects.create(user=user)
-            cart.save()
+            # No cart is created here: get_cart() owns that, and creating one
+            # unconditionally on a OneToOneField is an unprotected insert.
 
             login(request, user)
             return redirect('home')
@@ -231,6 +242,15 @@ class AddToCartView(View, BaseCartView):
     # POST only: a GET here is triggerable cross-site by an <img> tag or a
     # link prefetch, with no CSRF token involved.
     def post(self, request, product_id: int, quantity: int):
+        # The quantity is a real form field, so the buy form works with no
+        # JavaScript at all; the URL segment stays as the fallback for
+        # existing links.
+        posted_quantity = request.POST.get('quantity')
+        if posted_quantity is not None:
+            try:
+                quantity = int(posted_quantity)
+            except ValueError:
+                return HttpResponseBadRequest("Quantity must be a number.")
         if quantity < 1:
             return HttpResponseBadRequest("Quantity must be at least 1.")
         product = get_object_or_404(Product, pk=product_id)

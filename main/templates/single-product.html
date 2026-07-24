@@ -63,34 +63,38 @@
 		    {% if product.is_physical_good %}
 		    {% include 'components/shipping-notice.html' %}
 		    {% endif %}
-		    <div class="quantity-content">
-			<div class="left-content">
-			    <h6>No. of Orders</h6>
-			</div>
-			<div class="right-content">
-			    <div class="quantity buttons_added">
-				<input type="button" value="-" class="minus" onclick="subtractQuantity()">
-				<input type="number" step="1" min="1" max="" name="quantity" id="quantity" onchange="calculateTotal()" value="1"
-				    title="Qty" class="input-text qty text" size="4" pattern="" inputmode="">
-				<input type="button" value="+" class="plus" onclick="addQuantity()">
+		    {# The quantity input is a real field of this form and the
+		       form has a real action, so buying works with JavaScript
+		       off. The URL's quantity segment is only a fallback -- the
+		       posted field wins. #}
+		    <form id="add-to-cart-form" method="POST"
+			  action="{% url 'add-to-cart' product_id=product.pk quantity=1 %}">
+			{% csrf_token %}
+			<div class="quantity-content">
+			    <div class="left-content">
+				<h6>No. of Orders</h6>
+			    </div>
+			    <div class="right-content">
+				<div class="quantity buttons_added">
+				    <input type="button" value="-" class="minus" onclick="subtractQuantity()">
+				    <input type="number" step="1" min="1" max="" name="quantity" id="quantity" onchange="calculateTotal()" value="1"
+					title="Qty" class="input-text qty text" size="4" pattern="" inputmode="">
+				    <input type="button" value="+" class="plus" onclick="addQuantity()">
+				</div>
 			    </div>
 			</div>
-		    </div>
-		    <div class="total">
-			<h4 class="calc-total">Total: </h4>
-			{% if not product.noorder %}
-			<form id="add-to-cart-form" method="POST"
-			      data-add-url="{% url 'add-to-cart' product_id=product.pk quantity=0 %}">
-			    {% csrf_token %}
+			<div class="total">
+			    <h4 class="calc-total">Total: </h4>
+			    {% if not product.noorder %}
 			    <div class="main-border-button"><button type="submit" style="margin-top: 0;">
 				{{product.buy_text}}
 			    </button></div>
-			</form>
-			{% endif %}
-			{% for alt_link_name, alt_link in alt_links %}
-			<div class="main-border-button"><a href="{{alt_link}}" class="altbtn">{{alt_link_name}}</a></div>
-			{% endfor %}
-		    </div>
+			    {% endif %}
+			    {% for alt_link_name, alt_link in alt_links %}
+			    <div class="main-border-button"><a href="{{alt_link}}" class="altbtn">{{alt_link_name}}</a></div>
+			    {% endfor %}
+			</div>
+		    </form>
 		</div>
 	    </div>
 	</div>
@@ -123,19 +127,8 @@
 	return total;
     }
 
-    // The quantity lives in the URL path, so point the form at the right one
-    // just before it submits. data-add-url ends in the placeholder quantity
-    // "0", which is a single character to strip off.
-    const addToCartForm = document.querySelector('form#add-to-cart-form');
-    if (addToCartForm) {
-	addToCartForm.addEventListener('submit', function (event) {
-	    event.preventDefault();
-	    calculateTotal();
-	    const baseUrl = addToCartForm.dataset.addUrl.slice(0, -1);
-	    addToCartForm.action = baseUrl + quantityInput.val();
-	    addToCartForm.submit();
-	});
-    }
+    // Nothing here is required to buy: the form posts the quantity field on
+    // its own. The +/- buttons and the running total are enhancements.
 
 </script>
 {% endblock custom_js %}

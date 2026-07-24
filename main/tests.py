@@ -1,3 +1,4 @@
+import re
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -270,6 +271,66 @@ class CartHttpMethodTest(CartTestBase):
         self.assertNotContains(response, 'href="/remove-from-cart')
 
 
+class AddToCartWithoutJavascriptTest(CartTestBase):
+    """The buy form must work with JavaScript entirely disabled.
+
+    A form with no action attribute posts to the current URL, which would be
+    the GET-only product page -- a 405 on the purchase path for anyone
+    without JS.
+    """
+
+    def get_buy_form(self, product_pk=100):
+        """Return (action, form_html) for the buy form, as a browser sees it."""
+        html = self.client.get(f"/product/{product_pk}").content.decode()
+        form = re.search(
+            r'<form[^>]*id="add-to-cart-form"[^>]*>(.*?)</form>', html,
+            re.DOTALL)
+        self.assertIsNotNone(form, "buy form missing from the product page")
+        assert form is not None  # for mypy
+        action = re.search(r'action="([^"]*)"', form.group(0))
+        self.assertIsNotNone(action, "buy form has no action attribute")
+        assert action is not None  # for mypy
+        return action.group(1), form.group(0)
+
+    def test_the_buy_form_has_a_real_action(self):
+        action, _ = self.get_buy_form()
+        self.assertTrue(action.startswith("/add-to-cart/100/"), action)
+
+    def test_the_quantity_input_is_a_field_of_the_buy_form(self):
+        _, form_html = self.get_buy_form()
+        self.assertIn('name="quantity"', form_html)
+
+    def test_submitting_the_form_without_javascript_adds_the_typed_quantity(self):
+        action, _ = self.get_buy_form()
+
+        # Exactly what a no-JS browser posts: the form's own action, plus the
+        # fields inside the form.
+        response = self.client.post(action, {"quantity": "7"})
+
+        self.assertRedirects(response, "/cart")
+        cart_product = CartProduct.objects.get()
+        self.assertEqual(cart_product.quantity, 7)
+        self.assertEqual(cart_product.product_id, 100)
+
+    def test_the_url_quantity_is_still_honoured_without_a_posted_field(self):
+        response = self.client.post("/add-to-cart/100/4")
+        self.assertRedirects(response, "/cart")
+        self.assertEqual(CartProduct.objects.get().quantity, 4)
+
+    def test_a_posted_quantity_of_zero_is_a_400(self):
+        self.assertEqual(
+            self.client.post("/add-to-cart/100/1", {"quantity": "0"}).status_code,
+            400)
+        self.assertFalse(CartProduct.objects.exists())
+
+    def test_a_non_numeric_posted_quantity_is_a_400(self):
+        self.assertEqual(
+            self.client.post("/add-to-cart/100/1",
+                             {"quantity": "abc"}).status_code,
+            400)
+        self.assertFalse(CartProduct.objects.exists())
+
+
 class CartAuthenticationTest(CartTestBase):
     """Regression: `request.user is User` was always False."""
 
@@ -354,6 +415,106 @@ class CartAuthenticationTest(CartTestBase):
         moved = CartProduct.objects.get(product_id=101)
         self.assertEqual(moved.cart_id, user_cart.cart_id)
         self.assertEqual(moved.quantity, 4)
+
+
+class CartMergeAtomicityTest(CartTestBase):
+    """The merge must be all-or-nothing.
+
+    Summing a quantity onto the surviving row and deleting the row it came
+    from are two statements; in autocommit a crash between them loses the
+    quantity permanently and leaves a half-merged cart behind.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user = self.make_user()
+        self.user_cart = Cart.objects.create(user=self.user)
+        self.existing = CartProduct.objects.create(
+            cart=self.user_cart, product=Product.objects.get(pk=100),
+            quantity=3, price_id="price_existing")
+        self.user_cart.products.add(self.existing)
+
+        # A session cart with two rows: one that merges into self.existing,
+        # and one that gets reparented.
+        self.client.post("/add-to-cart/100/2")
+        self.client.post("/add-to-cart/101/4")
+        self.session_cart_id = self.client.session["cart_id"]
+        self.client.force_login(self.user)
+
+    def test_a_failure_partway_through_rolls_the_whole_merge_back(self):
+        real_save = CartProduct.save
+        calls = []
+
+        def failing_save(cart_product, *args, **kwargs):
+            calls.append(cart_product.pk)
+            if len(calls) > 1:
+                raise RuntimeError("boom, halfway through the merge")
+            return real_save(cart_product, *args, **kwargs)
+
+        with mock.patch.object(CartProduct, "save", failing_save):
+            with self.assertRaises(RuntimeError):
+                self.client.get("/cart")
+
+        # Nothing moved: quantities, row parents and row count are untouched.
+        self.existing.refresh_from_db()
+        self.assertEqual(self.existing.quantity, 3)
+        self.assertEqual(CartProduct.objects.count(), 3)
+        session_rows = CartProduct.objects.filter(cart=self.session_cart_id)
+        self.assertEqual(
+            sorted((cp.product_id, cp.quantity) for cp in session_rows),
+            [(100, 2), (101, 4)])
+        # The session cart survives, still linked to its rows and still
+        # pointed at by the session, so the merge can simply be retried.
+        session_cart = Cart.objects.get(cart_id=self.session_cart_id)
+        self.assertEqual(session_cart.products.count(), 2)
+        self.assertEqual(self.client.session["cart_id"], self.session_cart_id)
+
+    def test_the_retry_after_a_failed_merge_produces_the_right_totals(self):
+        real_save = CartProduct.save
+        calls = []
+
+        def failing_save(cart_product, *args, **kwargs):
+            calls.append(cart_product.pk)
+            if len(calls) > 1:
+                raise RuntimeError("boom, halfway through the merge")
+            return real_save(cart_product, *args, **kwargs)
+
+        with mock.patch.object(CartProduct, "save", failing_save):
+            with self.assertRaises(RuntimeError):
+                self.client.get("/cart")
+
+        response = self.client.get("/cart")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CartProduct.objects.count(), 2)
+        self.existing.refresh_from_db()
+        self.assertEqual(self.existing.quantity, 5)
+        self.assertEqual(
+            sorted((cp.product_id, cp.quantity)
+                   for cp in self.user_cart.products.all()),
+            [(100, 5), (101, 4)])
+        self.assertFalse(
+            Cart.objects.filter(cart_id=self.session_cart_id).exists())
+        self.assertNotIn("cart_id", self.client.session)
+
+
+class SignupCartTest(CartTestBase):
+    def test_signing_up_leaves_cart_creation_to_get_cart(self):
+        response = self.client.post(
+            "/signup", {"email": "new@example.com", "password": "hunter2hunter2"})
+        # fetch_redirect_response: rendering the home page needs the build-time
+        # image assets, see the note on PageSmokeTest.
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+
+        user = User.objects.get(email="new@example.com")
+        self.assertFalse(Cart.objects.filter(user=user).exists())
+
+        self.client.post("/add-to-cart/100/1")
+
+        self.assertEqual(Cart.objects.filter(user=user).count(), 1)
+        self.assertEqual(
+            CartProduct.objects.get().cart_id,
+            Cart.objects.get(user=user).cart_id)
 
 
 class CartQuantityTest(CartTestBase):
