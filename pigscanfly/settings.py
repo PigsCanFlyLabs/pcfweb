@@ -196,10 +196,8 @@ class Prod(Base):
     # Ramp HSTS gradually: 3600 -> 86400 -> 31536000 after HTTPS is stable.
     # Only add includeSubDomains/preload after verifying every current and
     # planned pigscanfly.ca subdomain serves HTTPS; preload is effectively
-    # irreversible. Silence the deploy checks that ask for those flags during
-    # this conservative ramp.
+    # irreversible.
     SECURE_HSTS_SECONDS = 3600
-    SILENCED_SYSTEM_CHECKS = ["security.W005", "security.W021"]
     CSRF_TRUSTED_ORIGINS = [
         "https://www.pigscanfly.ca",
         "https://pigscanfly.ca",
