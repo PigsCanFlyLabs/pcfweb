@@ -34,7 +34,10 @@
 
     {% endblock custom_css %}
     {% load cookie_consent_tags %}
-    {% if request|cookie_group_accepted:"analytics" or request.user_agent.is_bot  %}
+    {# Consent gates this for everyone. Bots used to be exempted, which meant #}
+    {# loading GA and the Reddit pixel for every crawler -- no consent, and   #}
+    {# bot hits polluting the analytics they were supposedly there to feed.   #}
+    {% if request|cookie_group_accepted:"analytics" %}
     <!-- Google tag (gtag.js) - Google Analytics -->
     <script async src="https://www.googletagmanager.com/gtag/js?id=G-2EDT623L0V"></script>
     <script>

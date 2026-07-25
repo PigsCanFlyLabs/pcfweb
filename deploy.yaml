@@ -31,7 +31,7 @@ spec:
         app: web-primary
     spec:
       containers:
-        - image: holdenk/pcfweb:v0.10.0
+        - image: holdenk/pcfweb:v0.11.0
           name: pcfweb
           env:
           - name: PRIMARY
@@ -50,20 +50,40 @@ spec:
           ports:
             - containerPort: 80
               name: web
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 768Mi
+          # /healthz runs a real query, so an unreachable database fails the
+          # probe. `/` could not: SecurityMiddleware answers the kubelet's
+          # plain-HTTP request with a 301 before any database access, and
+          # Kubernetes counts a 3xx as success. The Host override is because
+          # the kubelet otherwise sends the pod IP, which ALLOWED_HOSTS
+          # rejects. See main/middleware.py.
           livenessProbe:
             httpGet:
               httpHeaders:
                 - name: Host
                   value: "www.pigscanfly.ca"
-              path: /
+              path: /healthz
               port: 80
             periodSeconds: 180
+          readinessProbe:
+            httpGet:
+              httpHeaders:
+                - name: Host
+                  value: "www.pigscanfly.ca"
+              path: /healthz
+              port: 80
+            periodSeconds: 10
           startupProbe:
             httpGet:
               httpHeaders:
                 - name: Host
                   value: "www.pigscanfly.ca"
-              path: /
+              path: /healthz
               port: 80
             periodSeconds: 10
             failureThreshold: 30
@@ -85,8 +105,45 @@ spec:
       labels:
         app: pcfweb
     spec:
+      # web-primary applies the migrations, but both Deployments roll at the
+      # same time, so these pods would otherwise start serving new code
+      # against the old schema until it caught up. Block here instead: the
+      # pod does not come up at all until the schema it expects is live.
+      initContainers:
+        - image: holdenk/pcfweb:v0.11.0
+          name: wait-for-migrations
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -u
+              export DJANGO_CONFIGURATION=${DJANGO_CONFIGURATION:-Prod}
+              export DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE:-pigscanfly.settings}
+              cd /opt/app
+              until ./manage.py migrate --check; do
+                echo "Schema is behind (or the database is unreachable); waiting..."
+                sleep 5
+              done
+              echo "Schema is current."
+          env:
+          - name: DBPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: pcfweb-internal-pg-secret
+                key: password
+          envFrom:
+          - secretRef:
+              name: pcfweb-secret
+          - configMapRef:
+              name: pcfweb-db-config
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
       containers:
-        - image: holdenk/pcfweb:v0.10.0
+        - image: holdenk/pcfweb:v0.11.0
           name: pcfweb
           env:
           - name: DBPASSWORD
@@ -103,20 +160,36 @@ spec:
           ports:
             - containerPort: 80
               name: web
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 768Mi
+          # See the note on web-primary: /healthz reaches the database, `/`
+          # would be short-circuited into a 301 by the HTTPS redirect.
           livenessProbe:
             httpGet:
               httpHeaders:
                 - name: Host
                   value: "www.pigscanfly.ca"
-              path: /
+              path: /healthz
               port: 80
             periodSeconds: 180
+          readinessProbe:
+            httpGet:
+              httpHeaders:
+                - name: Host
+                  value: "www.pigscanfly.ca"
+              path: /healthz
+              port: 80
+            periodSeconds: 10
           startupProbe:
             httpGet:
               httpHeaders:
                 - name: Host
                   value: "www.pigscanfly.ca"
-              path: /
+              path: /healthz
               port: 80
             periodSeconds: 10
             failureThreshold: 30

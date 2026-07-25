@@ -20,10 +20,30 @@ TAX_CONFIGURATION_ERROR = (
 )
 
 
+SHIPPING_RATE_ERROR = (
+    "Stripe rejected a configured shipping rate. Shipping rate ids are "
+    "livemode-scoped, so a rate created in test mode does not exist under a "
+    "live key (and vice versa). Check STRIPE_SHIPPING_RATES against the "
+    "Stripe Dashboard for the key this deployment is using."
+)
+
+
 class Payments:
     # mypy can't find this but it does exist. idk.
     API_KEY = settings.STRIPE_API_KEY # type: ignore
     stripe.api_key = API_KEY
+
+    # Bound every call made through the module-level `stripe.*` helpers. The
+    # SDK ships an 80s timeout and retries twice, so a Stripe outage could
+    # otherwise hold a request open for four minutes -- long past the point
+    # gunicorn kills the worker out from under it. Two of these calls sit on
+    # the add-to-cart path (Product.create, Price.create) and one on checkout
+    # (Session.create), so this is a customer-facing budget, not a background
+    # one.
+    # Same story as API_KEY above: django-configurations settings are opaque
+    # to the plugin.
+    stripe.default_http_client = stripe.RequestsClient(
+        timeout=settings.STRIPE_TIMEOUT)  # type: ignore[misc]
 
     @classmethod
     def create_product(cls, name: str, description: str, price: int, currency: str = "usd",
@@ -108,15 +128,12 @@ class Payments:
         product_modes = list(map(lambda x: x.product.mode, products))
         if all(map (lambda x: x == Product.Modes.PAYMENT, product_modes)):
             mode="payment"
-            # options
-            shipping_options = map(lambda x: {"shipping_rate": x},
-                                   [
-                                       "shr_0MJrPInkDnSOC1s7tidX8eMN", # YOLO
-                                       "shr_0MJrIYnkDnSOC1s7fthNSlhb", # sf only
-                                       "shr_0MJrL4nkDnSOC1s7cPSy15CO", #media mail
-                                       "shr_0MNOZrnkDnSOC1s7TSLZig6Z", #faster
-                                   ])
-            extras["shipping_options"] = list(shipping_options)
+            # Livemode-scoped ids, so they come from settings rather than
+            # being hardcoded here; see STRIPE_SHIPPING_RATES.
+            shipping_rates = getattr(settings, "STRIPE_SHIPPING_RATES", [])
+            if shipping_rates:
+                extras["shipping_options"] = [
+                    {"shipping_rate": rate} for rate in shipping_rates]
 
         if any(map (lambda x: x == Product.Modes.PAYMENT, product_modes)) or mode == "payment":
             extras["shipping_address_collection"] = {"allowed_countries": ["US", "CA"]}
@@ -142,8 +159,13 @@ class Payments:
             **extras,
             "line_items": items,
             "mode": mode,
-            "success_url": request.build_absolute_uri(
-                reverse('checkout-success')),
+            # The session id placeholder is substituted by Stripe on the
+            # redirect. It is what lets the success page find the order, and
+            # what stops a bare cross-site GET of that URL from emptying
+            # somebody's cart -- see CheckoutSuccessView.
+            "success_url": (
+                request.build_absolute_uri(reverse('checkout-success'))
+                + "?session_id={CHECKOUT_SESSION_ID}"),
             "cancel_url": request.build_absolute_uri(reverse('checkout-cancel')),
         }
         if automatic_tax_enabled:
@@ -163,6 +185,22 @@ class Payments:
                 logger.error(TAX_CONFIGURATION_ERROR, exc_info=True)
                 raise stripe.InvalidRequestError(
                     TAX_CONFIGURATION_ERROR,
+                    error.param,
+                    code=error.code,
+                    http_body=error.http_body,
+                    http_status=error.http_status,
+                    json_body=error.json_body,
+                    headers=error.headers,
+                ) from error
+            if cls._is_shipping_rate_error(error):
+                # Stripe reports this as a bare resource_missing on a
+                # shipping_options index, which reads like a transient Stripe
+                # problem rather than the config mistake it almost always is.
+                # Say which it is, because this breaks *every* physical
+                # checkout and nothing else.
+                logger.error(SHIPPING_RATE_ERROR, exc_info=True)
+                raise stripe.InvalidRequestError(
+                    SHIPPING_RATE_ERROR,
                     error.param,
                     code=error.code,
                     http_body=error.http_body,
@@ -191,3 +229,9 @@ class Payments:
     @staticmethod
     def _is_tax_configuration_error(error: stripe.InvalidRequestError) -> bool:
         return error.param == "automatic_tax" or error.code == "stripe_tax_inactive"
+
+    @staticmethod
+    def _is_shipping_rate_error(error: stripe.InvalidRequestError) -> bool:
+        # Stripe points param at the offending entry, e.g.
+        # "shipping_options[0][shipping_rate]".
+        return "shipping_rate" in (error.param or "")

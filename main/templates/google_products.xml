@@ -11,16 +11,18 @@
 <item>
 <g:id>{{product.pk}}</g:id>
 <g:title>{{product.name}}</g:title>
-<g:description>{{product.get_display_text}}</g:description>
+<g:description>{{product.get_feed_description}}</g:description>
 <g:link>https://www.pigscanfly.ca{% url 'product' product.pk %}</g:link>
+{% if product.get_image_url %}
 <g:image_link>https://www.pigscanfly.ca{{ product.get_image_url }}</g:image_link>
+{% endif %}
 <g:availability>{{ availability }}</g:availability>
 
 {% if product.date_available is not None and availability != "out_of_stock" and availability != "in_stock" %}
 <g:availability_date>{{product.date_available}}</g:availability_date>
 {% endif %}
 
-<g:price>{{product.get_display_price}} USD</g:price>
+<g:price>{{product.get_feed_price}} USD</g:price>
 <g:brand>{{product.get_brand}}</g:brand>
 <g:gender>Unisex</g:gender>
 

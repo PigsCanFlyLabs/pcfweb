@@ -8,7 +8,7 @@ from django.core.management import call_command
 from django.db import connection
 from django.test import RequestFactory, TestCase
 
-from main.models import CartProduct, Product
+from main.models import CartProduct, Order, Product
 
 
 OLD_CODE_PRODUCT_COLUMNS = [
@@ -221,6 +221,53 @@ class ProductStockTest(TestCase):
 
         self.assertRedirects(response, "/cart", fetch_redirect_response=False)
         self.assertEqual(CartProduct.objects.get().product, service)
+
+    @mock.patch("main.views.Payments")
+    @mock.patch("main.models.Payments")
+    def test_checkout_rejects_a_cart_that_went_out_of_stock(
+            self, payments, view_payments):
+        # Stock is edited by hand in the admin and a cart can sit for days, so
+        # what was purchasable at add-to-cart time may not be at checkout.
+        payments.create_product.return_value = "prod_late"
+        payments.create_price.return_value = "price_late"
+        product = Product.objects.create(
+            name="Sells out later",
+            cat=Product.Categories.BOOKS,
+            stock=5,
+            external_product_id="prod_late",
+        )
+        self.client.post(f"/add-to-cart/{product.pk}/1")
+        self.assertTrue(CartProduct.objects.exists())
+
+        Product.objects.filter(pk=product.pk).update(stock=0)
+        response = self.client.post("/checkout")
+
+        self.assertRedirects(response, "/cart", fetch_redirect_response=False)
+        # No Stripe session, and no PENDING order left behind for it.
+        view_payments.checkout.assert_not_called()
+        self.assertFalse(Order.objects.exists())
+
+    @mock.patch("main.views.Payments")
+    @mock.patch("main.models.Payments")
+    def test_checkout_still_works_while_the_stock_holds(
+            self, payments, view_payments):
+        payments.create_product.return_value = "prod_ok"
+        payments.create_price.return_value = "price_ok"
+        view_payments.checkout.return_value = (
+            "https://checkout.example/session", "cs_ok")
+        product = Product.objects.create(
+            name="In stock book",
+            cat=Product.Categories.BOOKS,
+            stock=5,
+            external_product_id="prod_ok",
+        )
+        self.client.post(f"/add-to-cart/{product.pk}/1")
+
+        response = self.client.post("/checkout")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"], "https://checkout.example/session")
 
     def test_seed_preserves_admin_managed_stock(self):
         product = Product.objects.create(

@@ -9,6 +9,17 @@
 <section class="mt-5" style="margin-bottom: 110px;">
     <div class="container section">
 
+        {# Checkout bounces back here when a line is no longer purchasable. #}
+        {% if messages %}
+        <div class="row">
+            <div class="col-lg-12">
+                {% for message in messages %}
+                <div class="alert alert-warning" role="alert">{{ message }}</div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
         <div class="cart">
             <div class="table-responsive">
                 <table class="table">

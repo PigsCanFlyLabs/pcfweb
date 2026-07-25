@@ -67,6 +67,11 @@ class Base(Configuration):
     )
 
     MIDDLEWARE = [
+        # Must stay first: it answers /healthz before the HTTPS redirect,
+        # the ALLOWED_HOSTS check and the cookie-consent database query, each
+        # of which would otherwise stop the Kubernetes probes from reflecting
+        # whether the app actually works. See main/middleware.py.
+        'main.middleware.HealthCheckMiddleware',
         'django.middleware.security.SecurityMiddleware',
         'django.contrib.sessions.middleware.SessionMiddleware',
         'django.middleware.common.CommonMiddleware',
@@ -172,7 +177,37 @@ class Base(Configuration):
     # Dashboard (Developers -> Webhooks -> the endpoint -> signing secret).
     # Left empty the webhook rejects every delivery with a 400, which is the
     # safe direction to fail: no unverified payload is ever processed.
+    # Prod refuses to boot without it -- see the property below.
     STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
+    # Seconds. Applies to every Stripe call except the webhook's line-item
+    # lookup, which sets its own tighter budget (see Payments).
+    #
+    # The SDK's default is ~80s, which is longer than gunicorn's own worker
+    # timeout: a hung Stripe connection would get the worker killed rather
+    # than returning an error the view could handle. Keep this comfortably
+    # under GUNICORN_TIMEOUT (see scripts/start-server.sh).
+    STRIPE_TIMEOUT = int(os.getenv("STRIPE_TIMEOUT", "15"))
+
+    # Stripe Checkout shipping rates offered for physical goods, most
+    # permissive first.
+    #
+    # These ids are LIVEMODE-SCOPED: a shr_... created in test mode does not
+    # exist under a live key and vice versa, and Stripe rejects the whole
+    # session with resource_missing rather than skipping the bad rate. They
+    # are therefore overridable per environment instead of hardcoded at the
+    # call site. Empty means "no shipping options", which is a valid session.
+    STRIPE_SHIPPING_RATES: List[str] = [
+        rate for rate in os.getenv(
+            "STRIPE_SHIPPING_RATES",
+            ",".join([
+                "shr_0MJrPInkDnSOC1s7tidX8eMN",  # YOLO
+                "shr_0MJrIYnkDnSOC1s7fthNSlhb",  # sf only
+                "shr_0MJrL4nkDnSOC1s7cPSy15CO",  # media mail
+                "shr_0MNOZrnkDnSOC1s7TSLZig6Z",  # faster
+            ])).split(",")
+        if rate.strip()
+    ]
 
     # Who gets told about a paid order so they can ship it. Env-driven so the
     # owner's address is not baked into the repo.
@@ -227,7 +262,31 @@ class Prod(Base):
 
     @property
     def STRIPE_API_KEY(self):
-        return os.getenv("STRIPE_LIVE_SECRET_KEY")
+        key = os.getenv("STRIPE_LIVE_SECRET_KEY")
+        if not key:
+            # Without this the key is silently None, stripe.api_key is set to
+            # None at import, and the failure surfaces as a 500 on the first
+            # add-to-cart -- i.e. on a customer, in production. Refusing to
+            # boot turns that into a failed rollout instead, which Kubernetes
+            # handles by keeping the previous pods serving.
+            raise ImproperlyConfigured(
+                "The STRIPE_LIVE_SECRET_KEY environment variable must be set "
+                "in Prod.")
+        return key
+
+    @property
+    def STRIPE_WEBHOOK_SECRET(self):
+        secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+        if not secret:
+            # The webhook is the only thing that marks an order PAID. With no
+            # secret it rejects every delivery, so customers would be charged
+            # by Stripe while the order sat PENDING and the owner was never
+            # told to ship it -- money taken, nothing sent, no error anywhere
+            # the owner would see. That is worse than not booting.
+            raise ImproperlyConfigured(
+                "The STRIPE_WEBHOOK_SECRET environment variable must be set "
+                "in Prod; without it no order is ever marked paid.")
+        return secret
 
     @property
     def DATABASES(self):
@@ -246,7 +305,16 @@ class Prod(Base):
                 # gunicorn sync workers, so keep the per-process pool tiny --
                 # the default min_size of 4 would park ~48 idle connections
                 # across the fleet on a 100-connection Postgres.
-                "OPTIONS": {"pool": {"min_size": 1, "max_size": 2}},
+                #
+                # connect_timeout bounds a single connection attempt and pool
+                # timeout bounds the wait for one. Without them an unreachable
+                # database turns every request into a hang that outlives the
+                # gunicorn worker timeout, so the pod dies by worker-kill
+                # instead of returning a 500 the health check can see.
+                "OPTIONS": {
+                    "connect_timeout": 5,
+                    "pool": {"min_size": 1, "max_size": 2, "timeout": 10},
+                },
             }
         }
 

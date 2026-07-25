@@ -33,8 +33,11 @@ Checks — one script shared by local dev, `build.sh`, and GitHub Actions
 | --- | --- | --- |
 | `SECRET_KEY` | Prod (required), Base (optional) | Base falls back to an insecure dev-only value. |
 | `STRIPE_TEST_SECRET_KEY` | Dev / Base | Test-mode Stripe key. |
-| `STRIPE_LIVE_SECRET_KEY` | Prod | Live Stripe key. |
-| `STRIPE_WEBHOOK_SECRET` | all | Signing secret for `/stripe/webhook`. **Orders are never marked paid without it** — see [Orders](#orders). |
+| `STRIPE_LIVE_SECRET_KEY` | Prod (required) | Live Stripe key. Prod refuses to boot without it, rather than 500ing on the first customer to add to cart. |
+| `STRIPE_WEBHOOK_SECRET` | Prod (required), all | Signing secret for `/stripe/webhook`. **Orders are never marked paid without it** — see [Orders](#orders) — so Prod refuses to boot without it too. |
+| `STRIPE_SHIPPING_RATES` | all | Comma-separated Stripe shipping rate ids offered at checkout. Livemode-scoped: test-mode ids do not exist under a live key. Empty means no shipping options. |
+| `STRIPE_TIMEOUT` | all | Seconds allowed for a Stripe call (default 15). Must stay below `GUNICORN_TIMEOUT` or a slow Stripe kills the worker instead of returning an error. |
+| `GUNICORN_TIMEOUT` | Prod image | Worker timeout in seconds (default 60). |
 | `ORDER_NOTIFICATION_EMAIL` | all | Where the "new paid order" mail goes; becomes `ADMINS`. Defaults to `support@pigscanfly.ca`. |
 | `DBHOST` / `DBNAME` / `DBUSER` / `DBPASSWORD` | Prod | Postgres connection; wired in `deploy.yaml` to the in-cluster DB. |
 | `EMAIL_HOST` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | Prod | SMTP. |
@@ -98,10 +101,39 @@ Bootstrap products (Holden's books) live in
 
 - Fixture rows use **pks 100+** so they never collide with rows created
   directly in prod.
-- The primary pod re-runs `loaddata initial_products` on **every deploy**, so
-  admin edits to those pks get overwritten — edit the YAML instead.
+- The primary pod re-runs `manage.py seed_products` on **every deploy**. It
+  upserts *fixture-owned* fields (name, description, price, links, tax_code,
+  …), so admin edits to those get overwritten — edit the YAML instead.
+- Two fields are deliberately **not** fixture-owned and are never touched on
+  an existing row: `external_product_id` (generated at runtime) and `stock`
+  (managed in the admin). See `SEED_PROTECTED_FIELDS` in
+  `main/management/commands/seed_products.py`.
 - `external_product_id` (Stripe) is generated lazily on first add-to-cart,
-  so loading fixtures needs no Stripe access.
+  so seeding needs no Stripe access.
+
+### Stock
+
+`Product.stock` gates whether a physical book can be bought **on this site**.
+It defaults to 0, is set by hand in the admin, and does *not* decrement on
+purchase.
+
+A book at stock 0 shows "Out of Stock" and its add-to-cart button is
+disabled, but the page still lists the Amazon / Bookshop.org / Kindle links
+(and the India-specific ones), so the product remains buyable elsewhere —
+zero stock means "not from us right now", not a dead page.
+
+Two consequences worth knowing before a deploy:
+
+- **A fresh database seeds every book at stock 0**, so nothing is directly
+  purchasable until stock is entered in the admin. That is the intended
+  default, not a bug — but it does mean "set the stock" belongs in the
+  post-deploy checklist below.
+- The Google Merchant feed reports `out_of_stock` for those items, and
+  Merchant Center will disapprove them until stock is set.
+
+Stock is re-checked at checkout, not just at add-to-cart: a cart can sit for
+days, so a line that sold out in the meantime bounces the customer back to
+the cart rather than billing for something that cannot be shipped.
 
 ### Region-specific buy links
 
@@ -118,7 +150,40 @@ links only.
 `./build.sh` is the whole pipeline: mypy → migration check → tests →
 template validation → collectstatic (assets are copied in from a sibling
 `pcfweb-assets` checkout) → multi-arch Docker build/push
-(`holdenk/pcfweb:<tag>`) → `kubectl apply`.
+(`holdenk/pcfweb:<tag>`) → `kubectl apply` → wait for both rollouts.
+
+### Bump the image tag first
+
+**`deploy.yaml` is the single source of truth for the image tag, and it must
+be bumped before every deploy.** `build.sh` reads the tag out of it and
+pushes to exactly that tag, so re-using one that is already running is a
+silent no-op: `kubectl apply` sees an unchanged Deployment spec, no rollout
+is triggered, and the pods keep serving the old image no matter what
+`imagePullPolicy: Always` says.
+
+`build.sh` now refuses to start when the tag in `deploy.yaml` matches one the
+cluster is already running, and when the `image:` lines in `deploy.yaml`
+disagree with each other. There are **three** of them — `web-primary`, the
+`wait-for-migrations` initContainer, and `web` — and they all have to match.
+
+### Pre-deploy checklist
+
+1. Bump the tag on all three `image:` lines in `deploy.yaml`.
+2. Confirm `pcfweb-secret` carries `SECRET_KEY`, `STRIPE_LIVE_SECRET_KEY` and
+   `STRIPE_WEBHOOK_SECRET`. Prod refuses to boot without any of them (see
+   *Environment variables*), so a missing one is a failed rollout rather than
+   a silent misbehaviour — Kubernetes keeps the old pods serving.
+3. Confirm the `STRIPE_SHIPPING_RATES` ids exist under the **live** key.
+   Shipping rate ids are livemode-scoped, so a rate created in test mode does
+   not exist in live and Stripe rejects the entire session — every physical
+   checkout fails. Override the setting per environment rather than editing
+   the default.
+4. Confirm the Stripe webhook endpoint (`/stripe/webhook`) is registered and
+   subscribed to `checkout.session.completed`,
+   `checkout.session.async_payment_succeeded`,
+   `checkout.session.async_payment_failed` and `checkout.session.expired`.
+5. After the rollout: set `stock` in the admin for anything that should be
+   directly purchasable (see *Stock*).
 
 **Before running `./build.sh`, check out the image assets as a sibling
 directory.** They are deliberately kept out of this repo (`.gitignore`
@@ -141,12 +206,37 @@ The Kubernetes objects:
   `Cluster` (3 instances, 10Gi `encrypted-local-path` storage, nightly
   backups to B2), plus manual `Backup` and nightly `ScheduledBackup`.
 - `deploy.yaml` — the app: `web-primary` (1 replica; runs `migrate` +
-  `loaddata` on start), `web` (3 replicas), `web-svc`, and the ingress for
-  `www.pigscanfly.ca`.
+  `seed_products` on start), `web` (3 replicas), `web-svc`, and the ingress
+  for `www.pigscanfly.ca`.
 
 The app reaches Postgres through the operator-created `pcfweb-pg-rw`
 Service; `DBHOST`/`DBNAME`/`DBUSER` are set directly in `deploy.yaml` and
 `DBPASSWORD` comes from the `pcfweb-internal-pg-secret` Secret.
+
+### Health checks
+
+All three probes target `/healthz`, which runs a real query and returns 503
+when the database is unreachable. They deliberately do **not** target `/`:
+the kubelet dials the pod over plain HTTP and sends no `X-Forwarded-Proto`,
+so `SecurityMiddleware` answers with a 301 to https before any view or model
+code runs — and Kubernetes counts a 3xx as success. Probes against `/` pass
+on a completely broken app. `/healthz` is listed in `SECURE_REDIRECT_EXEMPT`
+for exactly this reason.
+
+`web`'s pods also run a `wait-for-migrations` initContainer that blocks on
+`manage.py migrate --check`. `web-primary` applies the migrations but both
+Deployments roll at the same time, so without the gate the serving pods
+would run new code against the old schema until the primary caught up.
+
+### Known limitation: uploaded media is ephemeral
+
+`MEDIA_ROOT` is `/opt/app/media` inside the container, with no volume behind
+it. Anything uploaded through the admin's `Product.image` field lands on
+whichever of the 4 pods served that request, 404s on the other three, and is
+gone on restart. Use `image_name` (a file committed to `pcfweb-assets` and
+served from `static/`) instead — that is what every fixture product does.
+Fixing this properly needs a `ReadWriteMany` volume or object storage, and
+the cluster's `encrypted-local-path` StorageClass is `ReadWriteOnce`.
 
 ### One-time cluster prerequisites (not in this repo)
 

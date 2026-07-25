@@ -7,6 +7,7 @@ from django.db import models, transaction
 from django.templatetags.static import static
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import format_html
 
 from main.payments import Payments
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -198,11 +199,39 @@ class Product(models.Model):
     def is_purchasable(self) -> bool:
         return not self.noorder and not self.is_out_of_stock()
 
+    SIGNED_ON_REQUEST_NOTE = "All of Holden's books are available signed on request"
+
     def get_display_text(self):
+        """Product copy for the HTML product page, as escaped markup.
+
+        Returns a SafeString so the template does not need `autoescape off`
+        around it. The only markup here is the paragraph wrapper this method
+        adds; the description itself is escaped, so a stray angle bracket in
+        admin-entered copy renders as text instead of as live HTML.
+        """
         if self.isbn:
-            return f"{self.description}<p>All of Holden's books are available signed on request</p>"
-        else:
-            return self.description
+            return format_html(
+                "{}<p>{}</p>", self.description, self.SIGNED_ON_REQUEST_NOTE)
+        return format_html("{}", self.description)
+
+    def get_feed_description(self) -> str:
+        """The same copy as plain text, for the Google product feed.
+
+        The feed is XML, so markup from get_display_text() would arrive at
+        Google as escaped angle brackets and show up literally in the listing.
+        """
+        if self.isbn:
+            return f"{self.description}\n\n{self.SIGNED_ON_REQUEST_NOTE}"
+        return self.description
+
+    def get_feed_price(self) -> str:
+        """Bare numeric price for the feed's <g:price>.
+
+        Not get_display_price(): that prefixes "Pre-order: " for preorder
+        products, which is fine on the page and invalid in the feed -- Google
+        rejects a price it cannot parse.
+        """
+        return "{0:.2f}".format(self.price / 100)
 
     def get_gtin(self):
         return self.isbn or self.upc
