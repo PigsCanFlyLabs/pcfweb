@@ -9,7 +9,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from main.payments import Payments
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from easy_thumbnails.files import get_thumbnailer
 
@@ -39,6 +39,14 @@ class Product(models.Model):
     preorder_only = models.BooleanField(default=False, null=False)
     noorder = models.BooleanField(default=False, null=False)
     backorder = models.BooleanField(default=False, null=False)
+    stock = models.PositiveIntegerField(
+        default=0,
+        db_default=0,
+        help_text=(
+            "Manually gates whether physical books can be purchased here; "
+            "it does not cap order quantity or decrement automatically."
+        ),
+    )
     date_available = models.DateField(null=True, blank=True)
     brand = models.CharField(null=True, blank=True, max_length=200)
     sizes = models.CharField(null=True, blank=True, max_length=200)
@@ -175,6 +183,21 @@ class Product(models.Model):
         return (self.mode == Product.Modes.PAYMENT
                 and self.cat != Product.Categories.SERVICES)
 
+    def is_out_of_stock(self) -> bool:
+        # Stock is intentionally scoped to physical books for now. When the
+        # DC4K delivery_type field lands, DIGITAL book products must be exempt
+        # here so a stock value of 0 cannot block emailed ebook fulfilment.
+        return (
+            self.is_physical_good()
+            and self.cat == Product.Categories.BOOKS
+            and not self.preorder_only
+            and not self.backorder
+            and cast(int, self.stock) == 0
+        )
+
+    def is_purchasable(self) -> bool:
+        return not self.noorder and not self.is_out_of_stock()
+
     def get_display_text(self):
         if self.isbn:
             return f"{self.description}<p>All of Holden's books are available signed on request</p>"
@@ -189,6 +212,8 @@ class Product(models.Model):
             return "preorder"
         elif self.backorder:
             return "backorder"
+        elif self.is_out_of_stock():
+            return "out_of_stock"
         else:
             return "in_stock"
 
@@ -197,14 +222,21 @@ class Product(models.Model):
             return "Pre-Order"
         elif self.backorder:
             return "Back Order"
+        elif self.is_out_of_stock():
+            return "Out of Stock"
         else:
             return "Add to Cart"
 
     def stock_description(self):
+        # Preserve the pre-stock behavior if both flags are set:
+        # availability/buy_text prefer preorder, but this marker prefers
+        # backorder. That ordering is a pre-existing inconsistency.
         if self.backorder:
             return "***Back Order Only***"
         elif self.preorder_only:
             return "***PreOrder Only***"
+        elif self.is_out_of_stock():
+            return "***Out of Stock***"
         else:
             return ""
 

@@ -307,6 +307,8 @@ class AddToCartView(View, BaseCartView):
             return HttpResponseBadRequest(
                 f"Quantity must be at most {self.MAX_QUANTITY}.")
         product = get_object_or_404(Product, pk=product_id)
+        if not product.is_purchasable():
+            return HttpResponseBadRequest("Product is not purchasable.")
         cart = self.get_cart(request)
 
         cart_product, created = CartProduct.objects.get_or_create(
@@ -636,4 +638,3 @@ class LogoutView(View):
     def get(self, request):
         logout(request)
         return redirect('login')
-

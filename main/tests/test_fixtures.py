@@ -43,16 +43,40 @@ class InitialProductsFixtureTest(TestCase):
         self.assertContains(response, "https://www.amazon.com/dp/1449358624")
         self.assertContains(response, SHIPPING_NOTICE_TEXT)
 
+    @mock.patch("main.models.Payments")
+    def test_fixture_book_is_out_of_stock_as_shipped(self, payments):
+        payments.create_product.return_value = "prod_test"
+        payments.create_price.return_value = "price_test"
+
+        response = self.client.get("/product/100")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "***Out of Stock***")
+
+        response = self.client.post("/add-to-cart/100/1")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"Product is not purchasable.")
+
     def test_google_product_feed_includes_books_and_long_handling_times(self):
         response = self.client.get("/google_products.xml")
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "<g:gtin>9781449358624</g:gtin>")
         self.assertContains(response, "<g:max_handling_time>21</g:max_handling_time>")
 
+    def test_google_product_feed_omits_availability_date_for_out_of_stock_book(self):
+        Product.objects.filter(pk=100).update(date_available="2030-01-15")
+
+        response = self.client.get("/google_products.xml")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "<g:availability>out_of_stock</g:availability>")
+        self.assertNotContains(response, "<g:availability_date>")
+
     @mock.patch("main.models.Payments")
     def test_cart_with_physical_book_shows_shipping_notice(self, payments):
         payments.create_product.return_value = "prod_test"
         payments.create_price.return_value = "price_test"
+        Product.objects.filter(pk=100).update(stock=1)
         self.client.post("/add-to-cart/100/1")
         response = self.client.get("/cart")
         self.assertEqual(response.status_code, 200)

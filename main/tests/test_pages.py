@@ -5,6 +5,8 @@ from unittest import mock
 
 from django.test import TestCase, override_settings
 
+from main.models import Product
+
 
 class StaticPagesTest(TestCase):
     def test_privacy_page_renders_privacy_template(self):
@@ -42,6 +44,7 @@ class PageSmokeTest(TestCase):
         model_payments.create_price.return_value = "price_test"
         payments.checkout.return_value = (
             "https://checkout.example/session", "cs_test_smoke")
+        Product.objects.filter(pk=100).update(stock=1)
         self.client.post("/add-to-cart/100/1")
 
         response = self.client.get("/checkout")
