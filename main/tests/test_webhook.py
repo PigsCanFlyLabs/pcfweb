@@ -5,6 +5,7 @@ import time
 from unittest import mock
 
 import stripe
+from django.conf import settings
 from django.core import mail
 from django.test import Client, override_settings
 
@@ -501,10 +502,22 @@ class WebhookLineItemReconciliationTest(OrderTestBase):
 
     def test_the_bounded_client_is_not_the_one_checkout_uses(self):
         # Bounding this call must not drag Session.create down to 5 seconds.
+        # The module-level client that checkout uses is bounded too, but on a
+        # far more generous budget -- checkout legitimately wants longer.
         with mock.patch("main.payments.stripe.StripeClient"):
             Payments.list_line_items("cs_x")
 
-        self.assertIsNone(stripe.default_http_client)
+        self.assertIsNotNone(stripe.default_http_client)
+        self.assertNotEqual(
+            stripe.default_http_client._timeout, Payments.LINE_ITEM_TIMEOUT)
+        self.assertEqual(
+            stripe.default_http_client._timeout, settings.STRIPE_TIMEOUT)
+
+    def test_the_default_client_is_bounded_well_under_the_sdk_default(self):
+        # The SDK ships an 80s timeout and retries twice, so an unbounded
+        # Session.create could hold a request open for minutes -- long past
+        # the point gunicorn kills the worker out from under it.
+        self.assertLessEqual(settings.STRIPE_TIMEOUT, 30)
 
 
 class WebhookReconciliationFailureTest(OrderTestBase):

@@ -2,6 +2,16 @@ server {
     listen 80;
     server_name www.pigscanfly.ca;
 
+    # The Kubernetes probes hit this on every pod every few seconds; logging
+    # them buries the real traffic. Everything else about it is a normal
+    # proxied request.
+    location = /healthz {
+        access_log off;
+        proxy_pass http://127.0.0.1:8010;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8010;
         proxy_set_header Host $host;

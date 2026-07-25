@@ -2,11 +2,14 @@ import logging
 
 from typing import *
 from django.conf import settings
+from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.contrib.staticfiles import finders
 from django.contrib.staticfiles.storage import staticfiles_storage
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.db import transaction
 from django.db.models import Q
 from django.http import Http404, HttpResponse, HttpResponseBadRequest
@@ -24,6 +27,11 @@ from main.payments import Payments
 from main.utils import generate_username, get_country_code
 
 logger = logging.getLogger(__name__)
+
+
+# /healthz is served by main.middleware.HealthCheckMiddleware rather than a
+# view here, so it can answer ahead of the HTTPS redirect, the ALLOWED_HOSTS
+# check and the cookie-consent middleware's database query.
 
 
 # Create your views here.
@@ -233,27 +241,39 @@ class BaseCartView():
 class SignupView(View):
     def get(self, request):
         in_use = request.GET.get('in_use', 'false')
-        return render(request, 'signup.html', context={'title': 'Sign Up', 'in_use': in_use})
+        invalid = request.GET.get('invalid')
+        return render(request, 'signup.html', context={
+            'title': 'Sign Up', 'in_use': in_use, 'invalid': invalid})
 
     def post(self, request):
-        email = request.POST.get('email')
-        password = request.POST.get('password')
-
+        # Both are required. Missing values used to reach generate_username()
+        # as None and 500 on the AttributeError, and a missing password
+        # reached set_password(None), which silently creates an account with
+        # an unusable password that can never be logged into.
+        email = (request.POST.get('email') or '').strip()
+        password = request.POST.get('password') or ''
+        if not email or not password:
+            return redirect(reverse('signup') + '?invalid=missing')
         try:
-            user = User.objects.get(email=email)
+            validate_email(email)
+        except ValidationError:
+            return redirect(reverse('signup') + '?invalid=email')
+
+        # email is not unique on auth.User, so this can legitimately match
+        # more than one row; either way the address is taken.
+        if User.objects.filter(email=email).exists():
             return redirect(reverse('signup') + '?in_use=true')
 
-        except User.DoesNotExist:
-            username = generate_username(email)
-            user = User.objects.create(email=email, username=username)
-            user.set_password(password)
-            user.save()
+        username = generate_username(email)
+        user = User.objects.create(email=email, username=username)
+        user.set_password(password)
+        user.save()
 
-            # No cart is created here: get_cart() owns that, and creating one
-            # unconditionally on a OneToOneField is an unprotected insert.
+        # No cart is created here: get_cart() owns that, and creating one
+        # unconditionally on a OneToOneField is an unprotected insert.
 
-            login(request, user)
-            return redirect('home')
+        login(request, user)
+        return redirect('home')
 
 
 class GoogleProductFeed(View):
@@ -337,12 +357,12 @@ class RemoveFromCartView(View, BaseCartView):
 
 
 class CheckoutView(View, BaseCartView):
+    # POST only. A GET here creates a PENDING order and a Stripe session as a
+    # side effect, which an <img> tag or a link prefetch could trigger
+    # cross-site with no CSRF token involved. cart.html posts a real form.
     def post(self, request):
         coupon = request.POST.get("coupon") or None
         return self.start_checkout(request, coupon=coupon)
-
-    def get(self, request):
-        return self.start_checkout(request)
 
     def start_checkout(self, request, coupon=None):
         """Record the order, then hand the customer to Stripe.
@@ -355,6 +375,24 @@ class CheckoutView(View, BaseCartView):
         if not cart.products.exists():
             # Stripe rejects a session with no line items anyway; bailing here
             # keeps empty checkouts from leaving orphan PENDING orders behind.
+            return redirect('cart')
+        # Stock is re-checked here, not just at add-to-cart: a cart can sit for
+        # days, and stock is edited by hand in the admin, so what was
+        # purchasable when it went in may not be now. Bounce back to the cart
+        # rather than billing for something that cannot be shipped.
+        unavailable = [
+            cart_product.product.name
+            for cart_product in cart.products.select_related("product")
+            if not cart_product.product.is_purchasable()
+        ]
+        if unavailable:
+            logger.info(
+                "Blocked checkout for cart %s: %s no longer purchasable.",
+                cart.pk, ", ".join(unavailable))
+            messages.error(
+                request,
+                "Sorry, these are no longer available and need to be removed "
+                "before checking out: " + ", ".join(unavailable) + ".")
             return redirect('cart')
         user = request.user if request.user.is_authenticated else None
         order = Order.create_from_cart(cart, user=user)
@@ -378,25 +416,26 @@ class CheckoutView(View, BaseCartView):
 
 
 class CheckoutSuccessView(View, BaseCartView):
+    """Where Stripe sends the customer after a completed Checkout session.
+
+    Has to stay a GET -- Stripe redirects the browser here -- so it is
+    reachable cross-site. It is therefore deliberately *not* the source of
+    payment truth: the order shown is whatever the webhook already recorded,
+    and its status is displayed as-is rather than asserted to be paid.
+    """
+
     def get(self, request):
-        cart = self.get_cart(request)
-        cart.clear()
-        # Deliberately *not* the source of payment truth: this is an
-        # unauthenticated GET anyone can request. The order shown here is
-        # whatever the webhook has already recorded, and its status is
-        # displayed as-is rather than asserted to be paid.
-        #
-        # TODO: success_url does not carry ?session_id={CHECKOUT_SESSION_ID}
-        # yet, so this lookup finds nothing today and the page falls back to
-        # the plain thank-you. Adding the parameter means editing the
-        # success_url in payments.py, which is mid-refactor on another branch;
-        # do it there once that lands and this starts working with no change
-        # here.
+        # Only a session id that resolves to a real order empties the cart.
+        # Stripe substitutes it into success_url (see Payments.checkout), so
+        # the genuine redirect always carries one; a bare cross-site GET of
+        # this URL does not, and so can no longer clear a stranger's cart.
         order = None
         session_id = request.GET.get("session_id")
         if session_id:
             order = Order.objects.filter(
                 stripe_session_id=session_id).prefetch_related('items').first()
+        if order is not None:
+            self.get_cart(request).clear()
         return render(request, 'checkout_success.html', context={
             'title': 'Success! - Checkout',
             'order': order,
@@ -617,20 +656,21 @@ class LoginView(View):
         return render(request, 'login.html', context={'title': 'Log In', 'valid': valid})
 
     def post(self, request):
-        email = request.POST.get('email')
-        password = request.POST.get('password')
+        email = (request.POST.get('email') or '').strip()
+        password = request.POST.get('password') or ''
+        if not email or not password:
+            return redirect(reverse('login') + '?valid=false')
 
-        try:
-            user = User.objects.get(email=email)
+        # email is not unique on auth.User, so .get() here could raise
+        # MultipleObjectsReturned and 500 the login page. Try each match
+        # instead: only the one whose password checks out authenticates.
+        for candidate in User.objects.filter(email=email):
             user = authenticate(request, email=email,
-                                username=user.username, password=password)
+                                username=candidate.username, password=password)
             if user is not None:
                 login(request, user)
                 return redirect('home')
-            else:
-                return redirect(reverse('login') + '?valid=false')
-        except User.DoesNotExist:
-            return redirect(reverse('login') + '?valid=false')
+        return redirect(reverse('login') + '?valid=false')
 
 
 @method_decorator(login_required, name='dispatch')

@@ -164,14 +164,36 @@ class CheckoutCreatesOrderTest(OrderTestBase):
 class CheckoutSuccessPageTest(OrderTestBase):
     """The success page keeps clearing the cart, but never decides payment."""
 
-    def test_the_cart_is_still_cleared(self):
+    def test_the_cart_is_cleared_on_the_real_redirect_back_from_stripe(self):
+        order = self.place_order()
+        self.assertTrue(CartProduct.objects.exists())
+
+        response = self.client.get(
+            f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(CartProduct.objects.exists())
+
+    def test_a_bare_get_does_not_clear_the_cart(self):
+        # Stripe always substitutes the session id into success_url, so a
+        # request without one did not come from the redirect. It could be a
+        # cross-site <img> or a prefetch, and emptying a stranger's cart on
+        # that is a side effect no unauthenticated GET should have.
         self.place_order()
         self.assertTrue(CartProduct.objects.exists())
 
         response = self.client.get("/checkout/success")
 
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(CartProduct.objects.exists())
+        self.assertTrue(CartProduct.objects.exists())
+
+    def test_an_unknown_session_id_does_not_clear_the_cart(self):
+        self.place_order()
+
+        response = self.client.get("/checkout/success?session_id=cs_not_ours")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(CartProduct.objects.exists())
 
     def test_loading_the_success_page_does_not_pay_the_order(self):
         order = self.place_order()

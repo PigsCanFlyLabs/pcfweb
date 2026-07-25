@@ -47,14 +47,20 @@ class PageSmokeTest(TestCase):
         Product.objects.filter(pk=100).update(stock=1)
         self.client.post("/add-to-cart/100/1")
 
-        response = self.client.get("/checkout")
+        response = self.client.post("/checkout")
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(
             response["Location"], "https://checkout.example/session")
 
     def test_checkout_with_an_empty_cart_goes_back_to_the_cart(self):
-        self.assertRedirects(self.client.get("/checkout"), "/cart")
+        self.assertRedirects(self.client.post("/checkout"), "/cart")
+
+    def test_checkout_rejects_a_get(self):
+        # A GET creates a PENDING order and a Stripe session as a side effect,
+        # which an <img> tag or a link prefetch can trigger cross-site with no
+        # CSRF token involved.
+        self.assertEqual(self.client.get("/checkout").status_code, 405)
 
     def test_logout_requires_a_login(self):
         response = self.client.get("/logout")

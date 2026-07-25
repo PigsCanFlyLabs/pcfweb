@@ -23,6 +23,13 @@
                         {% if in_use == 'true' %}
                             <p class="error-msg text-danger">This email is already in use</p>
                         {% endif %}
+                        {# The inputs are required + type=email, so these only #}
+                        {# show when the browser validation was bypassed.      #}
+                        {% if invalid == 'missing' %}
+                            <p class="error-msg text-danger">Please enter both an email address and a password.</p>
+                        {% elif invalid == 'email' %}
+                            <p class="error-msg text-danger">That does not look like a valid email address.</p>
+                        {% endif %}
 
                         <div class="main-border-button">
                             <button type="submit">Sign Up</button>
