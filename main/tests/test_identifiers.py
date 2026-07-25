@@ -4,6 +4,12 @@ from main.models import Product
 
 
 class ProductIdentifierTest(SimpleTestCase):
+    def test_default_asin_help_text_warns_that_kindle_does_not_use_it(self):
+        help_text = Product._meta.get_field("default_asin").help_text
+
+        self.assertIn("Print/catalogue ASIN", help_text)
+        self.assertIn("not used for Kindle", help_text)
+
     def test_explicit_amazon_links_take_precedence_over_asins(self):
         product = Product(
             amazon_link="https://example.com/print",
