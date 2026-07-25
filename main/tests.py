@@ -1028,6 +1028,33 @@ class CheckoutCreatesOrderTest(OrderTestBase):
         self.assertEqual(kwargs["client_reference_id"], str(order.pk))
         self.assertEqual(kwargs["metadata"], {"order_id": str(order.pk)})
 
+    def test_the_invalid_coupon_retry_differs_only_by_the_discount(self):
+        # The retry is a copy of the single parameter dict minus "discounts",
+        # so the order id rides along by construction. Pinned because a
+        # version that rebuilt the retry parameters separately would silently
+        # drop it -- and would also let the two paths drift apart on tax,
+        # which is what CheckoutTaxTest guards from the other side.
+        self.client.post("/add-to-cart/100/1")
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.side_effect = [
+                stripe.InvalidRequestError(
+                    "No such coupon", "discounts[0][coupon]"),
+                mock.Mock(url="https://checkout.example/session",
+                          id="cs_after_retry"),
+            ]
+            self.client.post("/checkout", {"coupon": "coupon_bad"})
+
+        order = Order.objects.get()
+        first, retry = [call.kwargs for call in create.call_args_list]
+        self.assertEqual(first["discounts"], [{"coupon": "coupon_bad"}])
+        self.assertNotIn("discounts", retry)
+        self.assertEqual(
+            {k: v for k, v in first.items() if k != "discounts"}, retry)
+        for params in (first, retry):
+            self.assertEqual(params["client_reference_id"], str(order.pk))
+            self.assertEqual(params["metadata"], {"order_id": str(order.pk)})
+        self.assertEqual(order.stripe_session_id, "cs_after_retry")
+
     def test_a_logged_in_buyers_order_is_attached_to_them(self):
         user = User.objects.create_user(
             username="buyer", email="buyer@example.com",
