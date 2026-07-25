@@ -7,6 +7,21 @@
             <h2>Checkout Successful!</h2>
             <p>You have successfully checked out.</p>
         </div>
+        {# Shown only once success_url carries the Stripe session id (see the #}
+        {# TODO in CheckoutSuccessView). The status displayed here is whatever #}
+        {# the webhook recorded -- loading this page proves nothing. #}
+        {% if order %}
+        <div class="text-center">
+            <p>Order #{{ order.pk }} &mdash; {{ order.get_status_display }}</p>
+            <ul style="list-style: none; padding: 0;">
+                {% for item in order.items.all %}
+                <li>{{ item.quantity }} &times; {{ item.product_name }}
+                    &mdash; ${{ item.total_display_price }}</li>
+                {% endfor %}
+            </ul>
+            <p>Total: ${{ order.total_display_price }} {{ order.currency|upper }}</p>
+        </div>
+        {% endif %}
     </section>
 </div>
 {% endblock content %}

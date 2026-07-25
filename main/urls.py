@@ -28,6 +28,10 @@ urlpatterns = [
          name='checkout-success'),
     path('checkout/cancel', views.CheckoutCancelView.as_view(),
          name='checkout-cancel'),
+    # Stripe's callback. POST only and CSRF exempt; the signature on the body
+    # is the only authentication. Register this URL in the Stripe Dashboard.
+    path('stripe/webhook', views.StripeWebhookView.as_view(),
+         name='stripe-webhook'),
 
     # Accounts
     path('signup', views.SignupView.as_view(), name='signup'),

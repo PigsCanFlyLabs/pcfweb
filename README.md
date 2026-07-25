@@ -34,6 +34,8 @@ Checks — one script shared by local dev, `build.sh`, and GitHub Actions
 | `SECRET_KEY` | Prod (required), Base (optional) | Base falls back to an insecure dev-only value. |
 | `STRIPE_TEST_SECRET_KEY` | Dev / Base | Test-mode Stripe key. |
 | `STRIPE_LIVE_SECRET_KEY` | Prod | Live Stripe key. |
+| `STRIPE_WEBHOOK_SECRET` | all | Signing secret for `/stripe/webhook`. **Orders are never marked paid without it** — see [Orders](#orders). |
+| `ORDER_NOTIFICATION_EMAIL` | all | Where the "new paid order" mail goes; becomes `ADMINS`. Defaults to `support@pigscanfly.ca`. |
 | `DBHOST` / `DBNAME` / `DBUSER` / `DBPASSWORD` | Prod | Postgres connection; wired in `deploy.yaml` to the in-cluster DB. |
 | `EMAIL_HOST` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | Prod | SMTP. |
 | `MAXMIND_LICENSE_KEY` | build.sh (image build) | Bundles the GeoLite2 country DB for region-specific buy links; optional. |
@@ -43,6 +45,51 @@ Checks — one script shared by local dev, `build.sh`, and GitHub Actions
 > repo's history in the past. Both should be treated as burned — rotate the
 > Stripe test key in the dashboard; the settings now only read keys from the
 > environment.
+
+## Orders
+
+A purchase is recorded as a PENDING `Order` (plus an `OrderItem` snapshot of
+every cart line: name, unit price in cents, currency, quantity) *before* the
+customer is sent to Stripe. The order id travels with the Checkout session as
+`client_reference_id`, because by the time a webhook fires the cart is gone —
+the success page empties it, and an anonymous cart is session-scoped.
+
+`POST /stripe/webhook` is the only thing that marks an order PAID and emails
+the owner. `/checkout/success` clears the cart and nothing else; it is an
+unauthenticated GET and proves no payment.
+
+**Two things must be set up or no order is ever recorded as paid:**
+
+1. `STRIPE_WEBHOOK_SECRET` in the environment. Without it every delivery is
+   rejected with a 400 (deliberately failing closed) and orders stay PENDING.
+2. The endpoint registered in the Stripe Dashboard under
+   *Developers → Webhooks*, pointing at `https://www.pigscanfly.ca/stripe/webhook`
+   and subscribed to `checkout.session.completed`,
+   `checkout.session.async_payment_succeeded`,
+   `checkout.session.async_payment_failed` and `checkout.session.expired`.
+   Copy that endpoint's signing secret into `STRIPE_WEBHOOK_SECRET`.
+
+Checkout enables `adjustable_quantity`, so the customer can change quantities
+on Stripe's hosted page after the snapshot is written. The webhook therefore
+re-reads the billed line items from Stripe and writes those quantities onto
+`OrderItem.quantity`, keeping the cart's original in
+`OrderItem.snapshot_quantity` so the change stays auditable. The notification
+email is the pick/pack list, so it must not be knowingly stale.
+
+Fulfilment is manual: paid orders show up in the Django admin, and the owner
+flips the status to FULFILLED once it ships.
+
+Everything after the payment is recorded is best-effort and cannot cost you the
+order — the webhook returns 200 either way, because a non-2xx makes Stripe
+retry for three days:
+
+- notification email failed → `notification_error` set, `notified_at` null;
+- line items could not be re-read → `reconciliation_error` set, `reconciled_at`
+  null, quantities left at the cart's, and the email says loudly that the list
+  is unverified.
+
+Note that setting `ADMINS` also switches on Django's built-in error mail, so
+unhandled 500s now go to the same address.
 
 ## Products / fixtures
 

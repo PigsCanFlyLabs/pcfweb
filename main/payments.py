@@ -46,8 +46,44 @@ class Payments:
             )
         return product_price['id']
 
+    # Seconds. The SDK's default is ~80, far longer than Stripe's own webhook
+    # delivery window: a hung connection would pin a gunicorn worker until
+    # Stripe had already given up and queued a re-delivery.
+    LINE_ITEM_TIMEOUT = 5
+
     @classmethod
-    def checkout(cls, request, cart, coupon=None):
+    def list_line_items(cls, session_id: str, limit: int = 100):
+        """What Stripe actually billed for a Checkout session.
+
+        Called from inside a webhook response, so it is bounded on both axes:
+        no retries and a short timeout. The caller treats any failure as "keep
+        the snapshot" rather than an error, so giving up quickly is strictly
+        better than holding the response open.
+
+        The timeout lives on the HTTP client rather than on the request, so
+        this needs its own client -- a module-level one would drag every other
+        Stripe call in the app down to the same budget, and checkout legitimately
+        wants longer. Built per call rather than cached: paid orders are rare
+        enough that the pooling would not pay for the shared mutable state.
+        """
+        client = stripe.StripeClient(
+            api_key=cls.API_KEY or "",
+            max_network_retries=0,
+            http_client=stripe.RequestsClient(
+                timeout=cls.LINE_ITEM_TIMEOUT),
+        )
+        return client.checkout.sessions.line_items.list(
+            session_id, {"limit": limit})
+
+    @classmethod
+    def checkout(cls, request, cart, coupon=None, order=None):
+        """Start a Stripe Checkout session; returns (url, session_id).
+
+        `order` is the local PENDING order this session is paying for. Its id
+        rides along as client_reference_id (and in metadata) because that is
+        the only thing tying a Stripe session back to anything of ours -- the
+        webhook has no session cookie and so no way to find the cart.
+        """
         from main.models import Product
         products = cart.products.all()
         items = [
@@ -78,6 +114,10 @@ class Payments:
 
         if any(map (lambda x: x == Product.Modes.PAYMENT, product_modes)) or mode == "payment":
             extras["shipping_address_collection"] = {"allowed_countries": ["US", "CA"]}
+
+        if order is not None:
+            extras["client_reference_id"] = str(order.pk)
+            extras["metadata"] = {"order_id": str(order.pk)}
 
         reserved_tax_keys = {"automatic_tax", "billing_address_collection"}
         shadowed_keys = reserved_tax_keys & extras.keys()
@@ -111,7 +151,7 @@ class Payments:
         # Fall back for invalid coupons
         try:
             checkout = stripe.checkout.Session.create(**session_params)
-            return checkout.url
+            return checkout.url, checkout.id
         except stripe.InvalidRequestError as error:
             if cls._is_tax_configuration_error(error):
                 logger.error(TAX_CONFIGURATION_ERROR, exc_info=True)
@@ -130,7 +170,7 @@ class Payments:
             retry_params = {**session_params}
             retry_params.pop("discounts", None)
             checkout = stripe.checkout.Session.create(**retry_params)
-            return checkout.url
+            return checkout.url, checkout.id
 
     @staticmethod
     def _is_coupon_error(error: stripe.InvalidRequestError) -> bool:

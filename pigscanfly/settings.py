@@ -168,6 +168,18 @@ class Base(Configuration):
     STRIPE_AUTOMATIC_TAX = os.getenv("STRIPE_AUTOMATIC_TAX", "true").lower() not in {
         "0", "false", "no", "off"}
 
+    # Signing secret for the /stripe/webhook endpoint, from the Stripe
+    # Dashboard (Developers -> Webhooks -> the endpoint -> signing secret).
+    # Left empty the webhook rejects every delivery with a 400, which is the
+    # safe direction to fail: no unverified payload is ever processed.
+    STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
+    # Who gets told about a paid order so they can ship it. Env-driven so the
+    # owner's address is not baked into the repo.
+    ORDER_NOTIFICATION_EMAIL = os.getenv(
+        "ORDER_NOTIFICATION_EMAIL", "support@pigscanfly.ca")
+    ADMINS = [("Pigs Can Fly Labs Orders", ORDER_NOTIFICATION_EMAIL)]
+
 
 class Dev(Base):
     DEBUG = True
