@@ -1,5 +1,45 @@
 # Dev / CI tooling; deliberately not installed in the production image.
-mypy>=1.13,<1.19
-django-stubs==5.2.*
+#
+# The type-checking toolchain itself is pinned exactly, so mypy and the stub
+# packages resolve as a matched set. That removes the largest and most
+# surprising way this check could flip: an unbounded transitive stub package
+# jumping a major (see django-stubs-ext below).
+#
+# It does NOT make the type check fully deterministic, and it is worth being
+# clear about that. mypy also reads the typing shipped by our runtime
+# dependencies, which are on ranges, so the result can still move without a
+# commit here. Known residuals, roughly by likelihood:
+#   - stripe (requirements.txt) -- we import it, and its bundled typing changes
+#     across releases; 12.2.0 and 12.5.1 have been observed to give different
+#     mypy results.
+#   - django (requirements.txt) -- the django-stubs plugin inspects Django's
+#     runtime model shape, so even patch drift can change the outcome.
+#   - typing-extensions -- unpinned transitive of mypy, django-stubs,
+#     django-stubs-ext and stripe. Left alone deliberately: pinning a shared
+#     transitive of four packages invites resolver conflicts later for very
+#     little gain.
+#   - mypy's own transitives (mypy_extensions, pathspec).
+# So a red CI with no code change is unlikely, not impossible. If it happens,
+# diff the installed dependencies first.
+#
+# stripe and django are deliberately NOT exact-pinned. They are runtime
+# dependencies, and pinning them exactly would block security and bugfix
+# patches from a range that exists precisely to admit them -- a bad trade on a
+# storefront that handles payments. The toolchain below is different: it has no
+# runtime blast radius, so exact pins there cost nothing.
+mypy==1.18.2
+django-stubs==5.2.9
+# Direct pin, NOT redundant with django-stubs: django-stubs 5.2.9 requires
+# django-stubs-ext>=5.2.9 with no upper bound, so pip otherwise installs the
+# newest release overall (6.0.7 today) -- a mismatched major. The mypy plugin
+# injects django_stubs_ext as a build dependency and resolves symbols by
+# fullname (django_stubs_ext.annotations.WithAnnotations / Annotations /
+# AnyAttrAllowed, django_stubs_ext.db.models.TypedModelMeta), so a rename or
+# move in a new major breaks type-checking. Keep this pin in step with
+# django-stubs above.
+django-stubs-ext==5.2.9
+# Transitive stub dep of django-stubs, also unbounded there. types-* packages
+# ship type changes continuously, so an unpinned one flips CI on its own.
+types-PyYAML==6.0.12.20260724
 # runserver_plus (run_local.sh)
 werkzeug>=3.1,<4
