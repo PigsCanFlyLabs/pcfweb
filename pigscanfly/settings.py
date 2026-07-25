@@ -165,6 +165,8 @@ class Base(Configuration):
     # STRIPE SETTINGS
     # Test key for dev; Prod overrides with STRIPE_LIVE_SECRET_KEY.
     STRIPE_API_KEY = os.getenv("STRIPE_TEST_SECRET_KEY", "")
+    STRIPE_AUTOMATIC_TAX = os.getenv("STRIPE_AUTOMATIC_TAX", "true").lower() not in {
+        "0", "false", "no", "off"}
 
 
 class Dev(Base):
