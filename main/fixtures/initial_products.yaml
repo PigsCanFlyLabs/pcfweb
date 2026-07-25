@@ -1,10 +1,9 @@
 # Bootstrap products: Holden's books.
 #
 # These rows are fixture-owned: they use pks 100+ so they don't collide with
-# products created directly in prod, and they are re-loaded on every deploy
-# (web-primary runs `manage.py loaddata initial_products` after migrate), so
-# edits made in the admin to these pks will be overwritten -- edit this file
-# instead.
+# products created directly in prod, and they are re-seeded on every deploy
+# (web-primary runs `manage.py seed_products` after migrate), so edits made in
+# the admin to these pks will be overwritten -- edit this file instead.
 #
 # external_product_id is intentionally unset; the Stripe product id is
 # generated lazily on first add-to-cart (see CartProduct.generate_price_id).

@@ -15,7 +15,8 @@ from __future__ import annotations
 from typing import Any, Set
 
 import yaml
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
 
 from main.models import Product
 
@@ -46,43 +47,64 @@ class Command(BaseCommand):
 
     def handle(self, **options: Any) -> None:
         fixture_path = "main/fixtures/initial_products.yaml"
-        entries = _load_fixture(fixture_path)
+        entries = [
+            entry
+            for entry in _load_fixture(fixture_path)
+            if entry.get("model") == "main.product"
+        ]
+
+        # A truncated or empty fixture must not look like a successful seed:
+        # start-server.sh runs under `set -e`, so failing here stops the pod
+        # from coming up with no products rather than silently serving none.
+        if not entries:
+            raise CommandError(
+                f"{fixture_path} contains no main.product entries; "
+                "refusing to report a successful seed."
+            )
 
         created = 0
         updated = 0
         unchanged = 0
 
-        for entry in entries:
-            if entry.get("model") != "main.product":
-                continue
+        # All-or-nothing: a failure partway through must not leave the
+        # database half-seeded for the deploy that follows.
+        with transaction.atomic():
+            to_create = []
 
-            pk: int = entry["pk"]
-            raw_fields: dict = entry["fields"]
+            for entry in entries:
+                pk: int = entry["pk"]
+                raw_fields: dict = entry["fields"]
 
-            # Strip any generated fields that might sneak into the fixture.
-            fixture_fields = {
-                k: v for k, v in raw_fields.items() if k not in GENERATED_FIELDS
-            }
+                # Strip any generated fields that might sneak into the fixture.
+                fixture_fields = {
+                    k: v for k, v in raw_fields.items() if k not in GENERATED_FIELDS
+                }
 
-            existing = Product.objects.filter(pk=pk).first()
-
-            if existing is None:
-                # Fresh DB — create the row via Product.objects.create() so
-                # that Product.save() runs and auto-generates the Stripe
-                # product id.
-                Product.objects.create(pk=pk, **fixture_fields)
-                created += 1
-                self.stdout.write(f"Created product pk={pk}")
-            else:
-                # Existing row — update ONLY fixture-owned fields via a
-                # queryset .update() so that Product.save() (and the Stripe
-                # API call it triggers) is completely bypassed.
-                rows = Product.objects.filter(pk=pk).update(**fixture_fields)
-                if rows:
-                    updated += 1
-                    self.stdout.write(f"Updated product pk={pk}")
+                if Product.objects.filter(pk=pk).exists():
+                    # Existing row — update ONLY fixture-owned fields via a
+                    # queryset .update() so that Product.save() (and the Stripe
+                    # API call it triggers) is completely bypassed.
+                    rows = Product.objects.filter(pk=pk).update(**fixture_fields)
+                    if rows:
+                        updated += 1
+                        self.stdout.write(f"Updated product pk={pk}")
+                    else:
+                        unchanged += 1
                 else:
-                    unchanged += 1
+                    to_create.append(Product(pk=pk, **fixture_fields))
+
+            if to_create:
+                # bulk_create() writes the rows without going through
+                # Product.save(), which would call Stripe to mint a product id
+                # for every row whose external_product_id is empty -- i.e. all
+                # of them.  Seeding runs during pod startup, so a Stripe
+                # outage or an expired key would stop the primary from
+                # booting.  Leave the id empty and let it be generated lazily
+                # on first add-to-cart, as the fixture documents.
+                Product.objects.bulk_create(to_create)
+                created = len(to_create)
+                for product in to_create:
+                    self.stdout.write(f"Created product pk={product.pk}")
 
         self.stdout.write(
             self.style.SUCCESS(
