@@ -9,6 +9,8 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.html import format_html
 
+from main.digital import (
+    DigitalAssetError, download_url, link_lifetime_days, open_asset)
 from main.payments import Payments
 from typing import Any, Dict, List, Optional, Tuple, cast
 
@@ -77,6 +79,18 @@ class Product(models.Model):
         PAYMENT = 'P', 'payment'
         SUBSCRIPTION = 'S', 'subscription'
 
+    class DeliveryTypes(models.TextChoices):
+        """How a product reaches the buyer.
+
+        Deliberately a separate axis from Modes: that one is about how Stripe
+        bills (one-off vs recurring), this one is about what has to happen
+        afterwards. Inferring one from the other is what used to offer media
+        mail on a PDF -- see is_physical_good().
+        """
+        PHYSICAL = "PHYSICAL", "Physical"
+        DIGITAL = "DIGITAL", "Digital"
+        SERVICE = "SERVICE", "Service"
+
     class TaxTypes(models.TextChoices):
         # See https://stripe.com/docs/tax/tax-categories
         GOODS = 'txcd_99999999', 'Goods'
@@ -84,6 +98,11 @@ class Product(models.Model):
         HOSTING = 'txcd_10701100', 'Hosting'
         PHONES = 'txcd_34021000', 'Phones'
         BOOKS = 'txcd_35010000', 'Books'  # Physical books
+        # Digital Books - downloaded - non-subscription - with permanent
+        # rights. Distinct from BOOKS: a downloaded book is taxed differently
+        # from a printed one in a lot of US states, so reusing the physical
+        # code would file the wrong tax.
+        DIGITAL_BOOKS = 'txcd_10302000', 'Digital Books (downloaded)'
         ROUTERS = 'txcd_34040014', 'Routers'
         ELECTRONICS = 'txcd_34020027', 'Consumer Electronics'
 
@@ -115,6 +134,30 @@ class Product(models.Model):
         max_length=1,
         choices=Modes.choices,
         default=Modes.PAYMENT)
+    delivery_type = models.CharField(
+        max_length=20,
+        choices=DeliveryTypes.choices,
+        default=DeliveryTypes.PHYSICAL)
+
+    # "We are licensed to distribute this file ourselves." Not a feature flag:
+    # it is the interlock that stops a mis-set delivery_type dropdown from
+    # emailing a book somebody else holds the distribution rights to. The
+    # O'Reilly titles are Holden's writing but O'Reilly's to hand out, so this
+    # defaults to False and they stay False.
+    sells_ebook = models.BooleanField(default=False)
+
+    # Pay-what-you-want. Turns Product.price into a *suggestion*: the Stripe
+    # Price is minted with custom_unit_amount instead of a fixed unit_amount,
+    # and the buyer types their own number (including zero).
+    is_pwyw = models.BooleanField(default=False)
+
+    # Filename stem of the downloadable archive, without directory or
+    # extension: the file served is <digital_asset_name>.zip under
+    # settings.BOOK_ASSET_ROOT. An explicit field rather than something
+    # derived from `name`, so renaming a book in the admin cannot silently
+    # break fulfilment. Admin-editable, therefore never trusted -- see
+    # main.digital.resolve_asset_path.
+    digital_asset_name = models.CharField(max_length=100, blank=True)
 
     def get_display_price(self) -> str:
         formatted_price = "{0:.2f}".format(self.price / 100)
@@ -181,8 +224,26 @@ class Product(models.Model):
         return [(label, url) for label, url in candidates if url]
 
     def is_physical_good(self) -> bool:
-        return (self.mode == Product.Modes.PAYMENT
-                and self.cat != Product.Categories.SERVICES)
+        """Whether this needs a box, a stamp and an address.
+
+        Used to decide whether checkout asks for a shipping address and offers
+        shipping rates. It used to be inferred from mode/category, which was
+        only ever right by accident: it made every one-off non-service product
+        physical, so the first downloadable product would have demanded a
+        mailing address and offered the customer media mail for a PDF.
+        """
+        return self.delivery_type == Product.DeliveryTypes.PHYSICAL
+
+    def is_digitally_fulfilled(self) -> bool:
+        """Whether this site emails the buyer the file itself.
+
+        Both halves are required, and the second one is a legal guard rather
+        than a convenience: delivery_type says the product is a download,
+        sells_ebook says we hold the right to distribute it. A product marked
+        DIGITAL by mistake in the admin still delivers nothing.
+        """
+        return (self.delivery_type == Product.DeliveryTypes.DIGITAL
+                and self.sells_ebook)
 
     def is_out_of_stock(self) -> bool:
         # Stock is intentionally scoped to physical books for now. When the
@@ -339,11 +400,16 @@ class CartProduct(models.Model):
         external_product_id = self.product.ensure_external_product_id()
         if self.product.mode == Product.Modes.PAYMENT:
             price_id = Payments.create_price(
-                external_product_id, self.product.price, currency="usd")
+                external_product_id, self.product.price, currency="usd",
+                pay_what_you_want=self.product.is_pwyw)
         else:
+            # Stripe's custom_unit_amount is payment-mode only, so a
+            # recurring pay-what-you-want price cannot exist. create_price
+            # refuses the combination rather than quietly billing the preset
+            # every year as if it were a fixed price.
             price_id = Payments.create_price(
                 external_product_id, self.product.price, currency="usd",
-                interval="year"
+                interval="year", pay_what_you_want=self.product.is_pwyw
             )
         return price_id
     def save(self, *args, **kwargs):
@@ -439,6 +505,13 @@ class Order(models.Model):
     # recorded here instead of being silently swallowed.
     notified_at = models.DateTimeField(null=True, blank=True)
     notification_error = models.TextField(blank=True)
+
+    # Whether the buyer actually got their download links. Kept separate from
+    # the owner-notification pair above because the two fail independently and
+    # for different reasons -- a missing book archive is not an SMTP problem --
+    # and the owner needs to know which one to redo by hand.
+    digital_delivery_sent_at = models.DateTimeField(null=True, blank=True)
+    digital_delivery_error = models.TextField(blank=True)
 
     # When the snapshotted line items were checked against what Stripe
     # actually billed. Null means that check did not happen (or failed), so
@@ -595,6 +668,12 @@ class Order(models.Model):
             if item.quantity_adjusted():
                 line += (f"   [adjusted at checkout, was "
                          f"{item.snapshot_quantity}]")
+            if item.product is not None and item.product.is_pwyw:
+                # The snapshot holds the suggested amount, because that is
+                # what the line was worth when the cart was frozen. What the
+                # buyer actually chose to pay is only in the order total.
+                line += ("   [pay-what-you-want: shown at the suggested "
+                         "amount, see the order total for what was paid]")
             lines.append(line)
         lines += self.fulfilment_caveats()
         lines += [
@@ -609,11 +688,35 @@ class Order(models.Model):
         address = self.shipping_address_lines()
         lines += [f"  {line}" for line in address] or [
             "  (no shipping address collected -- digital/service order?)"]
+        lines += self.digital_delivery_report()
         lines += [
             "",
             "Mark the order FULFILLED in the admin once it has shipped.",
         ]
         return "\n".join(lines)
+
+    def digital_delivery_report(self) -> List[str]:
+        """What the buyer was, or was not, sent.
+
+        Delivery runs just before this email, so its outcome is known here.
+        A failure has to be loud: nothing else will ever tell the owner that
+        somebody paid for a book and did not get it.
+        """
+        if not self.digital_items():
+            return []
+        lines = ["", "Digital delivery", "----------------"]
+        if self.digital_delivery_sent_at:
+            lines.append(
+                f"  Download links emailed to {self.customer_email} at "
+                f"{self.digital_delivery_sent_at:%Y-%m-%d %H:%M %Z}.")
+        else:
+            lines.append(
+                "  *** NOT DELIVERED. This order includes a download and the "
+                "customer has not been sent it. Fix the cause below and "
+                "resend by hand. ***")
+        if self.digital_delivery_error:
+            lines.append(f"  {self.digital_delivery_error}")
+        return lines
 
     def notification_recipients(self) -> List[str]:
         recipients = []
@@ -792,6 +895,137 @@ class Order(models.Model):
         self.notified_at = timezone.now()
         self.notification_error = ""
         return True
+
+    def digital_items(self) -> List["OrderItem"]:
+        """Lines this site is licensed to deliver itself.
+
+        Reads the interlock live off the Product rather than from the
+        snapshot: revoked distribution rights must stop delivery immediately,
+        including on a webhook re-delivery for an old order.
+        """
+        return [item for item in self.items.select_related('product')
+                if item.product is not None
+                and item.product.is_digitally_fulfilled()]
+
+    def digital_delivery_subject(self) -> str:
+        return "Your download from Pigs Can Fly Labs"
+
+    def digital_delivery_body(self, links: List[Tuple[str, str]]) -> str:
+        lines = [
+            "Thank you! Here "
+            f"{'is your download' if len(links) == 1 else 'are your downloads'}"
+            f" from order #{self.pk}.",
+            "",
+        ]
+        for name, url in links:
+            lines += [f"{name}", f"  {url}", ""]
+        lines += [
+            f"{'That link' if len(links) == 1 else 'Those links'} "
+            f"{'works' if len(links) == 1 else 'work'} for "
+            f"{link_lifetime_days()} days. Each download "
+            "is a ZIP holding both the EPUB and the PDF -- no DRM, yours to "
+            "keep, so do save a copy somewhere.",
+            "",
+            "If the link has expired or something is wrong with the file, "
+            f"reply to this mail or write to {settings.DEFAULT_FROM_EMAIL} "
+            "and we will send a fresh one.",
+        ]
+        return "\n".join(lines)
+
+    def deliver_digital_goods(self) -> bool:
+        """Email the buyer a signed, expiring link per digital line.
+
+        A link rather than an attachment: an illustrated book runs to tens of
+        megabytes, Gmail refuses attachments over 25MB, and this is called
+        from inside a Stripe webhook that has to answer quickly.
+
+        Never raises, for the reason notify_owner() does not: the payment has
+        already been recorded and a non-2xx would have Stripe redelivering for
+        three days. Everything that can go wrong -- no address, a bad stem, a
+        missing archive, a dead mail server -- is recorded on the row for the
+        owner to resend from, and the order stays PAID.
+
+        Returns True only if every digital line was sent cleanly.
+        """
+        try:
+            return self._deliver_digital_goods()
+        except Exception as e:
+            logger.exception(
+                "Order #%s: digital delivery failed unexpectedly.", self.pk)
+            self._record_digital_delivery_failure(f"{type(e).__name__}: {e}")
+            return False
+
+    def _deliver_digital_goods(self) -> bool:
+        items = self.digital_items()
+        if not items:
+            # Nothing downloadable on this order, which is the common case.
+            return False
+        if not self.customer_email:
+            self._record_digital_delivery_failure(
+                "Stripe reported no customer email for this order, so the "
+                "download link could not be sent. Get an address from the "
+                "Stripe Dashboard and resend it by hand.")
+            return False
+
+        links: List[Tuple[str, str]] = []
+        problems: List[str] = []
+        for item in items:
+            product = item.product
+            assert product is not None  # digital_items() guarantees it
+            try:
+                # Resolve and open now, so a missing or unnameable archive is
+                # caught here rather than emailed out as a link that 404s.
+                open_asset(product.digital_asset_name).close()
+            except DigitalAssetError as e:
+                # Logged as well as recorded: this is somebody having paid and
+                # not received, so it should surface in the pod logs rather
+                # than only on a row nobody is watching.
+                logger.error(
+                    "Order #%s: cannot deliver %r: %s",
+                    self.pk, item.product_name, e)
+                problems.append(f"{item.product_name!r}: {e}")
+                continue
+            links.append((item.product_name,
+                          download_url(self.pk, product.pk)))
+
+        if not links:
+            self._record_digital_delivery_failure("; ".join(problems))
+            return False
+        try:
+            send_mail(
+                self.digital_delivery_subject(),
+                self.digital_delivery_body(links),
+                settings.DEFAULT_FROM_EMAIL,
+                [self.customer_email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            logger.exception(
+                "Order #%s: failed to send the download email.", self.pk)
+            problems.append(
+                f"the download email could not be sent: {type(e).__name__}: {e}")
+            self._record_digital_delivery_failure("; ".join(problems))
+            return False
+
+        # A targeted UPDATE for the same reason as the notification fields:
+        # this runs after the paid transition committed.
+        error = "; ".join(problems)[:2000]
+        Order.objects.filter(pk=self.pk).update(
+            digital_delivery_sent_at=timezone.now(),
+            digital_delivery_error=error)
+        self.digital_delivery_sent_at = timezone.now()
+        self.digital_delivery_error = error
+        return not problems
+
+    def _record_digital_delivery_failure(self, message: str) -> None:
+        try:
+            Order.objects.filter(pk=self.pk).update(
+                digital_delivery_error=message[:2000])
+        except Exception:
+            logger.exception(
+                "Order #%s: could not record the digital delivery failure.",
+                self.pk)
+        self.digital_delivery_error = message[:2000]
 
     def _record_notification_failure(self, message: str) -> None:
         # A targeted UPDATE, not save(): this runs after the paid transition

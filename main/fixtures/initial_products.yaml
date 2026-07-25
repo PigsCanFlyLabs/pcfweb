@@ -82,3 +82,81 @@
     image_name: "scaling_python_with_ray.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+# "Distributed Computing 4 Kids (and Executives)", in three SKUs sharing one
+# cover. Unlike the four O'Reilly titles above, this one is ours to sell and
+# ours to hand out -- which is what sells_ebook records on the e-book.
+#
+# isbn is deliberately left unset on all three rather than placeheld with
+# zeros; see the PR description. Two consumers make a placeholder actively
+# harmful: get_gtin() feeds the Google Merchant feed, where three SKUs sharing
+# one id is a duplicate, and get_display_text() advertises "available signed
+# on request" whenever isbn is set -- which for the e-book means offering to
+# sign a PDF. Put the real ISBN here, per SKU, once they are assigned.
+- model: main.product
+  pk: 104
+  fields:
+    name: "Distributed Computing 4 Kids (and Executives)"
+    description: >-
+      Distributed systems, explained for kids and for the executives who fund
+      them. Follow a cast of friends — and their garden gnomes — as they use
+      data to become influencers, pick up Python along the way, and work out
+      how to give the gnomes a well-earned break. It's the same clear account
+      of how computers collaborate that makes a Spark, Databricks, or Fabric
+      conversation click, minus the jargon. Written and illustrated by Holden
+      Karau.
+    price: 3000
+    image_name: "distributed_computing_4_kids.jpg"
+    cat: "B"
+    # get_brand() defaults the Books category to O'Reilly, which is right for
+    # the four titles above and wrong for this one.
+    brand: "Pigs Can Fly Labs"
+    tax_code: "txcd_35010000"
+    delivery_type: "PHYSICAL"
+    sells_ebook: false
+- model: main.product
+  pk: 105
+  fields:
+    name: "Distributed Computing 4 Kids (and Executives) — Executive Edition"
+    description: >-
+      Identical to the standard edition in every respect except the ISBN,
+      which is different. The extra $12 helps keep a developer from turning to
+      a life of enterprise support contracts. Same gnomes, same Python, same
+      distributed systems explained without the jargon — now with a number you
+      can expense.
+    price: 4200
+    image_name: "distributed_computing_4_kids.jpg"
+    cat: "B"
+    brand: "Pigs Can Fly Labs"
+    tax_code: "txcd_35010000"
+    delivery_type: "PHYSICAL"
+    sells_ebook: false
+- model: main.product
+  pk: 106
+  fields:
+    name: "Distributed Computing 4 Kids (and Executives) — E-book"
+    description: >-
+      Distributed systems, explained for kids and for the executives who fund
+      them. Follow a cast of friends — and their garden gnomes — as they use
+      data to become influencers, pick up Python along the way, and work out
+      how to give the gnomes a well-earned break. It's the same clear account
+      of how computers collaborate that makes a Spark, Databricks, or Fabric
+      conversation click, minus the jargon. Written and illustrated by Holden
+      Karau. Delivered by email as a DRM-free ZIP containing both the EPUB and
+      the PDF.
+    # Pay what you want: this is the amount Stripe pre-fills as a suggestion,
+    # not a price. The floor is zero, on the owner's explicit instruction.
+    price: 1500
+    is_pwyw: true
+    image_name: "distributed_computing_4_kids.jpg"
+    cat: "B"
+    brand: "Pigs Can Fly Labs"
+    # Digital Books - downloaded - non-subscription - with permanent rights.
+    # Not the physical-books code: a download is taxed differently from a
+    # printed book in a lot of US states.
+    tax_code: "txcd_10302000"
+    delivery_type: "DIGITAL"
+    # This one is ours to distribute, so fulfilment is allowed to send it.
+    sells_ebook: true
+    # <stem>.zip under settings.BOOK_ASSET_ROOT; must match the archive
+    # committed to the pcfweb-book-assets repo.
+    digital_asset_name: "distributed_computing_4_kids"

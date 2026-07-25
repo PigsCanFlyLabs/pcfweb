@@ -178,6 +178,27 @@ class Base(Configuration):
     # disabled and visitors just get the default links.
     GEOIP_PATH = os.getenv("GEOIP_PATH", os.path.join(BASE_DIR, 'geoip'))
 
+    # DIGITAL FULFILMENT
+    # Where the book archives live. build.sh copies them out of the sibling
+    # pcfweb-book-assets checkout and the Dockerfile lands them here; BASE_DIR
+    # is /opt/app in the image, so this resolves to /opt/app/book-assets
+    # there and to ./book-assets locally.
+    #
+    # Deliberately neither STATIC_ROOT nor MEDIA_ROOT: conf/nginx.default
+    # aliases /static and /media straight off disk, so anything under those is
+    # world-readable, and these are files people paid for. The only route to
+    # one is a signed link through DigitalDownloadView.
+    BOOK_ASSET_ROOT = os.getenv(
+        "BOOK_ASSET_ROOT", os.path.join(BASE_DIR, 'book-assets'))
+
+    # How long an emailed download link keeps working.
+    DIGITAL_DOWNLOAD_MAX_AGE = 7 * 24 * 60 * 60
+
+    # Absolute base for those links. They are built from inside the Stripe
+    # webhook, where the request's Host header belongs to Stripe's delivery
+    # rather than to this site, so there is nothing to derive it from.
+    SITE_BASE_URL = os.getenv("SITE_BASE_URL", "https://www.pigscanfly.ca")
+
     # STRIPE SETTINGS
     # Test key for dev; Prod overrides with STRIPE_LIVE_SECRET_KEY.
     STRIPE_API_KEY = os.getenv("STRIPE_TEST_SECRET_KEY", "")

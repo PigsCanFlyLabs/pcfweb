@@ -26,6 +26,13 @@ if [ -n "$oversized" ]; then
   exit 1
 fi
 
+# Digital book archives, from the sibling pcfweb-book-assets checkout (Git
+# LFS). These are the files paying customers get emailed a link to, so every
+# one is validated -- LFS pointer, size, ZIP magic -- before it can reach the
+# image. The guard fails the build loudly; see scripts/check-book-assets.sh
+# and the README in pcfweb-book-assets.
+./scripts/check-book-assets.sh "${BOOK_ASSETS_DIR:-../pcfweb-book-assets}" book-assets
+
 ./scripts/checks.sh
 # deploy.yaml is the single source of truth for the image tag.
 TAG=$(grep -oE 'holdenk/pcfweb:[A-Za-z0-9._-]+' deploy.yaml | head -1)
