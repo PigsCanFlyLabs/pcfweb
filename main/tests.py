@@ -1,8 +1,10 @@
+from io import StringIO
 import re
 from unittest import mock
 
 import stripe
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import Client, RequestFactory, TestCase, override_settings
 
@@ -277,6 +279,213 @@ class CheckoutTaxTest(TestCase):
         self.assertIn("STRIPE_AUTOMATIC_TAX", "\n".join(logs.output))
 
 
+class ProductCreationTaxCodeTest(TestCase):
+    @mock.patch("main.payments.stripe.Product.create")
+    def test_create_product_sends_tax_code_when_set(self, create_product):
+        create_product.return_value = {"id": "prod_taxed"}
+
+        product_id = Payments.create_product(
+            "Book",
+            "A physical book.",
+            2500,
+            tax_code=Product.TaxTypes.BOOKS,
+        )
+
+        self.assertEqual(product_id, "prod_taxed")
+        create_product.assert_called_once_with(
+            name="Book",
+            description="A physical book.",
+            tax_code=Product.TaxTypes.BOOKS,
+        )
+
+    @mock.patch("main.payments.stripe.Product.create")
+    def test_create_product_strips_tax_code_when_set(self, create_product):
+        create_product.return_value = {"id": "prod_taxed"}
+
+        Payments.create_product(
+            "Book",
+            "A physical book.",
+            2500,
+            tax_code=f"  {Product.TaxTypes.BOOKS}  ",
+        )
+
+        create_product.assert_called_once_with(
+            name="Book",
+            description="A physical book.",
+            tax_code=Product.TaxTypes.BOOKS,
+        )
+
+    @mock.patch("main.payments.stripe.Product.create")
+    def test_create_product_omits_blank_tax_code(self, create_product):
+        create_product.return_value = {"id": "prod_default_tax"}
+
+        Payments.create_product("Sticker", "A sticker.", 500, tax_code="   ")
+
+        create_product.assert_called_once_with(
+            name="Sticker",
+            description="A sticker.",
+        )
+
+
+class BackfillStripeProductTaxCodesTest(TestCase):
+    def _product(
+        self,
+        name,
+        external_product_id,
+        tax_code=Product.TaxTypes.BOOKS,
+    ):
+        return Product.objects.create(
+            name=name,
+            description=f"{name} description.",
+            price=1000,
+            external_product_id=external_product_id,
+            tax_code=tax_code,
+        )
+
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.modify")
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.retrieve")
+    def test_dry_run_performs_no_writes(self, retrieve, modify):
+        self._product("Book", "prod_book", Product.TaxTypes.BOOKS)
+        retrieve.return_value = {"tax_code": Product.TaxTypes.GOODS}
+        out = StringIO()
+
+        call_command("backfill_stripe_product_tax_codes", stdout=out)
+
+        modify.assert_not_called()
+        self.assertIn(
+            "DRY RUN: no changes were written to Stripe. Re-run with --apply to write.",
+            out.getvalue(),
+        )
+        self.assertIn("DRY-RUN would-change", out.getvalue())
+        self.assertIn("SUMMARY examined=1 would-change=1", out.getvalue())
+
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.modify")
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.retrieve")
+    def test_apply_modifies_only_when_tax_code_differs(self, retrieve, modify):
+        self._product("Matching book", "prod_matching", Product.TaxTypes.BOOKS)
+        self._product("Wrong service", "prod_wrong", Product.TaxTypes.SERVICES)
+        retrieve.side_effect = [
+            {"tax_code": Product.TaxTypes.BOOKS},
+            {"tax_code": Product.TaxTypes.GOODS},
+        ]
+        out = StringIO()
+
+        call_command("backfill_stripe_product_tax_codes", "--apply", stdout=out)
+
+        modify.assert_called_once_with(
+            "prod_wrong",
+            tax_code=Product.TaxTypes.SERVICES,
+        )
+        self.assertIn("OK tax-code-matches", out.getvalue())
+        self.assertNotIn("DRY RUN: no changes were written", out.getvalue())
+        self.assertIn("SUMMARY examined=2 changed=1", out.getvalue())
+
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.modify")
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.retrieve")
+    def test_backfill_reads_tax_code_from_object_attribute(self, retrieve, modify):
+        class StripeProduct:
+            tax_code = Product.TaxTypes.GOODS
+
+        self._product("Attribute response", "prod_attribute", Product.TaxTypes.BOOKS)
+        retrieve.return_value = StripeProduct()
+        out = StringIO()
+
+        call_command("backfill_stripe_product_tax_codes", "--apply", stdout=out)
+
+        modify.assert_called_once_with(
+            "prod_attribute",
+            tax_code=Product.TaxTypes.BOOKS,
+        )
+        self.assertIn("SUMMARY examined=1 changed=1", out.getvalue())
+
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.modify")
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.retrieve")
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.logger")
+    def test_modify_error_does_not_print_success_and_is_counted(self, logger, retrieve, modify):
+        self._product("Modify fails", "prod_modify_fails", Product.TaxTypes.BOOKS)
+        retrieve.return_value = {"tax_code": Product.TaxTypes.GOODS}
+        modify.side_effect = stripe.APIConnectionError("connection failed")
+        out = StringIO()
+        err = StringIO()
+
+        call_command(
+            "backfill_stripe_product_tax_codes",
+            "--apply",
+            stdout=out,
+            stderr=err,
+        )
+
+        modify.assert_called_once_with(
+            "prod_modify_fails",
+            tax_code=Product.TaxTypes.BOOKS,
+        )
+        self.assertNotIn("APPLY changed", out.getvalue())
+        self.assertIn("APPLY failed-change", err.getvalue())
+        self.assertIn("ERROR stripe-product-tax-code", err.getvalue())
+        logger.error.assert_called_once()
+        self.assertIn("SUMMARY examined=1 changed=1", out.getvalue())
+        self.assertIn("errored=1", out.getvalue())
+
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.modify")
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.retrieve")
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.logger")
+    def test_stripe_error_does_not_abort_and_is_counted(self, logger, retrieve, modify):
+        self._product("Broken", "prod_broken", Product.TaxTypes.BOOKS)
+        self._product("Still checked", "prod_checked", Product.TaxTypes.SERVICES)
+        retrieve.side_effect = [
+            stripe.InvalidRequestError("No such product", "id"),
+            {"tax_code": Product.TaxTypes.GOODS},
+        ]
+        out = StringIO()
+        err = StringIO()
+
+        call_command(
+            "backfill_stripe_product_tax_codes",
+            "--apply",
+            stdout=out,
+            stderr=err,
+        )
+
+        modify.assert_called_once_with(
+            "prod_checked",
+            tax_code=Product.TaxTypes.SERVICES,
+        )
+        self.assertIn("ERROR stripe-product-tax-code", err.getvalue())
+        logger.error.assert_called_once()
+        self.assertIn("SUMMARY examined=1 changed=1", out.getvalue())
+        self.assertIn("errored=1", out.getvalue())
+
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.modify")
+    @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.retrieve")
+    def test_missing_external_id_and_local_tax_code_are_skipped(self, retrieve, modify):
+        Product.objects.bulk_create(
+            [
+                Product(
+                    name="Never synced",
+                    description="No Stripe id.",
+                    price=1000,
+                    external_product_id="",
+                    tax_code=Product.TaxTypes.BOOKS,
+                ),
+                Product(
+                    name="No local tax code",
+                    description="Blank local tax code.",
+                    price=1000,
+                    external_product_id="prod_blank_tax",
+                    tax_code="",
+                ),
+            ]
+        )
+        out = StringIO()
+
+        call_command("backfill_stripe_product_tax_codes", stdout=out)
+
+        retrieve.assert_not_called()
+        modify.assert_not_called()
+        self.assertIn("skipped-no-external-id=1", out.getvalue())
+        self.assertIn("skipped-no-local-code=1", out.getvalue())
+
+
 class ProductSaveStripeTest(TestCase):
     @mock.patch("main.models.Payments")
     def test_save_skips_stripe_when_external_id_present(self, payments):
@@ -291,7 +500,13 @@ class ProductSaveStripeTest(TestCase):
     def test_save_generates_stripe_id_when_missing(self, payments):
         payments.create_product.return_value = "prod_new"
         product = Product.objects.create(name="Fresh product", price=1000)
-        payments.create_product.assert_called_once()
+        payments.create_product.assert_called_once_with(
+            "Fresh product",
+            "No description.",
+            1000,
+            currency="usd",
+            tax_code=Product.TaxTypes.GOODS,
+        )
         self.assertEqual(product.external_product_id, "prod_new")
 
 
