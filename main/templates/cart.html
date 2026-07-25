@@ -41,7 +41,10 @@
                                     <h6>{{ product.total_display_price }}</h6>
                                 </td>
                                 <td class="main-border-button">
-                                    <a href="{% url 'remove-from-cart' product.pk %}" class="" style="margin-top: 0;">X</a>
+                                    <form method="POST" action="{% url 'remove-from-cart' product.pk %}">
+                                        {% csrf_token %}
+                                        <button type="submit" class="" style="margin-top: 0;">X</button>
+                                    </form>
                                 </td>
                             </tr>
                         {% endfor %}

@@ -4,7 +4,10 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.contrib.staticfiles import finders
 from django.contrib.staticfiles.storage import staticfiles_storage
-from django.shortcuts import redirect, render
+from django.db import transaction
+from django.db.models import Q
+from django.http import Http404, HttpResponseBadRequest
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.decorators import method_decorator
 from django.views import View
@@ -63,9 +66,15 @@ class ProductsView(View):
             cat = category or request.GET["category"]
             try:
                 cat_name = Product.Categories(cat).label
-            except:
-                cat = cat.upper()
-                cat_name = Product.Categories(cat).label
+            except ValueError:
+                # Categories are stored upper-cased ("B", "OE"); be forgiving
+                # about the case in the URL, but 404 on anything else rather
+                # than letting the ValueError become a 500.
+                try:
+                    cat = cat.upper()
+                    cat_name = Product.Categories(cat).label
+                except ValueError:
+                    raise Http404(f"No such product category: {cat}")
             extra_style = None
             bg_img_name = f"assets/images/{cat_name}.jpg".lower()
             if finders.find(f"{bg_img_name}"):
@@ -94,7 +103,7 @@ class SubscribeView(View):
 
 class ProductView(View):
     def get(self, request, pk):
-        product = Product.objects.get(pk=pk)
+        product = get_object_or_404(Product, pk=pk)
         return render(request, 'single-product.html', context={
             'title': product.name,
             'product': product,
@@ -103,30 +112,81 @@ class ProductView(View):
 
 class BaseCartView():
     """Common base cart view."""
-    def get_cart(self, request) -> Optional[Cart]:
+
+    def get_cart(self, request) -> Cart:
+        """Return the cart belonging to *this* requester.
+
+        Every cart lookup in this app goes through here, so this is also the
+        ownership boundary: an anonymous requester only ever gets the cart
+        their session points at, and a logged-in requester only ever gets the
+        cart attached to their user row.
+        """
         user_cart = None
         session_cart = None
-        if hasattr(request, "user") and request.user is not None and request.user is User:
-            try:
-                user_cart = Cart.objects.get(user=request.user)
-            except:
-                user_cart = Cart.objects.create(user=request.user)
-                user_cart.save()
-        else:
-            if "cart_id" in request.session and request.session["cart_id"] is not None:
-                session_cart = Cart.objects.get(cart_id=request.session["cart_id"])
-            else:
+        user = getattr(request, "user", None)
+        if user is not None and user.is_authenticated:
+            user_cart, _ = Cart.objects.get_or_create(user=user)
+        # An anonymous cart can still be attached to the session even for a
+        # logged-in user -- they filled it before logging in -- so always look,
+        # and merge below if both exist.
+        cart_id = request.session.get("cart_id")
+        if cart_id is not None:
+            # user__isnull keeps a stale/forged cart_id from ever resolving to
+            # some user's persistent cart.
+            session_cart = Cart.objects.filter(
+                cart_id=cart_id, user__isnull=True).first()
+            if session_cart is None:
+                # Stale cookie pointing at a cart that no longer exists;
+                # drop it instead of 500ing on every cart page from now on.
+                del request.session["cart_id"]
+
+        if user_cart is None:
+            if session_cart is None:
                 session_cart = Cart.objects.create()
                 request.session["cart_id"] = session_cart.cart_id
-        if user_cart is None:
             return session_cart
         if session_cart is None:
             return user_cart
-        # Ok we have two carts time to merge them
-        for product in session_cart.products.all():
-            product.cart = user_cart
-        del request.session["cart_id"]
+        # Ok we have two carts time to merge them.
+        self._merge_cart(request, session_cart, user_cart)
         return user_cart
+
+    def _merge_cart(self, request, session_cart: Cart, user_cart: Cart) -> None:
+        """Fold an anonymous session cart into the logged-in user's cart.
+
+        Rows for a product the user cart already holds have their quantity
+        added on and are dropped; the rest are reparented. Either way we never
+        end up with two rows for the same (cart, product).
+
+        The whole thing is one transaction: adding a quantity onto the
+        surviving row and deleting the row it came from are two statements,
+        and a crash between them would lose the quantity for good. All or
+        nothing means a failed merge leaves the session cart untouched and
+        the next request can just retry it.
+        """
+        with transaction.atomic():
+            # Rows are linked to a cart both by FK and by the M2M; take the
+            # union so a row that only made it into one still gets merged.
+            session_products = CartProduct.objects.filter(
+                Q(cart=session_cart) | Q(cart_products=session_cart)).distinct()
+            for cart_product in session_products:
+                session_cart.products.remove(cart_product)
+                existing = CartProduct.objects.filter(
+                    cart=user_cart, product=cart_product.product).first()
+                if existing is not None:
+                    existing.quantity += cart_product.quantity
+                    existing.save()
+                    user_cart.products.add(existing)
+                    cart_product.delete()
+                else:
+                    cart_product.cart = user_cart
+                    cart_product.save()
+                    user_cart.products.add(cart_product)
+            session_cart.delete()
+        # The session lives outside the transaction, so drop the pointer only
+        # once the merge has actually committed. If the block above rolled
+        # back, the session still points at an intact cart.
+        del request.session["cart_id"]
 
 class SignupView(View):
     def get(self, request):
@@ -147,8 +207,8 @@ class SignupView(View):
             user.set_password(password)
             user.save()
 
-            cart = Cart.objects.create(user=user)
-            cart.save()
+            # No cart is created here: get_cart() owns that, and creating one
+            # unconditionally on a OneToOneField is an unprotected insert.
 
             login(request, user)
             return redirect('home')
@@ -179,27 +239,54 @@ class CartView(View, BaseCartView):
 
 
 class AddToCartView(View, BaseCartView):
-    def get(self, request, product_id, quantity):
-        product = Product.objects.get(pk=product_id)
-        cart = self.get_cart(request)
-        quantity = quantity
+    # What a PositiveBigIntegerField can physically hold. Python ints are
+    # arbitrary precision, so without this a 20-digit quantity parses happily
+    # and then 500s at write time on BIGINT overflow. This is a storage
+    # capacity guard, not a purchase limit -- whether there should be a
+    # product-level cap on quantity is a separate, still-open decision.
+    MAX_QUANTITY = 9223372036854775807
 
-        try:
-            cart_product = CartProduct.objects.get(cart=cart, product=product)
-        except CartProduct.DoesNotExist:
-            cart_product = CartProduct.objects.create(
-                cart=cart, product=product, quantity=quantity)
+    # POST only: a GET here is triggerable cross-site by an <img> tag or a
+    # link prefetch, with no CSRF token involved.
+    def post(self, request, product_id: int, quantity: int):
+        # The quantity is a real form field, so the buy form works with no
+        # JavaScript at all; the URL segment stays as the fallback for
+        # existing links.
+        posted_quantity = request.POST.get('quantity')
+        if posted_quantity is not None:
+            try:
+                quantity = int(posted_quantity)
+            except ValueError:
+                return HttpResponseBadRequest("Quantity must be a number.")
+        # Both paths converge here, so neither can disagree about the bounds.
+        if quantity < 1:
+            return HttpResponseBadRequest("Quantity must be at least 1.")
+        if quantity > self.MAX_QUANTITY:
+            return HttpResponseBadRequest(
+                f"Quantity must be at most {self.MAX_QUANTITY}.")
+        product = get_object_or_404(Product, pk=product_id)
+        cart = self.get_cart(request)
+
+        cart_product, created = CartProduct.objects.get_or_create(
+            cart=cart, product=product, defaults={'quantity': quantity})
+        if not created:
+            # Adding a product that's already in the cart adds to what's
+            # there rather than silently discarding the new quantity.
+            cart_product.quantity += quantity
             cart_product.save()
 
         cart.products.add(cart_product)
-        cart.save()
         return redirect('cart')
 
 
 class RemoveFromCartView(View, BaseCartView):
-    def get(self, request, product_id):
-        cart_product = CartProduct.objects.get(pk=product_id)
+    # POST only, for the same reason as AddToCartView.
+    def post(self, request, cart_product_id: int):
         cart = self.get_cart(request)
+        # Scoped to the requester's own cart: a row belonging to somebody
+        # else's cart is a 404, never a delete.
+        cart_product = get_object_or_404(
+            CartProduct, pk=cart_product_id, cart=cart)
         cart.products.remove(cart_product)
         cart_product.delete()
         return redirect('cart')

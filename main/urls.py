@@ -15,9 +15,11 @@ urlpatterns = [
 
     # Cart
     path('cart', views.CartView.as_view(), name='cart'),
-    path('add-to-cart/<int:product_id>/<quantity>',
+    # Both are POST-only (see views); <int:quantity> keeps non-numeric and
+    # negative quantities from ever reaching the view.
+    path('add-to-cart/<int:product_id>/<int:quantity>',
          views.AddToCartView.as_view(), name='add-to-cart'),
-    path('remove-from-cart/<int:product_id>',
+    path('remove-from-cart/<int:cart_product_id>',
          views.RemoveFromCartView.as_view(), name='remove-from-cart'),
 
     # Checkout flow
