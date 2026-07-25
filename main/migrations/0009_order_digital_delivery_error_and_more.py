@@ -46,6 +46,11 @@ class Migration(migrations.Migration):
         ),
         migrations.AddField(
             model_name="product",
+            name="on_oreilly_safari",
+            field=models.BooleanField(db_default=False, default=False),
+        ),
+        migrations.AddField(
+            model_name="product",
             name="sells_ebook",
             field=models.BooleanField(db_default=False, default=False),
         ),

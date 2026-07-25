@@ -134,7 +134,7 @@ class Product(models.Model):
         max_length=1,
         choices=Modes.choices,
         default=Modes.PAYMENT)
-    # db_default as well as default, on this and the three below. A rolling
+    # db_default as well as default, on this and the four below. A rolling
     # deploy migrates while the old image is still serving, and Django's
     # AddField backfills a default and then drops it out of the schema -- so
     # without a database-side default these NOT NULL columns cannot be omitted
@@ -152,6 +152,15 @@ class Product(models.Model):
     # O'Reilly titles are Holden's writing but O'Reilly's to hand out, so this
     # defaults to False and they stay False.
     sells_ebook = models.BooleanField(default=False, db_default=False)
+
+    # "This title is on O'Reilly's learning platform." Drives the Safari link
+    # in get_alt_links(), which used to be gated on `isbn` being set -- an
+    # inference that held only for as long as every book here was an O'Reilly
+    # book. A self-published title with an ISBN would have advertised a free
+    # trial of a platform it is not on, which is a false claim to a customer
+    # rather than merely a dead link. Defaults False so the failure mode of a
+    # forgotten flag is a missing link, not an invented one.
+    on_oreilly_safari = models.BooleanField(default=False, db_default=False)
 
     # Pay-what-you-want. Turns Product.price into a *suggestion*: the Stripe
     # Price is minted with custom_unit_amount instead of a fixed unit_amount,
@@ -212,6 +221,13 @@ class Product(models.Model):
     def __repr__(self) -> str:
         return f'<Product: {self.name}>'
 
+    # One Commission Junction click-through to O'Reilly's platform, not a
+    # per-title product page -- which is why on_oreilly_safari is a flag and
+    # this is a constant, rather than a per-row URL field like amazon_link.
+    # Four rows holding four copies of one affiliate id is four chances for
+    # them to drift apart.
+    OREILLY_SAFARI_URL = "https://www.tkqlhce.com/click-7645222-14045081"
+
     def get_alt_links(self, country: Optional[str] = None):
         candidates = []
         if country == "IN":
@@ -224,8 +240,7 @@ class Product(models.Model):
             ("Buy on Bookshop.org (support local bookstores)",
              self.bookshop_link),
             ("Read on O'Reilly Safari (free trial)",
-             "https://www.tkqlhce.com/click-7645222-14045081"
-             if self.isbn else None),
+             self.OREILLY_SAFARI_URL if self.on_oreilly_safari else None),
             ("Buy on Kindle (e-book)", self.kindle_link),
             ("Follow along on Kickstarter", self.kickstarter),
         ]

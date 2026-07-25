@@ -125,6 +125,7 @@ class RollingDeployOldCodeWriteTest(TestCase):
         self.assertEqual(product.digital_asset_name, "")
         self.assertFalse(product.is_pwyw)
         self.assertFalse(product.sells_ebook)
+        self.assertFalse(product.on_oreilly_safari)
 
     def test_a_product_written_by_old_code_is_treated_as_physical(self):
         # The default has to be the *safe* one, not merely present: a product
@@ -247,6 +248,7 @@ class PostgresDigitalColumnDefaultDDLTest(SimpleTestCase):
         ("Product", "delivery_type"),
         ("Product", "digital_asset_name"),
         ("Product", "is_pwyw"),
+        ("Product", "on_oreilly_safari"),
         ("Product", "sells_ebook"),
     ]
 

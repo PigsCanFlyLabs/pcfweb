@@ -26,6 +26,10 @@
     image_name: "learning_spark_1ed.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # On O'Reilly's learning platform, so the Safari trial link is a
+    # true statement for this title. Explicit rather than inferred from
+    # the ISBN -- see Product.on_oreilly_safari.
+    on_oreilly_safari: true
 - model: main.product
   pk: 101
   fields:
@@ -45,6 +49,10 @@
     image_name: "high_performance_spark.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # On O'Reilly's learning platform, so the Safari trial link is a
+    # true statement for this title. Explicit rather than inferred from
+    # the ISBN -- see Product.on_oreilly_safari.
+    on_oreilly_safari: true
 - model: main.product
   pk: 102
   fields:
@@ -64,6 +72,10 @@
     image_name: "kubeflow_for_ml.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # On O'Reilly's learning platform, so the Safari trial link is a
+    # true statement for this title. Explicit rather than inferred from
+    # the ISBN -- see Product.on_oreilly_safari.
+    on_oreilly_safari: true
 - model: main.product
   pk: 103
   fields:
@@ -82,16 +94,24 @@
     image_name: "scaling_python_with_ray.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # On O'Reilly's learning platform, so the Safari trial link is a
+    # true statement for this title. Explicit rather than inferred from
+    # the ISBN -- see Product.on_oreilly_safari.
+    on_oreilly_safari: true
 # "Distributed Computing 4 Kids (and Executives)", in three SKUs sharing one
 # cover. Unlike the four O'Reilly titles above, this one is ours to sell and
 # ours to hand out -- which is what sells_ebook records on the e-book.
 #
-# isbn is deliberately left unset on all three rather than placeheld with
-# zeros; see the PR description. Two consumers make a placeholder actively
-# harmful: get_gtin() feeds the Google Merchant feed, where three SKUs sharing
-# one id is a duplicate, and get_display_text() advertises "available signed
-# on request" whenever isbn is set -- which for the e-book means offering to
-# sign a PDF. Put the real ISBN here, per SKU, once they are assigned.
+# The standard print edition's ISBN is assigned and set below. The other two
+# are still unset, and are deliberately left blank rather than placeheld with
+# zeros: get_gtin() feeds the Google Merchant feed, where three SKUs sharing
+# one id is a duplicate. Add each real ISBN here as it is assigned.
+#
+# The Executive Edition's has not been issued yet. The e-book's belongs in the
+# separate ebook_isbn field being added elsewhere, not in `isbn` -- an EPUB
+# gets its own ISBN, and get_display_text() offers "available signed on
+# request" whenever `isbn` is set, which for a PDF means offering to sign a
+# download.
 - model: main.product
   pk: 104
   fields:
@@ -105,6 +125,9 @@
       conversation click, minus the jargon. Written and illustrated by Holden
       Karau.
     price: 3000
+    # Standard print edition. Self-published, so this ISBN is ours; it is not
+    # an O'Reilly title and on_oreilly_safari stays unset accordingly.
+    isbn: "9781960595997"
     image_name: "distributed_computing_4_kids.jpg"
     cat: "B"
     # get_brand() defaults the Books category to O'Reilly, which is right for

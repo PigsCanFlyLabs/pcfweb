@@ -192,16 +192,34 @@ class DistributedComputing4KidsCatalogTest(TestCase):
             Product.objects.get(pk=EBOOK_PK).digital_asset_name,
             digital.ASSET_NAME_PATTERN)
 
-    def test_the_isbns_are_left_unset_rather_than_placeheld(self):
-        # A shared placeholder would emit three Merchant-feed products with
-        # one id, and would advertise signed copies -- of a PDF, for 106.
-        for pk in (104, 105, EBOOK_PK):
+    def test_the_standard_print_edition_carries_its_real_isbn(self):
+        standard = Product.objects.get(pk=104)
+
+        self.assertEqual(standard.isbn, "9781960595997")
+        # Now a real GTIN, so the feed identifies it by ISBN rather than
+        # falling back to a made-up mpn.
+        self.assertEqual(standard.get_gtin(), "9781960595997")
+
+    def test_the_print_edition_offers_a_signature_and_the_others_do_not(self):
+        # get_display_text() adds the note whenever isbn is set. That is right
+        # for a printed book Holden can physically sign, and is the reason the
+        # e-book's ISBN must not be parked in `isbn` -- see the fixture
+        # comment and ebook_isbn.
+        self.assertIn("signed on request",
+                      Product.objects.get(pk=104).get_display_text())
+        for pk in (105, EBOOK_PK):
+            with self.subTest(pk=pk):
+                self.assertNotIn("signed on request",
+                                 Product.objects.get(pk=pk).get_display_text())
+
+    def test_the_unassigned_isbns_are_left_unset_rather_than_placeheld(self):
+        # A shared placeholder would emit Merchant-feed products with one id.
+        # 105's ISBN is not issued yet; 106's belongs in ebook_isbn.
+        for pk in (105, EBOOK_PK):
             with self.subTest(pk=pk):
                 product = Product.objects.get(pk=pk)
                 self.assertFalse(product.isbn)
                 self.assertIsNone(product.get_gtin())
-                self.assertNotIn("signed on request",
-                                 product.get_display_text())
 
     def test_the_new_skus_do_not_collide_in_the_merchant_feed(self):
         response = self.client.get("/google_products.xml")
@@ -211,9 +229,14 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         ids = re.findall(r"<g:id>(\d+)</g:id>", body)
         self.assertEqual(len(ids), len(set(ids)))
         self.assertIn("104", ids)
-        # No gtin, so each falls back to a distinct mpn.
+        # 104 now has a real ISBN, so it is identified by gtin; 105 and 106
+        # still have none and fall back to a distinct mpn each.
+        self.assertIn("<g:gtin>9781960595997</g:gtin>", body)
         mpns = re.findall(r"<g:mpn>(PCF\d+)</g:mpn>", body)
-        self.assertEqual(sorted(mpns), ["PCF104", "PCF105", "PCF106"])
+        self.assertEqual(sorted(mpns), ["PCF105", "PCF106"])
+        # Whatever identifies each SKU, no two may share it.
+        gtins = re.findall(r"<g:gtin>(\d+)</g:gtin>", body)
+        self.assertEqual(len(gtins), len(set(gtins)))
 
     def test_the_new_books_are_not_attributed_to_oreilly(self):
         # get_brand() defaults the Books category to O'Reilly, which these
@@ -253,8 +276,82 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         self.assertContains(response, "15.00")
 
     def test_no_retailer_links_are_claimed_yet(self):
-        # Bookshop links are ISBN-derived and the site lists none.
+        # Every alt link is driven by a field the fixture leaves unset:
+        # amazon_link, bookshop_link and the rest are stored URLs, not
+        # anything derived from the ISBN, so giving 104 an ISBN must not
+        # conjure a retailer that does not stock the book.
         for pk in (104, 105, EBOOK_PK):
             with self.subTest(pk=pk):
                 self.assertEqual(
                     Product.objects.get(pk=pk).get_alt_links(), [])
+
+
+class OReillySafariLinkTest(TestCase):
+    """The Safari trial link must track the publisher, not the ISBN.
+
+    It used to be emitted for any product with an ISBN set, which was
+    indistinguishable from "is an O'Reilly book" only for as long as every
+    book in the catalogue was one. DC4K is self-published and is not on the
+    platform, so the moment pk 104 got its ISBN that link became a false
+    claim to a customer -- an offer of a free trial for a book the trial does
+    not contain. on_oreilly_safari states the fact instead of inferring it.
+    """
+
+    fixtures = ["initial_products"]
+
+    LABEL = "Read on O'Reilly Safari (free trial)"
+
+    OREILLY_PKS = (100, 101, 102, 103)
+    SELF_PUBLISHED_PKS = (104, 105, EBOOK_PK)
+
+    def safari_url(self, pk):
+        links = dict(Product.objects.get(pk=pk).get_alt_links())
+        return links.get(self.LABEL)
+
+    def test_the_oreilly_titles_keep_the_safari_link(self):
+        for pk in self.OREILLY_PKS:
+            with self.subTest(pk=pk):
+                self.assertEqual(
+                    self.safari_url(pk), Product.OREILLY_SAFARI_URL)
+
+    def test_the_self_published_book_never_advertises_safari(self):
+        for pk in self.SELF_PUBLISHED_PKS:
+            with self.subTest(pk=pk):
+                self.assertIsNone(self.safari_url(pk))
+
+    def test_an_isbn_alone_does_not_produce_the_link(self):
+        # The actual regression. pk 104 has a real ISBN and must still be
+        # Safari-free; asserting on the flag as well as the link keeps this
+        # from passing for the accidental reason that 104 has no ISBN.
+        standard = Product.objects.get(pk=104)
+
+        self.assertTrue(standard.isbn)
+        self.assertFalse(standard.on_oreilly_safari)
+        self.assertIsNone(self.safari_url(104))
+
+    def test_the_link_follows_the_flag_and_not_the_isbn(self):
+        # Guards the guard, in both directions: an O'Reilly book stripped of
+        # its ISBN keeps the link, and a self-published one flagged by hand
+        # gains it. If get_alt_links() ever went back to reading `isbn` this
+        # is what would fail.
+        # Queryset updates rather than save(): fixture rows carry no
+        # external_product_id, so Product.save() would call Stripe to mint
+        # one.
+        Product.objects.filter(pk=100).update(isbn="")
+        self.assertEqual(self.safari_url(100), Product.OREILLY_SAFARI_URL)
+
+        Product.objects.filter(pk=104).update(on_oreilly_safari=True)
+        self.assertEqual(self.safari_url(104), Product.OREILLY_SAFARI_URL)
+
+    def test_a_product_page_for_the_new_book_does_not_offer_safari(self):
+        # Through the view, not just the model: this is what a customer sees.
+        for pk in self.SELF_PUBLISHED_PKS:
+            with self.subTest(pk=pk):
+                response = self.client.get(f"/product/{pk}")
+                self.assertNotContains(response, "O'Reilly Safari")
+                self.assertNotContains(response, Product.OREILLY_SAFARI_URL)
+
+    def test_a_product_page_for_an_oreilly_book_still_offers_safari(self):
+        response = self.client.get("/product/100")
+
+        self.assertContains(response, Product.OREILLY_SAFARI_URL)
