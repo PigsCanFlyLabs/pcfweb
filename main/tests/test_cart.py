@@ -180,9 +180,9 @@ class AddToCartWithoutJavascriptTest(CartTestBase):
         self.assertEqual(CartProduct.objects.get().quantity, 4)
 
     def test_a_posted_quantity_of_zero_is_a_400(self):
-        self.assertEqual(
-            self.client.post("/add-to-cart/100/1", {"quantity": "0"}).status_code,
-            400)
+        response = self.client.post("/add-to-cart/100/1", {"quantity": "0"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"Quantity must be at least 1.")
         self.assertFalse(CartProduct.objects.exists())
 
     def test_a_quantity_too_big_for_the_column_is_a_400_not_a_500(self):
@@ -192,9 +192,17 @@ class AddToCartWithoutJavascriptTest(CartTestBase):
 
         posted = self.client.post("/add-to-cart/100/1", {"quantity": str(too_big)})
         self.assertEqual(posted.status_code, 400)
+        self.assertEqual(
+            posted.content,
+            f"Quantity must be at most {AddToCartView.MAX_QUANTITY}.".encode(),
+        )
 
         from_url = self.client.post(f"/add-to-cart/100/{too_big}")
         self.assertEqual(from_url.status_code, 400)
+        self.assertEqual(
+            from_url.content,
+            f"Quantity must be at most {AddToCartView.MAX_QUANTITY}.".encode(),
+        )
 
         self.assertFalse(CartProduct.objects.exists())
 
@@ -208,10 +216,9 @@ class AddToCartWithoutJavascriptTest(CartTestBase):
             CartProduct.objects.get().quantity, AddToCartView.MAX_QUANTITY)
 
     def test_a_non_numeric_posted_quantity_is_a_400(self):
-        self.assertEqual(
-            self.client.post("/add-to-cart/100/1",
-                             {"quantity": "abc"}).status_code,
-            400)
+        response = self.client.post("/add-to-cart/100/1", {"quantity": "abc"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"Quantity must be a number.")
         self.assertFalse(CartProduct.objects.exists())
 
 
@@ -463,8 +470,9 @@ class CartBadInputTest(CartTestBase):
         self.assertFalse(CartProduct.objects.exists())
 
     def test_zero_quantity_is_a_400(self):
-        self.assertEqual(
-            self.client.post("/add-to-cart/100/0").status_code, 400)
+        response = self.client.post("/add-to-cart/100/0")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"Quantity must be at least 1.")
         self.assertFalse(CartProduct.objects.exists())
 
     def test_removing_an_unknown_cart_row_is_a_404(self):

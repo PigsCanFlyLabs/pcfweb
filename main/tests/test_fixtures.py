@@ -43,6 +43,20 @@ class InitialProductsFixtureTest(TestCase):
         self.assertContains(response, "https://www.amazon.com/dp/1449358624")
         self.assertContains(response, SHIPPING_NOTICE_TEXT)
 
+    @mock.patch("main.models.Payments")
+    def test_fixture_book_is_out_of_stock_as_shipped(self, payments):
+        payments.create_product.return_value = "prod_test"
+        payments.create_price.return_value = "price_test"
+
+        response = self.client.get("/product/100")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "***Out of Stock***")
+
+        response = self.client.post("/add-to-cart/100/1")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"Product is not purchasable.")
+
     def test_google_product_feed_includes_books_and_long_handling_times(self):
         response = self.client.get("/google_products.xml")
         self.assertEqual(response.status_code, 200)

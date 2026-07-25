@@ -84,9 +84,9 @@ class ProductStockTest(TestCase):
 
         with connection.cursor() as cursor:
             cursor.execute(sql, values)
-            product_id = cursor.lastrowid
 
-        self.assertEqual(Product.objects.get(pk=product_id).stock, 0)
+        product = Product.objects.get(name="Raw insert without stock")
+        self.assertEqual(product.stock, 0)
 
     def test_zero_stock_physical_product_is_not_purchasable(self):
         product = Product(
@@ -99,6 +99,82 @@ class ProductStockTest(TestCase):
         self.assertEqual(product.get_availability(), "out_of_stock")
         self.assertEqual(product.stock_description(), "***Out of Stock***")
         self.assertEqual(product.buy_text(), "Out of Stock")
+
+    def test_zero_stock_preorder_physical_book_is_purchasable(self):
+        product = Product(
+            name="Preorder book",
+            cat=Product.Categories.BOOKS,
+            preorder_only=True,
+            stock=0,
+        )
+
+        self.assertFalse(product.is_out_of_stock())
+        self.assertTrue(product.is_purchasable())
+        self.assertEqual(product.get_availability(), "preorder")
+        self.assertEqual(product.stock_description(), "***PreOrder Only***")
+        self.assertEqual(product.buy_text(), "Pre-Order")
+
+    def test_zero_stock_backorder_physical_book_is_purchasable(self):
+        product = Product(
+            name="Backorder book",
+            cat=Product.Categories.BOOKS,
+            backorder=True,
+            stock=0,
+        )
+
+        self.assertFalse(product.is_out_of_stock())
+        self.assertTrue(product.is_purchasable())
+        self.assertEqual(product.get_availability(), "backorder")
+        self.assertEqual(product.stock_description(), "***Back Order Only***")
+        self.assertEqual(product.buy_text(), "Back Order")
+
+    @mock.patch("main.models.Payments")
+    def test_zero_stock_preorder_can_be_added_to_cart(self, payments):
+        payments.create_product.return_value = "prod_preorder"
+        payments.create_price.return_value = "price_preorder"
+        product = Product.objects.create(
+            name="Preorder book",
+            cat=Product.Categories.BOOKS,
+            preorder_only=True,
+            stock=0,
+            external_product_id="prod_preorder",
+        )
+
+        response = self.client.post(f"/add-to-cart/{product.pk}/1")
+
+        self.assertRedirects(response, "/cart", fetch_redirect_response=False)
+        self.assertEqual(CartProduct.objects.get().product, product)
+
+    @mock.patch("main.models.Payments")
+    def test_zero_stock_backorder_can_be_added_to_cart(self, payments):
+        payments.create_product.return_value = "prod_backorder"
+        payments.create_price.return_value = "price_backorder"
+        product = Product.objects.create(
+            name="Backorder book",
+            cat=Product.Categories.BOOKS,
+            backorder=True,
+            stock=0,
+            external_product_id="prod_backorder",
+        )
+
+        response = self.client.post(f"/add-to-cart/{product.pk}/1")
+
+        self.assertRedirects(response, "/cart", fetch_redirect_response=False)
+        self.assertEqual(CartProduct.objects.get().product, product)
+
+    def test_zero_stock_non_book_physical_product_keeps_status_quo(self):
+        product = Product(
+            name="Sticker",
+            cat=Product.Categories.MERCH,
+            stock=0,
+        )
+
+        self.assertTrue(product.is_physical_good())
+        self.assertFalse(product.is_out_of_stock())
+        self.assertTrue(product.is_purchasable())
+        self.assertEqual(product.get_availability(), "in_stock")
+        self.assertEqual(product.stock_description(), "")
+        self.assertEqual(product.buy_text(), "Add to Cart")
 
     def test_positive_stock_physical_product_is_purchasable(self):
         product = Product(
@@ -186,3 +262,7 @@ class ProductStockTest(TestCase):
 
         self.assertIn("stock", form.base_fields)
         self.assertFalse(form.base_fields["stock"].disabled)
+        self.assertIn(
+            "does not cap order quantity",
+            form.base_fields["stock"].help_text,
+        )

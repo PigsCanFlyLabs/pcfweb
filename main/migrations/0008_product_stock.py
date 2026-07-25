@@ -13,6 +13,14 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="product",
             name="stock",
-            field=models.PositiveIntegerField(db_default=0, default=0),
+            field=models.PositiveIntegerField(
+                default=0,
+                db_default=0,
+                help_text=(
+                    "Manually gates whether physical books can be purchased "
+                    "here; it does not cap order quantity or decrement "
+                    "automatically."
+                ),
+            ),
         ),
     ]
