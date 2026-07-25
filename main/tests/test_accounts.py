@@ -5,9 +5,15 @@ the interesting cases are all the ones a browser would normally prevent.
 """
 
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 
+# Both classes follow a redirect into the home page, which thumbnails static
+# assets. Those assets live in the sibling pcfweb-assets checkout and are
+# gitignored here, so they are simply absent in CI -- and Dev sets
+# THUMBNAIL_DEBUG=True, which makes easy_thumbnails raise on a missing source
+# instead of degrading. Same override as PageSmokeTest, for the same reason.
+@override_settings(THUMBNAIL_DEBUG=False)
 class SignupValidationTest(TestCase):
     def test_signup_without_an_email_is_not_a_500(self):
         # This used to reach generate_username(None) and blow up on the
@@ -68,6 +74,7 @@ class SignupValidationTest(TestCase):
         self.assertEqual(User.objects.count(), 2)
 
 
+@override_settings(THUMBNAIL_DEBUG=False)
 class LoginValidationTest(TestCase):
     def test_a_duplicated_email_does_not_500_the_login_page(self):
         wrong = User.objects.create(username="wrong", email="dup@example.com")

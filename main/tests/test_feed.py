@@ -85,9 +85,14 @@ class ProductFeedTest(TestCase):
         self.assertNotIn("None", link)
 
 
+@override_settings(THUMBNAIL_DEBUG=False)
 class ProductCopyEscapingTest(TestCase):
     """get_display_text() is rendered without an autoescape override, so it
-    has to do its own escaping."""
+    has to do its own escaping.
+
+    THUMBNAIL_DEBUG is overridden for the same reason as everywhere else that
+    renders a page: the image assets are gitignored and absent in CI.
+    """
 
     def make_product(self, description, **fields):
         with mock.patch("main.models.Payments") as payments:

@@ -17,6 +17,7 @@ from django.test import RequestFactory, TestCase, override_settings
 
 from main.models import Cart, CartProduct, Product
 from main.payments import SHIPPING_RATE_ERROR, Payments
+from pigscanfly.settings import parse_shipping_rates
 
 
 class ShippingRateConfigTest(TestCase):
@@ -76,6 +77,29 @@ class ShippingRateConfigTest(TestCase):
         # Not mistaken for a bad coupon, which would silently retry without
         # the discount and fail the same way a second time.
         self.assertEqual(create_session.call_count, 1)
+
+    def test_ids_are_stripped_not_merely_tested_for_blankness(self):
+        # "a, b" is how anyone would write a comma-separated list, and a
+        # Secret created from a file arrives with a trailing newline. Stripe
+        # matches the id exactly, so " shr_two" is not the rate -- it is a
+        # resource_missing that fails every physical checkout.
+        self.assertEqual(
+            parse_shipping_rates("shr_one, shr_two ,\tshr_three\n"),
+            ["shr_one", "shr_two", "shr_three"])
+
+    def test_blank_entries_are_dropped(self):
+        # Trailing commas and an all-whitespace value must not become empty
+        # ids; Stripe rejects the session rather than ignoring them.
+        self.assertEqual(parse_shipping_rates("shr_one,,  ,shr_two,"),
+                         ["shr_one", "shr_two"])
+        self.assertEqual(parse_shipping_rates("   \n "), [])
+        self.assertEqual(parse_shipping_rates(""), [])
+
+    def test_the_shipped_defaults_carry_no_stray_whitespace(self):
+        for rate in settings.STRIPE_SHIPPING_RATES:
+            with self.subTest(rate=rate):
+                self.assertEqual(rate, rate.strip())
+                self.assertTrue(rate.startswith("shr_"))
 
     def test_the_rates_come_from_settings_not_the_call_site(self):
         # The whole point of the setting: a test-mode and a live deployment

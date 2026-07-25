@@ -20,6 +20,17 @@ from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def parse_shipping_rates(raw: str) -> List[str]:
+    """Split a comma-separated STRIPE_SHIPPING_RATES value into ids.
+
+    Each id is stripped, not just tested for being non-blank. Stripe matches
+    the id exactly, so " shr_two" from a conventional "a, b" list -- or
+    "shr_two\\n" from a Secret created out of a file -- is not the rate, it is
+    a resource_missing that fails every physical checkout.
+    """
+    return [rate.strip() for rate in raw.split(",") if rate.strip()]
+
+
 class Base(Configuration):
     COOKIE_CONSENT_ENABLED = True
     COOKIE_CONSENT_LOG_ENABLED = True
@@ -197,17 +208,13 @@ class Base(Configuration):
     # session with resource_missing rather than skipping the bad rate. They
     # are therefore overridable per environment instead of hardcoded at the
     # call site. Empty means "no shipping options", which is a valid session.
-    STRIPE_SHIPPING_RATES: List[str] = [
-        rate for rate in os.getenv(
-            "STRIPE_SHIPPING_RATES",
-            ",".join([
-                "shr_0MJrPInkDnSOC1s7tidX8eMN",  # YOLO
-                "shr_0MJrIYnkDnSOC1s7fthNSlhb",  # sf only
-                "shr_0MJrL4nkDnSOC1s7cPSy15CO",  # media mail
-                "shr_0MNOZrnkDnSOC1s7TSLZig6Z",  # faster
-            ])).split(",")
-        if rate.strip()
-    ]
+    STRIPE_SHIPPING_RATES: List[str] = parse_shipping_rates(
+        os.getenv("STRIPE_SHIPPING_RATES", ",".join([
+            "shr_0MJrPInkDnSOC1s7tidX8eMN",  # YOLO
+            "shr_0MJrIYnkDnSOC1s7fthNSlhb",  # sf only
+            "shr_0MJrL4nkDnSOC1s7cPSy15CO",  # media mail
+            "shr_0MNOZrnkDnSOC1s7TSLZig6Z",  # faster
+        ])))
 
     # Who gets told about a paid order so they can ship it. Env-driven so the
     # owner's address is not baked into the repo.

@@ -35,7 +35,25 @@ TAG=$(grep -oE 'holdenk/pcfweb:[A-Za-z0-9._-]+' deploy.yaml | head -1)
 # running pods keep the old image regardless of imagePullPolicy. Refuse to
 # build until the tag in deploy.yaml has been bumped past what the cluster is
 # running.
-RUNNING_TAGS=$(kubectl get deploy -n pcfweb -o jsonpath='{.items[*].spec.template.spec.containers[*].image}' 2>/dev/null || true)
+#
+# This fails closed. Swallowing a kubectl error would leave RUNNING_TAGS empty,
+# the comparison below would find no match, and the build would push over a
+# tag that is in fact running -- reintroducing exactly the silent stale deploy
+# this guard exists to catch, and only when something is already wrong. An
+# empty result on a *successful* lookup is different and fine: it means
+# nothing is deployed yet.
+if ! RUNNING_TAGS=$(kubectl get deploy -n pcfweb \
+      -o jsonpath='{.items[*].spec.template.spec.containers[*].image}' 2>&1); then
+  set +x
+  echo >&2
+  echo "ERROR: could not read the running image tags from the cluster:" >&2
+  echo "  ${RUNNING_TAGS}" >&2
+  echo >&2
+  echo "Refusing to build: without knowing what is deployed, pushing ${TAG}" >&2
+  echo "risks overwriting a running tag and rolling nothing out. Fix cluster" >&2
+  echo "access (kubectl config current-context) and re-run." >&2
+  exit 1
+fi
 for running in $RUNNING_TAGS; do
   if [ "$running" = "$TAG" ]; then
     set +x
