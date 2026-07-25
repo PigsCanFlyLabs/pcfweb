@@ -254,9 +254,16 @@ class Product(models.Model):
                 and self.sells_ebook)
 
     def is_out_of_stock(self) -> bool:
-        # Stock is intentionally scoped to physical books for now. When the
-        # DC4K delivery_type field lands, DIGITAL book products must be exempt
-        # here so a stock value of 0 cannot block emailed ebook fulfilment.
+        # Stock is intentionally scoped to physical books. delivery_type has
+        # since landed, and DIGITAL products are exempt without a clause of
+        # their own: is_physical_good() reads delivery_type directly, so it is
+        # already False for a download and short-circuits the rest. That is
+        # what keeps a stock count of 0 from blocking emailed ebook
+        # fulfilment -- an e-book has no unit count to run out of. The
+        # exemption is load-bearing rather than incidental, so it is pinned by
+        # test_stock.DigitalStockExemptionTest; do not reintroduce a category-
+        # or mode-based inference in is_physical_good() without reading that
+        # test first.
         return (
             self.is_physical_good()
             and self.cat == Product.Categories.BOOKS
