@@ -3,7 +3,7 @@ import logging
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.mail import send_mail
-from django.db import models
+from django.db import models, transaction
 from django.templatetags.static import static
 from django.urls import reverse
 from django.utils import timezone
@@ -589,14 +589,30 @@ class Order(models.Model):
             page = Payments.list_line_items(
                 self.stripe_session_id, limit=self.LINE_ITEM_PAGE_SIZE)
             billed, truncated = self._billed_quantities(page)
-            problems = self._apply_billed_quantities(billed)
             if truncated:
-                problems.append(
+                # Refuse before writing anything. Applying page one alone
+                # would zero every line that lives on page two -- silently
+                # dropping real items from the pick list, with only a caveat
+                # buried in the email to say so. Declared ignorance beats a
+                # partial truth the owner might act on.
+                self._record_reconciliation_failure(
                     f"Stripe reported more than {self.LINE_ITEM_PAGE_SIZE} "
-                    "line items; only the first page was reconciled")
-            Order.objects.filter(pk=self.pk).update(
-                reconciled_at=timezone.now(),
-                reconciliation_error="; ".join(problems)[:2000])
+                    "line items, which this does not page through; the "
+                    "quantities were left at the cart's")
+                return False
+            # The quantities and the "these came from Stripe" marker are one
+            # fact, so they land together or not at all: a crash between them
+            # would leave Stripe's quantities on the items with reconciled_at
+            # still null, and the admin disagreeing with reality.
+            #
+            # This opens well after the PENDING -> PAID transaction has
+            # committed (see StripeWebhookView.handle_paid), so it does not
+            # extend that row lock.
+            with transaction.atomic():
+                problems = self._apply_billed_quantities(billed)
+                Order.objects.filter(pk=self.pk).update(
+                    reconciled_at=timezone.now(),
+                    reconciliation_error="; ".join(problems)[:2000])
         except Exception as e:
             logger.exception(
                 "Order #%s: could not reconcile line items against Stripe.",

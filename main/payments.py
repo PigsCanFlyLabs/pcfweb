@@ -46,16 +46,34 @@ class Payments:
             )
         return product_price['id']
 
+    # Seconds. The SDK's default is ~80, far longer than Stripe's own webhook
+    # delivery window: a hung connection would pin a gunicorn worker until
+    # Stripe had already given up and queued a re-delivery.
+    LINE_ITEM_TIMEOUT = 5
+
     @classmethod
     def list_line_items(cls, session_id: str, limit: int = 100):
         """What Stripe actually billed for a Checkout session.
 
-        Called from the webhook, so max_network_retries=0: a slow retry loop
-        here would hold the response open, and the caller already treats a
-        failure as "keep the snapshot" rather than an error.
+        Called from inside a webhook response, so it is bounded on both axes:
+        no retries and a short timeout. The caller treats any failure as "keep
+        the snapshot" rather than an error, so giving up quickly is strictly
+        better than holding the response open.
+
+        The timeout lives on the HTTP client rather than on the request, so
+        this needs its own client -- a module-level one would drag every other
+        Stripe call in the app down to the same budget, and checkout legitimately
+        wants longer. Built per call rather than cached: paid orders are rare
+        enough that the pooling would not pay for the shared mutable state.
         """
-        return stripe.checkout.Session.list_line_items(
-            session_id, limit=limit, max_network_retries=0)
+        client = stripe.StripeClient(
+            api_key=cls.API_KEY or "",
+            max_network_retries=0,
+            http_client=stripe.RequestsClient(
+                timeout=cls.LINE_ITEM_TIMEOUT),
+        )
+        return client.checkout.sessions.line_items.list(
+            session_id, {"limit": limit})
 
     @classmethod
     def checkout(cls, request, cart, coupon=None, order=None):

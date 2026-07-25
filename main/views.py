@@ -523,7 +523,15 @@ class StripeWebhookView(View):
 
     @staticmethod
     def paid_fields(session) -> Dict[str, Any]:
-        """The order columns a paid Stripe session dictates."""
+        """The order columns a paid Stripe session dictates.
+
+        Note this writes stripe_session_id, which is the second code path
+        that touches that column. It is only safe because find_order() has
+        already established that the order is either unbound or bound to this
+        very session, so the write is a legitimate late binding or a no-op --
+        never a re-pointing. Weaken that guard and this quietly becomes an
+        overwrite again.
+        """
         customer = session.get("customer_details") or {}
         billing = customer.get("address") or {}
         # Newer Stripe API versions moved shipping under collected_information;

@@ -1558,13 +1558,36 @@ class WebhookLineItemReconciliationTest(OrderTestBase):
         self.order.refresh_from_db()
         self.assertIn("no Stripe price id", self.order.reconciliation_error)
 
-    def test_more_line_items_than_one_page_is_recorded(self):
+    def test_more_line_items_than_one_page_changes_nothing_at_all(self):
+        # This does not page, so page one alone would zero every line that
+        # lives on page two -- silently dropping real items from the pick
+        # list. Refuse before writing anything rather than commit a partial
+        # truth and mention it in a caveat.
+        self.client.post("/add-to-cart/101/3")
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/s", id="cs_big")
+            self.client.post("/checkout")
+        order = Order.objects.get(stripe_session_id="cs_big")
         self.line_items_has_more = True
+        # Stripe's page one omits one of the two lines, as a real second page
+        # would; nothing here may act on that.
+        self.billed_quantities = {101: None}
 
-        self.deliver(self.event_body(self.order))
+        response = self.deliver(self.event_body(order))
 
-        self.order.refresh_from_db()
-        self.assertIn("only the first page", self.order.reconciliation_error)
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertEqual(
+            sorted((i.product_id, i.quantity, i.snapshot_quantity)
+                   for i in order.items.all()),
+            [(100, 2, 2), (101, 3, 3)])
+        self.assertIsNone(order.reconciled_at)
+        self.assertFalse(order.quantities_are_authoritative())
+        self.assertIn("more than 100", order.reconciliation_error)
+        # And the owner is told the list is unverified.
+        self.assertIn("could not be re-read from Stripe", mail.outbox[-1].body)
 
     def test_reconciliation_runs_only_for_the_delivery_that_won(self):
         body = self.event_body(self.order)
@@ -1583,14 +1606,29 @@ class WebhookLineItemReconciliationTest(OrderTestBase):
         self.payments.list_line_items.assert_called_once_with(
             "cs_test_session", limit=100)
 
-    def test_the_stripe_call_disables_network_retries(self):
+    def test_the_stripe_call_is_bounded_by_a_timeout_and_no_retries(self):
         # Checked against the real wrapper, since the class above stubs it.
-        with mock.patch(
-                "main.payments.stripe.checkout.Session.list_line_items") as call:
+        # A hung connection on the SDK's ~80s default would pin the worker
+        # long after Stripe had given up and queued a re-delivery.
+        with mock.patch("main.payments.stripe.StripeClient") as client_class:
             Payments.list_line_items("cs_x", limit=100)
 
-        call.assert_called_once_with(
-            "cs_x", limit=100, max_network_retries=0)
+        kwargs = client_class.call_args.kwargs
+        self.assertEqual(kwargs["max_network_retries"], 0)
+        # The timeout lives on the HTTP client, not on the request, so a
+        # per-call argument would have been silently sent to Stripe as a
+        # query parameter and bounded nothing.
+        self.assertEqual(kwargs["http_client"]._timeout, 5)
+        self.assertEqual(Payments.LINE_ITEM_TIMEOUT, 5)
+        client_class.return_value.checkout.sessions.line_items.list \
+            .assert_called_once_with("cs_x", {"limit": 100})
+
+    def test_the_bounded_client_is_not_the_one_checkout_uses(self):
+        # Bounding this call must not drag Session.create down to 5 seconds.
+        with mock.patch("main.payments.stripe.StripeClient"):
+            Payments.list_line_items("cs_x")
+
+        self.assertIsNone(stripe.default_http_client)
 
 
 class WebhookReconciliationFailureTest(OrderTestBase):
@@ -1653,6 +1691,28 @@ class WebhookReconciliationFailureTest(OrderTestBase):
     def test_the_owner_is_still_emailed_once(self):
         self.deliver_with_broken_lookup()
         self.assertEqual(len(mail.outbox), 1)
+
+    def test_a_crash_before_the_marker_lands_rolls_the_quantities_back(self):
+        # The quantities and the "these came from Stripe" marker are one
+        # fact. Landing the first without the second would leave the admin
+        # showing Stripe's numbers while reconciled_at says they were never
+        # checked -- and the email would call them unverified.
+        self.billed_quantities = {100: 5}
+        # timezone.now() is evaluated for reconciled_at, i.e. after the item
+        # quantities have been written and before the marker is.
+        with mock.patch("main.models.timezone.now",
+                        side_effect=RuntimeError("boom, between the writes")):
+            with self.assertLogs("main.models", level="ERROR"):
+                reconciled = self.order.reconcile_line_items()
+
+        self.assertFalse(reconciled)
+        item = self.order.items.get()
+        self.assertEqual(item.quantity, 2)
+        self.assertEqual(item.snapshot_quantity, 2)
+        self.order.refresh_from_db()
+        self.assertIsNone(self.order.reconciled_at)
+        self.assertIn("boom, between the writes",
+                      self.order.reconciliation_error)
 
     def test_a_late_bound_order_is_still_reconciled(self):
         Order.objects.filter(pk=self.order.pk).update(stripe_session_id=None)
