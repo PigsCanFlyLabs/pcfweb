@@ -1,11 +1,13 @@
 import re
 from unittest import mock
 
+import stripe
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
 from django.test import Client, RequestFactory, TestCase, override_settings
 
 from main.models import Cart, CartProduct, Product
+from main.payments import Payments
 from main.utils import get_client_ip
 from main.views import AddToCartView
 
@@ -119,6 +121,160 @@ class ServiceProductTest(TestCase):
         response = self.client.get(f"/product/{self.service.pk}")
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, SHIPPING_NOTICE_TEXT)
+
+
+class CheckoutTaxTest(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def _cart_with_product(self, mode):
+        product = Product.objects.create(
+            name=f"{mode} product",
+            description="Checkout test product.",
+            external_product_id=f"prod_{mode}",
+            price=2500,
+            mode=mode,
+        )
+        cart = Cart.objects.create()
+        cart_product = CartProduct.objects.create(
+            cart=cart,
+            product=product,
+            quantity=1,
+            price_id=f"price_{mode}",
+        )
+        cart.products.add(cart_product)
+        return cart
+
+    def _checkout(self, mode=Product.Modes.PAYMENT, coupon=None):
+        request = self.factory.get("/checkout")
+        cart = self._cart_with_product(mode)
+        return Payments.checkout(request, cart, coupon=coupon)
+
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_normal_checkout_enables_automatic_tax(self, create_session):
+        create_session.return_value.url = "https://checkout.example/session"
+
+        self._checkout()
+
+        params = create_session.call_args.kwargs
+        self.assertEqual(params["automatic_tax"], {"enabled": True})
+        self.assertEqual(params["billing_address_collection"], "required")
+        self.assertNotIn("discounts", params)
+
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_valid_coupon_keeps_discount_and_enables_tax(self, create_session):
+        create_session.return_value.url = "https://checkout.example/session"
+
+        self._checkout(coupon="coupon_valid")
+
+        params = create_session.call_args.kwargs
+        self.assertEqual(params["automatic_tax"], {"enabled": True})
+        self.assertEqual(params["billing_address_collection"], "required")
+        self.assertEqual(params["discounts"], [{"coupon": "coupon_valid"}])
+
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_invalid_coupon_retry_drops_discount_but_keeps_tax(self, create_session):
+        create_session.side_effect = [
+            stripe.InvalidRequestError(
+                "No such coupon", "discounts[0][coupon]"),
+            mock.Mock(url="https://checkout.example/session"),
+        ]
+
+        self._checkout(coupon="coupon_bad")
+
+        first_params = create_session.call_args_list[0].kwargs
+        retry_params = create_session.call_args_list[1].kwargs
+        self.assertEqual(first_params["discounts"], [{"coupon": "coupon_bad"}])
+        self.assertNotIn("discounts", retry_params)
+        self.assertEqual(retry_params["automatic_tax"], {"enabled": True})
+        self.assertEqual(retry_params["billing_address_collection"], "required")
+
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_payment_and_subscription_modes_collect_address_for_tax(self, create_session):
+        create_session.return_value.url = "https://checkout.example/session"
+
+        for mode, expected_stripe_mode in (
+            (Product.Modes.PAYMENT, "payment"),
+            (Product.Modes.SUBSCRIPTION, "subscription"),
+        ):
+            with self.subTest(mode=expected_stripe_mode):
+                create_session.reset_mock()
+
+                self._checkout(mode=mode)
+
+                params = create_session.call_args.kwargs
+                self.assertEqual(params["mode"], expected_stripe_mode)
+                self.assertEqual(params["automatic_tax"], {"enabled": True})
+                self.assertEqual(params["billing_address_collection"], "required")
+
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_coupon_checkout_does_not_retry_non_coupon_stripe_errors(self, create_session):
+        create_session.side_effect = stripe.InvalidRequestError(
+            "No such price", "line_items[0][price]")
+
+        with self.assertRaises(stripe.InvalidRequestError):
+            self._checkout(coupon="coupon_valid")
+
+        create_session.assert_called_once()
+
+    def test_coupon_error_detection_uses_param_and_documented_codes(self):
+        cases = [
+            (stripe.InvalidRequestError("plain error", None), False),
+            (stripe.InvalidRequestError("plain error", ""), False),
+            (stripe.InvalidRequestError(
+                "No such coupon", "discounts[0][coupon]"), True),
+            (stripe.InvalidRequestError(
+                "Stripe Tax is not enabled", "automatic_tax"), False),
+            (stripe.InvalidRequestError(
+                "Coupon expired", None, code="coupon_expired"), True),
+            (stripe.InvalidRequestError(
+                "Missing resource", None, code="resource_missing"), True),
+            (stripe.InvalidRequestError(
+                "Missing price", "line_items[0][price]",
+                code="resource_missing"), False),
+            (stripe.InvalidRequestError(
+                "First-time customer required", None,
+                code="promotion_code_customer_missing_first_time"), True),
+            (stripe.InvalidRequestError(
+                "Customer is not first-time", None,
+                code="promotion_code_customer_not_first_time"), True),
+        ]
+
+        for error, expected in cases:
+            with self.subTest(param=error.param, code=error.code):
+                self.assertEqual(Payments._is_coupon_error(error), expected)
+
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_tax_configuration_error_is_diagnosable_and_not_retried(self, create_session):
+        create_session.side_effect = stripe.InvalidRequestError(
+            "Stripe Tax is not enabled",
+            "automatic_tax",
+            code="stripe_tax_inactive",
+        )
+
+        with mock.patch("main.payments.logger.error") as log_error:
+            with self.assertRaises(stripe.InvalidRequestError) as error:
+                self._checkout(coupon="coupon_valid")
+
+        self.assertIn("Stripe Tax must be activated", str(error.exception))
+        self.assertIn("STRIPE_AUTOMATIC_TAX=false", str(error.exception))
+        log_error.assert_called_once()
+        self.assertIn("Stripe Tax must be activated", log_error.call_args.args[0])
+        create_session.assert_called_once()
+        params = create_session.call_args.kwargs
+        self.assertEqual(params["automatic_tax"], {"enabled": True})
+
+    @override_settings(STRIPE_AUTOMATIC_TAX=False)
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_automatic_tax_escape_hatch_omits_tax_and_logs_warning(self, create_session):
+        create_session.return_value.url = "https://checkout.example/session"
+
+        with self.assertLogs("main.payments", level="WARNING") as logs:
+            self._checkout()
+
+        params = create_session.call_args.kwargs
+        self.assertNotIn("automatic_tax", params)
+        self.assertIn("STRIPE_AUTOMATIC_TAX", "\n".join(logs.output))
 
 
 class ProductSaveStripeTest(TestCase):
