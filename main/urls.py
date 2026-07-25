@@ -41,6 +41,7 @@ urlpatterns = [
     # General
     path('', views.HomeView.as_view(), name="home"),
     path('about', views.AboutView.as_view(), name="about"),
+    path('family', views.FamilyView.as_view(), name="family"),
     path('contact', views.ContactView.as_view(), name="contact"),
     path('tos', views.TosView.as_view(), name='tos'),
     path('privacy', views.PrivacyView.as_view(), name='privacy'),

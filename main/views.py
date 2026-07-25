@@ -46,6 +46,36 @@ class AboutView(View):
     def get(self, request):
         return render(request, 'about.html', context={'title': 'About Us'})
 
+
+
+class FamilyView(View):
+    def get(self, request):
+        companies = [
+            {
+                "name": "Pigs Can Fly Labs",
+                "description": (
+                    "The parent company behind this site — "
+                    "value-priced queer and nerdy stuff."
+                ),
+                "url": None,
+            },
+            {
+                "name": "Fight Health Insurance",
+                "description": (
+                    "Helps people appeal health insurance denials."
+                ),
+                "url": "https://www.fighthealthinsurance.com/",
+            },
+            {
+                "name": "Liberated Bread",
+                "description": "Coming soon.",
+                "url": None,
+            },
+        ]
+        return render(request, "family.html", context={
+            "title": "Our Family of Companies",
+            "companies": companies,
+        })
 class PrivacyView(View):
     def get(self, request):
         return render(request, 'privacy.html', context={'title': 'Privacy Policy'})

@@ -2456,3 +2456,33 @@ class SeedProductsStripeTest(TestCase):
         self.assertEqual(
             Product.objects.filter(pk__in=[100, 101, 102, 103]).count(), 4
         )
+
+@override_settings(THUMBNAIL_DEBUG=False)
+class FamilyPageTest(TestCase):
+    """The family page lists the Pigs Can Fly Labs family of companies."""
+
+    def test_family_page_returns_200(self):
+        response = self.client.get("/family")
+        self.assertEqual(response.status_code, 200)
+
+    def test_family_page_lists_each_company_by_name(self):
+        response = self.client.get("/family")
+        self.assertContains(response, "Pigs Can Fly Labs")
+        self.assertContains(response, "Fight Health Insurance")
+        self.assertContains(response, "Liberated Bread")
+
+    def test_family_page_links_to_fight_health_insurance(self):
+        response = self.client.get("/family")
+        self.assertContains(
+            response,
+            'href="https://www.fighthealthinsurance.com/"')
+
+    def test_family_page_marks_liberated_bread_as_coming_soon(self):
+        response = self.client.get("/family")
+        self.assertContains(response, "Coming Soon")
+
+    def test_family_page_includes_family_in_the_page_smoke_paths(self):
+        # Regression: verify it's included alongside the other static pages.
+        response = self.client.get("/family")
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "family.html")
