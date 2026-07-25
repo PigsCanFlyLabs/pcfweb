@@ -63,6 +63,15 @@ class InitialProductsFixtureTest(TestCase):
         self.assertContains(response, "<g:gtin>9781449358624</g:gtin>")
         self.assertContains(response, "<g:max_handling_time>21</g:max_handling_time>")
 
+    def test_google_product_feed_omits_availability_date_for_out_of_stock_book(self):
+        Product.objects.filter(pk=100).update(date_available="2030-01-15")
+
+        response = self.client.get("/google_products.xml")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "<g:availability>out_of_stock</g:availability>")
+        self.assertNotContains(response, "<g:availability_date>")
+
     @mock.patch("main.models.Payments")
     def test_cart_with_physical_book_shows_shipping_notice(self, payments):
         payments.create_product.return_value = "prod_test"

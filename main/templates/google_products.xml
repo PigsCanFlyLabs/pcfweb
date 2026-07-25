@@ -7,15 +7,16 @@
 {% with min_handling_days=3 max_handling_days=21 %}
 {% for product in products %}
 {% for size in product.get_sizes %}
+{% with availability=product.get_availability %}
 <item>
 <g:id>{{product.pk}}</g:id>
 <g:title>{{product.name}}</g:title>
 <g:description>{{product.get_display_text}}</g:description>
 <g:link>https://www.pigscanfly.ca{% url 'product' product.pk %}</g:link>
 <g:image_link>https://www.pigscanfly.ca{{ product.get_image_url }}</g:image_link>
-<g:availability>{{ product.get_availability }}</g:availability>
+<g:availability>{{ availability }}</g:availability>
 
-{% if product.date_available is not None %}
+{% if product.date_available is not None and availability != "out_of_stock" and availability != "in_stock" %}
 <g:availability_date>{{product.date_available}}</g:availability_date>
 {% endif %}
 
@@ -74,6 +75,7 @@
   <g:max_transit_time>21</g:max_transit_time>
 </g:shipping>
 </item>
+{% endwith %}
 {% endfor %}
 {% endfor %}
 {% endwith %}

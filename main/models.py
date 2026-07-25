@@ -228,6 +228,9 @@ class Product(models.Model):
             return "Add to Cart"
 
     def stock_description(self):
+        # Preserve the pre-stock behavior if both flags are set:
+        # availability/buy_text prefer preorder, but this marker prefers
+        # backorder. That ordering is a pre-existing inconsistency.
         if self.backorder:
             return "***Back Order Only***"
         elif self.preorder_only:
