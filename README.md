@@ -69,11 +69,27 @@ unauthenticated GET and proves no payment.
    `checkout.session.async_payment_failed` and `checkout.session.expired`.
    Copy that endpoint's signing secret into `STRIPE_WEBHOOK_SECRET`.
 
+Checkout enables `adjustable_quantity`, so the customer can change quantities
+on Stripe's hosted page after the snapshot is written. The webhook therefore
+re-reads the billed line items from Stripe and writes those quantities onto
+`OrderItem.quantity`, keeping the cart's original in
+`OrderItem.snapshot_quantity` so the change stays auditable. The notification
+email is the pick/pack list, so it must not be knowingly stale.
+
 Fulfilment is manual: paid orders show up in the Django admin, and the owner
-flips the status to FULFILLED once it ships. If the notification email fails
-to send, the webhook still returns 200 (a non-2xx makes Stripe retry for three
-days) and the failure is recorded in the order's `notification_error`, with
-`notified_at` left null.
+flips the status to FULFILLED once it ships.
+
+Everything after the payment is recorded is best-effort and cannot cost you the
+order — the webhook returns 200 either way, because a non-2xx makes Stripe
+retry for three days:
+
+- notification email failed → `notification_error` set, `notified_at` null;
+- line items could not be re-read → `reconciliation_error` set, `reconciled_at`
+  null, quantities left at the cart's, and the email says loudly that the list
+  is unverified.
+
+Note that setting `ADMINS` also switches on Django's built-in error mail, so
+unhandled 500s now go to the same address.
 
 ## Products / fixtures
 

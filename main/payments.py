@@ -47,6 +47,17 @@ class Payments:
         return product_price['id']
 
     @classmethod
+    def list_line_items(cls, session_id: str, limit: int = 100):
+        """What Stripe actually billed for a Checkout session.
+
+        Called from the webhook, so max_network_retries=0: a slow retry loop
+        here would hold the response open, and the caller already treats a
+        failure as "keep the snapshot" rather than an error.
+        """
+        return stripe.checkout.Session.list_line_items(
+            session_id, limit=limit, max_network_retries=0)
+
+    @classmethod
     def checkout(cls, request, cart, coupon=None, order=None):
         """Start a Stripe Checkout session; returns (url, session_id).
 

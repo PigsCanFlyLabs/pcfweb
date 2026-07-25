@@ -323,8 +323,20 @@ class CheckoutView(View, BaseCartView):
             return redirect('cart')
         user = request.user if request.user.is_authenticated else None
         order = Order.create_from_cart(cart, user=user)
-        redirect_url, session_id = Payments.checkout(
-            request, cart, coupon=coupon, order=order)
+        try:
+            redirect_url, session_id = Payments.checkout(
+                request, cart, coupon=coupon, order=order)
+        except Exception:
+            # No session was ever created, so nothing will ever arrive for
+            # this order -- not even checkout.session.expired. Close it out
+            # here or it stays PENDING in the admin forever.
+            logger.exception(
+                "Stripe checkout failed for order #%s; cancelling it.",
+                order.pk)
+            Order.objects.filter(
+                pk=order.pk, status=Order.Status.PENDING).update(
+                    status=Order.Status.CANCELLED)
+            raise
         order.stripe_session_id = session_id
         order.save(update_fields=['stripe_session_id', 'updated_at'])
         return redirect(redirect_url)
@@ -454,6 +466,11 @@ class StripeWebhookView(View):
             return
 
         order.refresh_from_db()
+        # Only the delivery that actually moved the row gets here, so this
+        # runs once per order. Both calls are best-effort by construction --
+        # the payment is already recorded and must not be undone by a
+        # secondary lookup or an SMTP outage.
+        order.reconcile_line_items()
         order.notify_owner()
 
     def handle_cancelled(self, session, reason: str) -> None:
@@ -470,8 +487,11 @@ class StripeWebhookView(View):
     def find_order(session) -> Optional[Order]:
         """Map a Stripe session back to a local order.
 
-        The payload is signed, so both of these are trustworthy; the session
-        id is tried first because it is the one we persisted ourselves.
+        The stored stripe_session_id *is* the binding between an order and
+        the payment for it, so the client_reference_id fallback may only ever
+        reach an order that is not yet bound, or one bound to this very
+        session. An order bound to a different session is never returned: the
+        binding gets verified, not overwritten.
         """
         session_id = session.get("id")
         if session_id:
@@ -483,12 +503,23 @@ class StripeWebhookView(View):
         if not reference:
             return None
         try:
-            return Order.objects.filter(pk=int(reference)).first()
+            order = Order.objects.filter(pk=int(reference)).first()
         except (TypeError, ValueError):
             logger.warning(
                 "Stripe session %s carried an unusable order reference %r.",
                 session_id, reference)
             return None
+        if order is None:
+            return None
+        if order.stripe_session_id and order.stripe_session_id != session_id:
+            # Nothing legitimate produces this. Refuse rather than re-point a
+            # paid-for order at a different session.
+            logger.error(
+                "Refusing Stripe session %s for order #%s: that order is "
+                "already bound to session %s. Not marking it paid.",
+                session_id, order.pk, order.stripe_session_id)
+            return None
+        return order
 
     @staticmethod
     def paid_fields(session) -> Dict[str, Any]:

@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import itertools
 import json
 import re
 import time
@@ -876,8 +877,44 @@ class OrderTestBase(TestCase):
         patcher = mock.patch("main.models.Payments")
         payments = patcher.start()
         self.addCleanup(patcher.stop)
+        self.payments = payments
         payments.create_product.return_value = "prod_test"
-        payments.create_price.return_value = "price_test"
+        # A distinct Stripe Price per cart row, as the real code does -- the
+        # reconciliation join is on price id, so a shared one would be
+        # unrepresentative.
+        prices = itertools.count(1)
+        payments.create_price.side_effect = (
+            lambda *a, **kw: f"price_test_{next(prices)}")
+
+        # By default Stripe reports exactly what was snapshotted, i.e. the
+        # customer changed nothing. Tests override these to model an
+        # adjustment or a failed lookup.
+        self.billed_quantities: dict = {}
+        self.extra_line_items: list = []
+        self.line_items_error = None
+        self.line_items_has_more = False
+        payments.list_line_items.side_effect = self.fake_line_items
+
+    def fake_line_items(self, session_id, limit=100):
+        """Stand in for Stripe's line-item listing for a session.
+
+        billed_quantities is keyed by product pk; None means the customer
+        removed that line at checkout, so Stripe does not report it at all.
+        """
+        if self.line_items_error is not None:
+            raise self.line_items_error
+        order = Order.objects.filter(stripe_session_id=session_id).first()
+        data = []
+        if order is not None:
+            for item in order.items.all():
+                quantity = self.billed_quantities.get(
+                    item.product_id, item.snapshot_quantity)
+                if quantity is None:
+                    continue
+                data.append(
+                    {"price": {"id": item.price_id}, "quantity": quantity})
+        return {"data": data + self.extra_line_items,
+                "has_more": self.line_items_has_more}
 
     def place_order(self, product_pk=100, quantity=2,
                     session_id="cs_test_session", client=None):
@@ -936,6 +973,15 @@ class OrderTestBase(TestCase):
             "data": {"object": self.session_payload(order, **overrides)},
         })
 
+    @staticmethod
+    def order_emails():
+        """Just the fulfilment notifications.
+
+        Configuring ADMINS also enables Django's own 500 mail, so a test that
+        provokes an error would otherwise see it in the outbox too.
+        """
+        return [m for m in mail.outbox if "New paid order" in m.subject]
+
     def deliver(self, body: str, signature=None, secret=WEBHOOK_SECRET):
         """POST a webhook body, signed for real unless told otherwise."""
         if signature is None:
@@ -969,8 +1015,10 @@ class CheckoutCreatesOrderTest(OrderTestBase):
         self.assertEqual(item.product_name, product.name)
         self.assertEqual(item.unit_amount, product.price)
         self.assertEqual(item.quantity, 2)
+        self.assertEqual(item.snapshot_quantity, 2)
         self.assertEqual(item.currency, "usd")
-        self.assertEqual(item.price_id, "price_test")
+        self.assertEqual(item.price_id, CartProduct.objects.get().price_id)
+        self.assertTrue(item.price_id)
 
     def test_the_order_id_is_sent_to_stripe_as_the_client_reference(self):
         # Without this there is nothing at all tying a Stripe session to
@@ -1016,6 +1064,41 @@ class CheckoutCreatesOrderTest(OrderTestBase):
         self.assertRedirects(response, "/cart")
         create.assert_not_called()
         self.assertFalse(Order.objects.exists())
+
+    def test_a_failed_stripe_checkout_does_not_leave_a_pending_order(self):
+        # No session was created, so nothing will ever arrive for this order
+        # -- not even checkout.session.expired. It must not sit in the admin
+        # as PENDING forever.
+        self.client.post("/add-to-cart/100/1")
+        with mock.patch("main.payments.stripe.checkout.Session.create",
+                        side_effect=RuntimeError("Stripe is down")):
+            with self.assertLogs("main.views", level="ERROR"):
+                with self.assertRaises(RuntimeError):
+                    self.client.post("/checkout")
+
+        order = Order.objects.get()
+        self.assertEqual(order.status, Order.Status.CANCELLED)
+        self.assertIsNone(order.stripe_session_id)
+        # The snapshot is kept, so it is still auditable.
+        self.assertEqual(order.items.count(), 1)
+
+    def test_a_cancelled_checkout_order_cannot_later_be_paid(self):
+        self.client.post("/add-to-cart/100/1")
+        with mock.patch("main.payments.stripe.checkout.Session.create",
+                        side_effect=RuntimeError("Stripe is down")):
+            with self.assertLogs("main.views", level="ERROR"):
+                with self.assertRaises(RuntimeError):
+                    self.client.post("/checkout")
+        order = Order.objects.get()
+
+        response = self.deliver(self.event_body(order, id="cs_ghost"))
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CANCELLED)
+        # Not assertEqual(outbox, 0): configuring ADMINS also turns on
+        # Django's own 500 mail, and the failed checkout above sent one.
+        self.assertEqual(self.order_emails(), [])
 
     def test_multiple_cart_lines_are_all_snapshotted(self):
         self.client.post("/add-to-cart/100/1")
@@ -1183,15 +1266,15 @@ class WebhookPaymentTest(OrderTestBase):
         self.assertIsNotNone(self.order.notified_at)
         self.assertEqual(self.order.notification_error, "")
 
-    def test_an_adjusted_quantity_is_flagged_in_the_email(self):
-        # Checkout enables adjustable_quantity, so the snapshot can disagree
-        # with what Stripe actually billed. The owner has to be told.
-        self.deliver(self.event_body(
-            self.order, amount_subtotal=self.order.snapshot_subtotal() + 1234))
+    def test_the_billed_quantities_are_read_back_from_stripe(self):
+        # Checkout enables adjustable_quantity, so the snapshot alone is not
+        # a safe pick list. WebhookLineItemReconciliationTest covers the
+        # cases where it actually differs.
+        self.deliver(self.event_body(self.order))
 
         self.order.refresh_from_db()
-        self.assertFalse(self.order.quantities_match())
-        self.assertIn("WARNING", mail.outbox[0].body)
+        self.assertTrue(self.order.quantities_are_authoritative())
+        self.assertNotIn("WARNING", mail.outbox[0].body)
 
     def test_a_completed_but_unpaid_session_does_not_pay_the_order(self):
         # e.g. an ACH debit that has not settled yet.
@@ -1250,9 +1333,9 @@ class WebhookPaymentTest(OrderTestBase):
         self.assertEqual(self.order.status, Order.Status.PENDING)
         self.assertEqual(len(mail.outbox), 0)
 
-    def test_an_order_is_found_by_client_reference_when_the_session_differs(self):
-        # Belt and braces: the id is persisted at checkout, but the reference
-        # is what Stripe echoes back, and either must be enough.
+    def test_an_unbound_order_is_found_by_its_client_reference(self):
+        # Belt and braces: if the session id never made it onto the order,
+        # the reference Stripe echoes back has to be enough to bind it.
         Order.objects.filter(pk=self.order.pk).update(stripe_session_id=None)
 
         response = self.deliver(self.event_body(self.order, id="cs_other_id"))
@@ -1261,6 +1344,299 @@ class WebhookPaymentTest(OrderTestBase):
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PAID)
         self.assertEqual(self.order.stripe_session_id, "cs_other_id")
+
+
+class WebhookSessionBindingTest(OrderTestBase):
+    """The stored stripe_session_id *is* the binding between an order and the
+    payment for it, so it gets verified rather than overwritten.
+
+    Without this, a signed event naming an order in client_reference_id could
+    re-point an order already bound to another session and mark it paid,
+    silently rewriting the local binding.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order(session_id="cs_session_a")
+
+    def assertOrderUntouched(self, response):
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+        self.assertEqual(self.order.stripe_session_id, "cs_session_a")
+        self.assertIsNone(self.order.paid_at)
+        self.assertEqual(self.order.customer_email, "")
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_a_different_session_cannot_re_bind_and_pay_an_order(self):
+        body = self.event_body(self.order, id="cs_session_b")
+
+        with self.assertLogs("main.views", level="ERROR") as logs:
+            response = self.deliver(body)
+
+        self.assertOrderUntouched(response)
+        self.assertIn("already bound", "\n".join(logs.output))
+
+    def test_a_different_session_reaching_it_via_metadata_is_also_refused(self):
+        body = self.event_body(
+            self.order, id="cs_session_b", client_reference_id=None,
+            metadata={"order_id": str(self.order.pk)})
+
+        with self.assertLogs("main.views", level="ERROR"):
+            response = self.deliver(body)
+
+        self.assertOrderUntouched(response)
+
+    def test_a_cancellation_from_a_different_session_is_also_refused(self):
+        body = self.event_body(
+            self.order, id="cs_session_b",
+            event_type="checkout.session.expired")
+
+        with self.assertLogs("main.views", level="ERROR"):
+            response = self.deliver(body)
+
+        self.assertOrderUntouched(response)
+
+    def test_the_orders_own_session_still_works(self):
+        # The guard must not break the ordinary path it is protecting.
+        response = self.deliver(self.event_body(self.order, id="cs_session_a"))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertEqual(len(mail.outbox), 1)
+
+
+class WebhookLineItemReconciliationTest(OrderTestBase):
+    """Checkout enables adjustable_quantity, so the cart snapshot is not
+    necessarily what was bought -- and the owner's email *is* the pick list.
+
+    The webhook therefore re-reads the billed quantities from Stripe. That
+    extra call is strictly best-effort: a paid order must never be lost
+    because a secondary lookup failed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order(product_pk=100, quantity=2)
+        self.item = self.order.items.get()
+
+    def test_the_default_case_records_that_nothing_changed(self):
+        self.deliver(self.event_body(self.order))
+
+        self.order.refresh_from_db()
+        self.item.refresh_from_db()
+        self.assertIsNotNone(self.order.reconciled_at)
+        self.assertEqual(self.order.reconciliation_error, "")
+        self.assertEqual(self.item.quantity, 2)
+        self.assertFalse(self.item.quantity_adjusted())
+
+    def test_a_quantity_increased_at_checkout_is_persisted(self):
+        self.billed_quantities = {100: 5}
+
+        self.deliver(self.event_body(self.order))
+
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.quantity, 5)
+        self.assertEqual(self.item.snapshot_quantity, 2)
+        self.assertTrue(self.item.quantity_adjusted())
+
+    def test_a_quantity_decreased_at_checkout_is_persisted(self):
+        self.billed_quantities = {100: 1}
+
+        self.deliver(self.event_body(self.order))
+
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.quantity, 1)
+        self.assertEqual(self.item.snapshot_quantity, 2)
+
+    def test_the_original_quantity_stays_recoverable(self):
+        self.billed_quantities = {100: 7}
+
+        self.deliver(self.event_body(self.order))
+
+        self.order.refresh_from_db()
+        self.item.refresh_from_db()
+        unit = self.item.unit_amount
+        self.assertEqual(self.item.snapshot_quantity, 2)
+        self.assertEqual(self.order.original_subtotal(), unit * 2)
+        self.assertEqual(self.order.snapshot_subtotal(), unit * 7)
+        self.assertEqual(
+            [i.pk for i in self.order.adjusted_items()], [self.item.pk])
+
+    def test_a_line_removed_at_checkout_becomes_zero_and_is_recorded(self):
+        # Stripe simply omits a line the customer zeroed out; shipping it
+        # anyway is exactly the failure this reconciliation exists to stop.
+        self.billed_quantities = {100: None}
+
+        self.deliver(self.event_body(self.order))
+
+        self.order.refresh_from_db()
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.quantity, 0)
+        self.assertEqual(self.item.snapshot_quantity, 2)
+        self.assertIn("did not bill", self.order.reconciliation_error)
+
+    def test_the_email_shows_the_billed_quantity_and_the_adjustment(self):
+        self.billed_quantities = {100: 5}
+
+        self.deliver(self.event_body(self.order))
+
+        body = mail.outbox[0].body
+        self.assertIn("5 x Learning Spark", body)
+        self.assertNotIn("2 x Learning Spark", body)
+        self.assertIn("adjusted at checkout, was 2", body)
+        # Reconciled, so no "do not trust this list" warning.
+        self.assertNotIn("DO NOT SHIP", body)
+
+    def test_multiple_lines_are_each_matched_on_their_own_price(self):
+        self.client.post("/add-to-cart/101/3")
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/s", id="cs_multi")
+            self.client.post("/checkout")
+        order = Order.objects.get(stripe_session_id="cs_multi")
+        self.billed_quantities = {100: 1, 101: 9}
+
+        self.deliver(self.event_body(order))
+
+        order.refresh_from_db()
+        self.assertEqual(
+            sorted((i.product_id, i.quantity, i.snapshot_quantity)
+                   for i in order.items.all()),
+            [(100, 1, 2), (101, 9, 3)])
+        self.assertEqual(order.reconciliation_error, "")
+
+    def test_a_billed_line_matching_nothing_is_recorded_not_crashed(self):
+        self.extra_line_items = [
+            {"price": {"id": "price_from_nowhere"}, "quantity": 3}]
+
+        response = self.deliver(self.event_body(self.order))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertIsNotNone(self.order.reconciled_at)
+        self.assertIn("price_from_nowhere", self.order.reconciliation_error)
+        self.assertIn("matches no line", self.order.reconciliation_error)
+        # And the owner is told the match was not clean.
+        self.assertIn("not everything matched up cleanly", mail.outbox[0].body)
+
+    def test_an_order_line_with_no_price_id_is_recorded_not_crashed(self):
+        OrderItem.objects.filter(pk=self.item.pk).update(price_id="")
+
+        response = self.deliver(self.event_body(self.order))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertIn("no Stripe price id", self.order.reconciliation_error)
+
+    def test_more_line_items_than_one_page_is_recorded(self):
+        self.line_items_has_more = True
+
+        self.deliver(self.event_body(self.order))
+
+        self.order.refresh_from_db()
+        self.assertIn("only the first page", self.order.reconciliation_error)
+
+    def test_reconciliation_runs_only_for_the_delivery_that_won(self):
+        body = self.event_body(self.order)
+
+        self.deliver(body)
+        self.deliver(body)
+        self.deliver(body)
+
+        self.assertEqual(self.payments.list_line_items.call_count, 1)
+
+    def test_exactly_one_lookup_of_one_page_is_made(self):
+        # One extra call, no pagination loop: this is on the webhook's
+        # response path.
+        self.deliver(self.event_body(self.order))
+
+        self.payments.list_line_items.assert_called_once_with(
+            "cs_test_session", limit=100)
+
+    def test_the_stripe_call_disables_network_retries(self):
+        # Checked against the real wrapper, since the class above stubs it.
+        with mock.patch(
+                "main.payments.stripe.checkout.Session.list_line_items") as call:
+            Payments.list_line_items("cs_x", limit=100)
+
+        call.assert_called_once_with(
+            "cs_x", limit=100, max_network_retries=0)
+
+
+class WebhookReconciliationFailureTest(OrderTestBase):
+    """A failed line-item lookup degrades to the snapshot; it never costs a
+    paid order."""
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order(product_pk=100, quantity=2)
+
+    def deliver_with_broken_lookup(self, error=None, **overrides):
+        self.line_items_error = error or OSError("Stripe is unreachable")
+        with self.assertLogs("main.models", level="ERROR"):
+            return self.deliver(self.event_body(self.order, **overrides))
+
+    def test_a_lookup_failure_still_returns_200(self):
+        self.assertEqual(self.deliver_with_broken_lookup().status_code, 200)
+
+    def test_a_lookup_failure_still_records_the_paid_order(self):
+        self.deliver_with_broken_lookup()
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertIsNotNone(self.order.paid_at)
+        self.assertEqual(self.order.customer_email, "buyer@example.com")
+        self.assertEqual(self.order.shipping_line1, "2 Ship Lane")
+
+    def test_a_lookup_failure_keeps_the_snapshot_quantities(self):
+        self.deliver_with_broken_lookup()
+
+        item = self.order.items.get()
+        self.assertEqual(item.quantity, 2)
+        self.assertEqual(item.snapshot_quantity, 2)
+
+    def test_a_lookup_failure_is_visible_on_the_order(self):
+        self.deliver_with_broken_lookup()
+
+        self.order.refresh_from_db()
+        self.assertIsNone(self.order.reconciled_at)
+        self.assertFalse(self.order.quantities_are_authoritative())
+        self.assertIn("Stripe is unreachable", self.order.reconciliation_error)
+
+    def test_a_lookup_failure_with_a_mismatched_subtotal_shouts(self):
+        # This is the dangerous combination: the totals say the customer
+        # changed something and we could not find out what.
+        self.deliver_with_broken_lookup(
+            amount_subtotal=self.order.snapshot_subtotal() + 4321)
+
+        body = mail.outbox[0].body
+        self.assertIn("DO NOT SHIP FROM THE LIST ABOVE", body)
+        self.assertIn("Stripe is unreachable", body)
+
+    def test_a_lookup_failure_with_a_matching_subtotal_says_so_quietly(self):
+        self.deliver_with_broken_lookup()
+
+        body = mail.outbox[0].body
+        self.assertNotIn("DO NOT SHIP", body)
+        self.assertIn("could not be re-read from Stripe", body)
+
+    def test_the_owner_is_still_emailed_once(self):
+        self.deliver_with_broken_lookup()
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_a_late_bound_order_is_still_reconciled(self):
+        Order.objects.filter(pk=self.order.pk).update(stripe_session_id=None)
+
+        self.deliver(self.event_body(self.order, id="cs_late_binding"))
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        # It got bound before reconciliation ran, so the lookup did happen.
+        self.assertEqual(self.order.stripe_session_id, "cs_late_binding")
+        self.assertIsNotNone(self.order.reconciled_at)
 
 
 class WebhookIdempotencyTest(OrderTestBase):
@@ -1407,6 +1783,69 @@ class WebhookUnhandledEventTest(OrderTestBase):
         self.assertEqual(response.status_code, 200)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PENDING)
+
+
+class WebhookInterleavedDeliveryTest(OrderTestBase):
+    """The race the idempotency guard exists to close.
+
+    NOT a threaded test. A genuine two-thread version was written and then
+    abandoned: against the SQLite test database both threads die with
+    "database table is locked" before either reaches the guard, so it measures
+    SQLite's shared-cache locking rather than this code, and making it pass
+    would need exactly the elaborate synchronisation that produces flaky
+    tests. Postgres -- what prod runs, and where select_for_update is a real
+    row lock -- is not available in CI.
+
+    What is covered instead is the specific interleaving that matters: two
+    deliveries that both observe the order as PENDING before either writes.
+    That is precisely what a read-then-write check gets wrong, and it is
+    deterministic.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order()
+
+    def test_only_one_of_two_deliveries_that_both_saw_pending_can_pay(self):
+        # Both readers hold a PENDING view of the row, as two concurrent
+        # webhook workers would.
+        first_view = Order.objects.get(pk=self.order.pk)
+        second_view = Order.objects.get(pk=self.order.pk)
+        self.assertEqual(first_view.status, Order.Status.PENDING)
+        self.assertEqual(second_view.status, Order.Status.PENDING)
+
+        # The transition is a conditional UPDATE, so the database decides it,
+        # not either reader's already-stale copy.
+        first = Order.objects.filter(
+            pk=first_view.pk, status=Order.Status.PENDING).update(
+                status=Order.Status.PAID)
+        second = Order.objects.filter(
+            pk=second_view.pk, status=Order.Status.PENDING).update(
+                status=Order.Status.PAID)
+
+        self.assertEqual((first, second), (1, 0))
+
+    def test_a_delivery_arriving_mid_flight_does_not_double_notify(self):
+        # Re-enter the webhook from inside the first delivery's post-commit
+        # work, i.e. while the first one is still running.
+        body = self.event_body(self.order)
+        real_notify = Order.notify_owner
+        reentered = []
+
+        def notify_and_reenter(order):
+            if not reentered:
+                reentered.append(True)
+                self.deliver(body)
+            return real_notify(order)
+
+        with mock.patch.object(Order, "notify_owner", notify_and_reenter):
+            self.deliver(body)
+
+        self.assertTrue(reentered)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertEqual(len(self.order_emails()), 1)
+
 
 
 class CheckoutSuccessPageTest(OrderTestBase):

@@ -17,8 +17,11 @@ class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 0
     can_delete = False
-    fields = ("product_name", "quantity", "unit_display_price",
-              "total_display_price", "product", "price_id")
+    # snapshot_quantity is shown next to quantity so an adjustment the
+    # customer made on Stripe's page is visible rather than just overwritten.
+    fields = ("product_name", "quantity", "snapshot_quantity",
+              "unit_display_price", "total_display_price", "product",
+              "price_id")
     readonly_fields = fields
 
     def has_add_permission(self, request, obj=None):

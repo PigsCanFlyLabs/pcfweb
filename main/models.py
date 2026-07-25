@@ -9,7 +9,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from main.payments import Payments
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from easy_thumbnails.files import get_thumbnailer
 
@@ -379,6 +379,17 @@ class Order(models.Model):
     notified_at = models.DateTimeField(null=True, blank=True)
     notification_error = models.TextField(blank=True)
 
+    # When the snapshotted line items were checked against what Stripe
+    # actually billed. Null means that check did not happen (or failed), so
+    # the item quantities below are the pre-checkout cart's, not the
+    # customer's final ones -- see reconcile_line_items().
+    reconciled_at = models.DateTimeField(null=True, blank=True)
+    # Anything a human should look at: the whole lookup failing, or an
+    # individual line that could not be matched up. Set with reconciled_at
+    # null means we fell back to the snapshot entirely; set with
+    # reconciled_at populated means we reconciled but something was odd.
+    reconciliation_error = models.TextField(blank=True)
+
     class Meta:
         ordering = ['-created_at']
 
@@ -410,21 +421,37 @@ class Order(models.Model):
                 unit_amount=cp.product.price,
                 currency=DEFAULT_CURRENCY,
                 quantity=cp.quantity,
+                snapshot_quantity=cp.quantity,
                 price_id=cp.price_id or "",
             ) for cp in cart_products
         ])
         return order
 
     def snapshot_subtotal(self) -> int:
-        """Pre-tax, pre-shipping total of the snapshotted line items."""
+        """Pre-tax, pre-shipping total of the current line quantities.
+
+        After reconciliation these are the quantities Stripe billed; before
+        it, they are the cart's.
+        """
         return sum(item.total_amount() for item in self.items.all())
 
-    def quantities_match(self) -> bool:
-        """Whether Stripe billed for exactly what we snapshotted.
+    def original_subtotal(self) -> int:
+        """The same total, using the quantities as they were at checkout."""
+        return sum(item.original_amount() for item in self.items.all())
 
-        Checkout is created with adjustable_quantity enabled, so a customer
-        can change quantities on Stripe's page after we have written the
-        snapshot. When these disagree, the snapshot is not what was bought.
+    def adjusted_items(self) -> List["OrderItem"]:
+        """Lines the customer changed on Stripe's hosted page."""
+        return [item for item in self.items.all() if item.quantity_adjusted()]
+
+    def quantities_are_authoritative(self) -> bool:
+        """Whether the line quantities came from Stripe rather than the cart."""
+        return self.reconciled_at is not None
+
+    def quantities_match(self) -> bool:
+        """Whether Stripe's subtotal agrees with the line items we hold.
+
+        Only meaningful as a fallback signal: when reconciliation could not
+        run, this is the one hint that the customer changed something.
         """
         if self.amount_subtotal is None:
             return True
@@ -450,6 +477,43 @@ class Order(models.Model):
     def notification_subject(self) -> str:
         return f"[pigscanfly] New paid order #{self.pk}"
 
+    def fulfilment_caveats(self) -> List[str]:
+        """Anything that makes the item list above less than trustworthy.
+
+        This email *is* the pick/pack instruction, so when the quantities are
+        known to possibly be wrong that has to be impossible to miss.
+        """
+        if self.quantities_are_authoritative():
+            if self.reconciliation_error:
+                # Reconciled, but something did not line up cleanly.
+                return ["",
+                        "Note: the quantities above came from Stripe, but not "
+                        "everything matched up cleanly:",
+                        f"  {self.reconciliation_error}"]
+            return []
+        # Reconciliation did not happen, so the quantities are the cart's.
+        if not self.quantities_match():
+            return [
+                "",
+                "*** WARNING: DO NOT SHIP FROM THE LIST ABOVE WITHOUT "
+                "CHECKING. Stripe's line-item subtotal "
+                f"({_display_amount(self.amount_subtotal)}) does not match it "
+                f"({_display_amount(self.snapshot_subtotal())}), and the "
+                "quantities could not be re-read from Stripe, so the customer "
+                "very likely changed something at checkout. Open the session "
+                "in the Stripe Dashboard to see what was actually bought. ***",
+                f"  ({self.reconciliation_error})"
+                if self.reconciliation_error else "",
+            ]
+        return [
+            "",
+            "Note: the quantities above could not be re-read from Stripe, so "
+            "they are the ones from the cart. The totals agree, so they are "
+            "very probably right.",
+            f"  ({self.reconciliation_error})"
+            if self.reconciliation_error else "",
+        ]
+
     def notification_body(self) -> str:
         lines = [
             f"Order #{self.pk} was paid and is ready to fulfil.",
@@ -464,20 +528,14 @@ class Order(models.Model):
             "-----",
         ]
         for item in self.items.all():
-            lines.append(
-                f"  {item.quantity} x {item.product_name} "
-                f"@ {_display_amount(item.unit_amount)} "
-                f"= {_display_amount(item.total_amount())}")
-        if not self.quantities_match():
-            lines += [
-                "",
-                "*** WARNING: Stripe's line-item subtotal "
-                f"({_display_amount(self.amount_subtotal)}) does not match the "
-                f"cart snapshot above ({_display_amount(self.snapshot_subtotal())}). "
-                "Checkout allows the customer to adjust quantities, so check "
-                "the Stripe Dashboard for what was actually bought before "
-                "shipping. ***",
-            ]
+            line = (f"  {item.quantity} x {item.product_name} "
+                    f"@ {_display_amount(item.unit_amount)} "
+                    f"= {_display_amount(item.total_amount())}")
+            if item.quantity_adjusted():
+                line += (f"   [adjusted at checkout, was "
+                         f"{item.snapshot_quantity}]")
+            lines.append(line)
+        lines += self.fulfilment_caveats()
         lines += [
             "",
             f"Tax:   {_display_amount(self.amount_tax)}",
@@ -503,6 +561,126 @@ class Order(models.Model):
             # string form so a mis-set env var is not a crash in a webhook.
             recipients.append(entry if isinstance(entry, str) else entry[1])
         return [r for r in recipients if r]
+
+    # One page is plenty: a line is a distinct product, and the store sells
+    # nowhere near this many different things.
+    LINE_ITEM_PAGE_SIZE = 100
+
+    def reconcile_line_items(self) -> bool:
+        """Replace the cart's quantities with the ones Stripe actually billed.
+
+        Checkout enables adjustable_quantity, so the customer can change what
+        they are buying on Stripe's hosted page after the snapshot is written.
+        The snapshot is what the owner's notification email tells them to pick
+        and pack, so leaving it knowingly stale means shipping the wrong thing
+        whenever they miss the warning. One extra API call is cheaper than
+        that.
+
+        Never raises and never retries: losing a paid order because a
+        secondary lookup timed out would be far worse than an approximate
+        quantity. A failure leaves the snapshot in place, records why, and
+        leaves reconciled_at null so the email says the list is unverified.
+        """
+        if not self.stripe_session_id:
+            self._record_reconciliation_failure(
+                "no Stripe session id on the order")
+            return False
+        try:
+            page = Payments.list_line_items(
+                self.stripe_session_id, limit=self.LINE_ITEM_PAGE_SIZE)
+            billed, truncated = self._billed_quantities(page)
+            problems = self._apply_billed_quantities(billed)
+            if truncated:
+                problems.append(
+                    f"Stripe reported more than {self.LINE_ITEM_PAGE_SIZE} "
+                    "line items; only the first page was reconciled")
+            Order.objects.filter(pk=self.pk).update(
+                reconciled_at=timezone.now(),
+                reconciliation_error="; ".join(problems)[:2000])
+        except Exception as e:
+            logger.exception(
+                "Order #%s: could not reconcile line items against Stripe.",
+                self.pk)
+            self._record_reconciliation_failure(f"{type(e).__name__}: {e}")
+            return False
+        self.refresh_from_db()
+        return True
+
+    @staticmethod
+    def _billed_quantities(page) -> Tuple[Dict[str, int], bool]:
+        """price id -> quantity billed, from a Stripe line-item page."""
+        def field(obj, key):
+            if isinstance(obj, dict):
+                return obj.get(key)
+            return getattr(obj, key, None)
+
+        billed: Dict[str, int] = {}
+        for line in field(page, "data") or []:
+            price_id = field(field(line, "price") or {}, "id")
+            quantity = field(line, "quantity")
+            if not price_id or quantity is None:
+                continue
+            billed[price_id] = billed.get(price_id, 0) + int(quantity)
+        return billed, bool(field(page, "has_more"))
+
+    def _apply_billed_quantities(self, billed: Dict[str, int]) -> List[str]:
+        """Write the billed quantities onto the lines, joined on price id.
+
+        Returns the list of things that did not line up, for a human to read;
+        an unmatched line is recorded rather than raised.
+        """
+        problems: List[str] = []
+        items = list(self.items.all())
+        price_counts: Dict[str, int] = {}
+        for item in items:
+            if item.price_id:
+                price_counts[item.price_id] = price_counts.get(
+                    item.price_id, 0) + 1
+
+        changed = []
+        for item in items:
+            if not item.price_id:
+                problems.append(
+                    f"{item.product_name!r} carries no Stripe price id, so "
+                    "its quantity could not be checked")
+                continue
+            if price_counts[item.price_id] > 1:
+                problems.append(
+                    f"price {item.price_id} covers more than one line, so "
+                    f"{item.product_name!r} could not be matched")
+                continue
+            if item.price_id not in billed:
+                # Stripe's list is the complete set of what was billed, so an
+                # absent line means the customer took it out at checkout.
+                # Zero is the honest quantity; snapshot_quantity still records
+                # what they had put in.
+                problems.append(
+                    f"Stripe did not bill for {item.product_name!r}; treating "
+                    "it as removed at checkout")
+            quantity = billed.get(item.price_id, 0)
+            if quantity != item.quantity:
+                item.quantity = quantity
+                changed.append(item)
+
+        for price_id, quantity in billed.items():
+            if price_id not in price_counts:
+                problems.append(
+                    f"Stripe billed {quantity} of price {price_id}, which "
+                    "matches no line on this order")
+
+        if changed:
+            OrderItem.objects.bulk_update(changed, ["quantity"])
+        return problems
+
+    def _record_reconciliation_failure(self, message: str) -> None:
+        try:
+            Order.objects.filter(pk=self.pk).update(
+                reconciliation_error=message[:2000])
+        except Exception:
+            logger.exception(
+                "Order #%s: could not record the reconciliation failure.",
+                self.pk)
+        self.reconciliation_error = message[:2000]
 
     def notify_owner(self) -> bool:
         """Email the owner so they can pick, pack and ship this order.
@@ -568,11 +746,23 @@ class OrderItem(models.Model):
     product_name = models.CharField(max_length=250)
     unit_amount = models.IntegerField()
     currency = models.CharField(max_length=3, default=DEFAULT_CURRENCY)
+    # What was actually bought. Starts as the cart quantity and is replaced by
+    # Stripe's billed quantity once the webhook reconciles the order, because
+    # checkout enables adjustable_quantity and the customer can change it.
     quantity = models.PositiveBigIntegerField(default=1)
+    # What was in the cart when checkout started. Never overwritten, so an
+    # adjustment stays auditable instead of vanishing.
+    snapshot_quantity = models.PositiveBigIntegerField(default=1)
     price_id = models.CharField(max_length=250, blank=True)
 
     def total_amount(self) -> int:
         return self.unit_amount * self.quantity
+
+    def original_amount(self) -> int:
+        return self.unit_amount * self.snapshot_quantity
+
+    def quantity_adjusted(self) -> bool:
+        return self.quantity != self.snapshot_quantity
 
     def total_display_price(self) -> str:
         return _display_amount(self.total_amount())
