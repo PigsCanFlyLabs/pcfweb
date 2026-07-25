@@ -134,22 +134,29 @@ class Product(models.Model):
         max_length=1,
         choices=Modes.choices,
         default=Modes.PAYMENT)
+    # db_default as well as default, on this and the three below. A rolling
+    # deploy migrates while the old image is still serving, and Django's
+    # AddField backfills a default and then drops it out of the schema -- so
+    # without a database-side default these NOT NULL columns cannot be omitted
+    # from an INSERT, and old code omits exactly them. See
+    # RollingDeployOldCodeWriteTest.
     delivery_type = models.CharField(
         max_length=20,
         choices=DeliveryTypes.choices,
-        default=DeliveryTypes.PHYSICAL)
+        default=DeliveryTypes.PHYSICAL,
+        db_default=DeliveryTypes.PHYSICAL)
 
     # "We are licensed to distribute this file ourselves." Not a feature flag:
     # it is the interlock that stops a mis-set delivery_type dropdown from
     # emailing a book somebody else holds the distribution rights to. The
     # O'Reilly titles are Holden's writing but O'Reilly's to hand out, so this
     # defaults to False and they stay False.
-    sells_ebook = models.BooleanField(default=False)
+    sells_ebook = models.BooleanField(default=False, db_default=False)
 
     # Pay-what-you-want. Turns Product.price into a *suggestion*: the Stripe
     # Price is minted with custom_unit_amount instead of a fixed unit_amount,
     # and the buyer types their own number (including zero).
-    is_pwyw = models.BooleanField(default=False)
+    is_pwyw = models.BooleanField(default=False, db_default=False)
 
     # Filename stem of the downloadable archive, without directory or
     # extension: the file served is <digital_asset_name>.zip under
@@ -157,7 +164,8 @@ class Product(models.Model):
     # derived from `name`, so renaming a book in the admin cannot silently
     # break fulfilment. Admin-editable, therefore never trusted -- see
     # main.digital.resolve_asset_path.
-    digital_asset_name = models.CharField(max_length=100, blank=True)
+    digital_asset_name = models.CharField(
+        max_length=100, blank=True, db_default="")
 
     def get_display_price(self) -> str:
         formatted_price = "{0:.2f}".format(self.price / 100)
@@ -510,8 +518,13 @@ class Order(models.Model):
     # the owner-notification pair above because the two fail independently and
     # for different reasons -- a missing book archive is not an SMTP problem --
     # and the owner needs to know which one to redo by hand.
+    #
+    # digital_delivery_sent_at is nullable, so it needs nothing extra; the
+    # error column is NOT NULL and carries a db_default so an old pod's
+    # checkout INSERT -- which names neither -- still succeeds while a deploy
+    # rolls. See RollingDeployOldCodeWriteTest.
     digital_delivery_sent_at = models.DateTimeField(null=True, blank=True)
-    digital_delivery_error = models.TextField(blank=True)
+    digital_delivery_error = models.TextField(blank=True, db_default="")
 
     # When the snapshotted line items were checked against what Stripe
     # actually billed. Null means that check did not happen (or failed), so
@@ -709,6 +722,12 @@ class Order(models.Model):
             lines.append(
                 f"  Download links emailed to {self.customer_email} at "
                 f"{self.digital_delivery_sent_at:%Y-%m-%d %H:%M %Z}.")
+            if self.digital_delivery_error:
+                # Something on this order was sent, so the line above is true
+                # -- but it is not the whole story and must not read as "all
+                # done".
+                lines.append(
+                    "  *** NOT EVERYTHING ON THIS ORDER WAS DELIVERED. ***")
         else:
             lines.append(
                 "  *** NOT DELIVERED. This order includes a download and the "
@@ -897,15 +916,34 @@ class Order(models.Model):
         return True
 
     def digital_items(self) -> List["OrderItem"]:
-        """Lines this site is licensed to deliver itself.
+        """Lines the customer is expecting a download for.
+
+        Everything marked DIGITAL, *including* the ones the rights interlock
+        will refuse to send. Those are precisely the ones somebody has to be
+        told about, so they must not be filtered out this early -- an
+        interlock that fires silently is worse than no interlock, because the
+        customer has paid and nobody knows they got nothing.
+        """
+        return [item for item in self.items.select_related('product')
+                if item.product is not None
+                and item.product.delivery_type == Product.DeliveryTypes.DIGITAL]
+
+    def deliverable_digital_items(self) -> List["OrderItem"]:
+        """Digital lines this site is licensed to deliver itself.
 
         Reads the interlock live off the Product rather than from the
         snapshot: revoked distribution rights must stop delivery immediately,
         including on a webhook re-delivery for an old order.
         """
-        return [item for item in self.items.select_related('product')
+        return [item for item in self.digital_items()
                 if item.product is not None
                 and item.product.is_digitally_fulfilled()]
+
+    def withheld_digital_items(self) -> List["OrderItem"]:
+        """Digital lines the rights interlock refuses to send."""
+        return [item for item in self.digital_items()
+                if item.product is not None
+                and not item.product.is_digitally_fulfilled()]
 
     def digital_delivery_subject(self) -> str:
         return "Your download from Pigs Can Fly Labs"
@@ -955,23 +993,49 @@ class Order(models.Model):
             self._record_digital_delivery_failure(f"{type(e).__name__}: {e}")
             return False
 
+    # Said to the owner, and only to the owner, when the rights interlock
+    # stops a delivery. It has to name the product and say what to do: this
+    # is a customer who has paid for a download and will not be getting one.
+    WITHHELD_MESSAGE = (
+        "{name!r} is marked as a digital product but sells_ebook is not set, "
+        "so this site is not recorded as licensed to distribute it. Nothing "
+        "was sent and the customer has paid. Set sells_ebook if the rights "
+        "are in place and resend, or refund the order.")
+
     def _deliver_digital_goods(self) -> bool:
         items = self.digital_items()
         if not items:
             # Nothing downloadable on this order, which is the common case.
+            # Nothing to record: this is silence about a non-event, as
+            # distinct from the withheld case below.
             return False
+
+        problems: List[str] = []
+        for item in self.withheld_digital_items():
+            # The interlock did its job; now it has to say so. Leaving this
+            # to look like "no digital items" is how a paid order quietly
+            # delivers nothing.
+            message = self.WITHHELD_MESSAGE.format(name=item.product_name)
+            logger.error("Order #%s: %s", self.pk, message)
+            problems.append(message)
+
+        deliverable = self.deliverable_digital_items()
+        if not deliverable:
+            self._record_digital_delivery_failure("; ".join(problems))
+            return False
+
         if not self.customer_email:
-            self._record_digital_delivery_failure(
+            problems.append(
                 "Stripe reported no customer email for this order, so the "
                 "download link could not be sent. Get an address from the "
                 "Stripe Dashboard and resend it by hand.")
+            self._record_digital_delivery_failure("; ".join(problems))
             return False
 
         links: List[Tuple[str, str]] = []
-        problems: List[str] = []
-        for item in items:
+        for item in deliverable:
             product = item.product
-            assert product is not None  # digital_items() guarantees it
+            assert product is not None  # deliverable_digital_items() guarantees it
             try:
                 # Resolve and open now, so a missing or unnameable archive is
                 # caught here rather than emailed out as a link that 404s.
