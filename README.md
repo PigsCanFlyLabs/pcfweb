@@ -73,6 +73,21 @@ template validation → collectstatic (assets are copied in from a sibling
 `pcfweb-assets` checkout) → multi-arch Docker build/push
 (`holdenk/pcfweb:<tag>`) → `kubectl apply`.
 
+**Before running `./build.sh`, check out the image assets as a sibling
+directory.** They are deliberately kept out of this repo (`.gitignore`
+excludes `main/static/assets/images`), so the build depends on
+[`pcfweb-assets`](https://github.com/pigsCanFlyLabs/pcfweb-assets) being
+present one level up:
+
+```bash
+git clone https://github.com/pigsCanFlyLabs/pcfweb-assets.git ../pcfweb-assets
+```
+
+Note that `build.sh` does `rm -rf main/static/assets/images` *before* it
+copies the new ones in, so running it without `../pcfweb-assets` present
+both fails the build and leaves your local images deleted — re-clone the
+sibling repo and re-run to recover.
+
 The Kubernetes objects:
 
 - `pg-bootstrap.yaml` — the database: a [CloudNativePG](https://cloudnative-pg.io/)
