@@ -37,7 +37,7 @@ class Product(models.Model):
 
     def generate_external_product_id(self):
         external_product_id = Payments.create_product(
-            self.name, self.description, self.price, currency="usd")
+            self.name, self.description, self.price, currency="usd", tax_code=self.tax_code)
         return external_product_id
 
     def save(self, *args, **kwargs):
