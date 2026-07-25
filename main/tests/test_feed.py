@@ -58,7 +58,7 @@ class ProductFeedTest(TestCase):
     def test_the_description_is_plain_text_not_escaped_markup(self):
         # get_display_text() returns markup for the HTML page; in XML that
         # arrives at Google as literal &lt;p&gt; in the listing copy.
-        self.make_product(isbn="9781449358624")
+        self.make_product(print_isbn="9781449358624")
 
         description = self.feed_items()[0].find(f"{G}description").text
 
@@ -118,13 +118,51 @@ class ProductCopyEscapingTest(TestCase):
 
         self.assertNotIn("<script>", rendered)
 
-    def test_the_signed_note_is_still_real_markup_for_books_with_an_isbn(self):
-        product = self.make_product("Prose.", isbn="9781449358624")
+    def test_the_signed_note_is_still_real_markup_for_print_books(self):
+        product = self.make_product("Prose.", print_isbn="9781449358624")
 
         rendered = str(product.get_display_text())
 
         self.assertIn("<p>", rendered)
         self.assertIn("signed on request", rendered)
+
+    def test_ebook_isbn_does_not_offer_a_signed_copy(self):
+        print_product = self.make_product("Print.", print_isbn="9781449358624")
+        ebook_product = self.make_product("PDF.", ebook_isbn="9781449358624")
+
+        print_rendered = str(print_product.get_display_text())
+        ebook_rendered = str(ebook_product.get_display_text())
+
+        # Anti-vacuity: this assertion would fail if the signed note stopped
+        # being emitted for the print control case.
+        self.assertIn("signed on request", print_rendered)
+        self.assertIn("PDF.", ebook_rendered)
+        self.assertNotIn("signed on request", ebook_rendered)
+
+    def test_feed_signed_note_is_keyed_to_print_isbn(self):
+        print_product = self.make_product("Print.", print_isbn="9781449358624")
+        ebook_product = self.make_product("PDF.", ebook_isbn="9781449358624")
+
+        print_description = print_product.get_feed_description()
+        ebook_description = ebook_product.get_feed_description()
+
+        # Anti-vacuity: the plain-text note is still present for print books.
+        self.assertIn(Product.SIGNED_ON_REQUEST_NOTE, print_description)
+        self.assertIn("PDF.", ebook_description)
+        self.assertNotIn(Product.SIGNED_ON_REQUEST_NOTE, ebook_description)
+
+    def test_gtin_prefers_offer_format_identifier(self):
+        print_product = Product(
+            print_isbn="9781449358624",
+            ebook_isbn="9781449358625",
+            upc="123456789012",
+        )
+        ebook_product = Product(ebook_isbn="9781449358625", upc="123456789012")
+        upc_product = Product(upc="123456789012")
+
+        self.assertEqual(print_product.get_gtin(), "9781449358624")
+        self.assertEqual(ebook_product.get_gtin(), "9781449358625")
+        self.assertEqual(upc_product.get_gtin(), "123456789012")
 
     def test_the_product_page_renders_it_without_an_autoescape_override(self):
         product = self.make_product("Angle < bracket")

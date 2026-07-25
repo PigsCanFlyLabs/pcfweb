@@ -41,6 +41,7 @@ class SeedProductsCommandTest(TestCase):
         for book in books:
             self.assertEqual(book.cat, Product.Categories.BOOKS)
             self.assertTrue(book.isbn)
+            self.assertEqual(book.print_isbn, book.isbn)
             self.assertTrue(book.name)
 
     # -- idempotency -------------------------------------------------------

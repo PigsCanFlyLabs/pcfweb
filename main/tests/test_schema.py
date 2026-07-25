@@ -1,4 +1,4 @@
-"""Schema guards for rolling-deploy-safe product stock."""
+"""Schema guards for rolling-deploy-safe product fields."""
 
 from django.db import models as django_models
 from django.db.backends.postgresql.schema import (
@@ -10,16 +10,7 @@ from django.test import SimpleTestCase
 from main.models import Product
 
 
-class PostgresColumnDefaultDDLTest(SimpleTestCase):
-    """Assert PostgreSQL keeps a real default for the new stock column.
-
-    The runtime raw-INSERT test proves old-code writes work on the local test
-    backend. Production is PostgreSQL, so this records the DDL Django would
-    emit there without needing a live server.
-    """
-
-    NEW_NOT_NULL_COLUMNS = [("Product", "stock")]
-
+class PostgresDDLRecorder:
     @staticmethod
     def postgres_connection():
         return ConnectionHandler({
@@ -48,6 +39,17 @@ class PostgresColumnDefaultDDLTest(SimpleTestCase):
     def add_named_field_ddl(self, model_name, field_name):
         model = {"Product": Product}[model_name]
         return self.add_field_ddl(model, model._meta.get_field(field_name))
+
+
+class PostgresColumnDefaultDDLTest(PostgresDDLRecorder, SimpleTestCase):
+    """Assert PostgreSQL keeps a real default for the new stock column.
+
+    The runtime raw-INSERT test proves old-code writes work on the local test
+    backend. Production is PostgreSQL, so this records the DDL Django would
+    emit there without needing a live server.
+    """
+
+    NEW_NOT_NULL_COLUMNS = [("Product", "stock")]
 
     def test_add_column_statement_includes_default_for_backfill(self):
         """The discriminating durable-default checks live in the sibling tests.
@@ -95,3 +97,65 @@ class PostgresColumnDefaultDDLTest(SimpleTestCase):
             [s for s, _ in statements if "DROP DEFAULT" in s],
             statements,
         )
+
+
+class RollingDeployOldCodeProductInsertTest(PostgresDDLRecorder, SimpleTestCase):
+    """Guards for columns added while old Product writers still run."""
+
+    OLD_CODE_PRODUCT_COLUMNS = [
+        "description",
+        "external_product_id",
+        "isbn",
+        "upc",
+        "mpn",
+        "kickstarter",
+        "kindle_link",
+        "amazon_link",
+        "bookshop_link",
+        "amazon_in_link",
+        "flipkart_link",
+        "preorder_only",
+        "noorder",
+        "backorder",
+        "date_available",
+        "brand",
+        "sizes",
+        "name",
+        "page",
+        "price",
+        "image",
+        "image_name",
+        "tax_code",
+        "cat",
+        "mode",
+    ]
+    NEW_IDENTIFIER_COLUMNS = [
+        "print_isbn",
+        "ebook_isbn",
+        "default_asin",
+        "print_asin",
+        "ebook_asin",
+    ]
+
+    def test_old_code_raw_insert_can_omit_new_identifier_columns(self):
+        """Old-code INSERTs omit new identifiers, so they must be NULLable."""
+        raw_insert_sql = (
+            "INSERT INTO main_product "
+            f"({', '.join(self.OLD_CODE_PRODUCT_COLUMNS)}) "
+            f"VALUES ({', '.join(['%s'] * len(self.OLD_CODE_PRODUCT_COLUMNS))})"
+        )
+
+        # Anti-vacuity: the compatibility SQL really is an old-code Product
+        # insert, not an empty or unrelated statement.
+        self.assertIn("INSERT INTO main_product", raw_insert_sql)
+        self.assertIn("isbn", self.OLD_CODE_PRODUCT_COLUMNS)
+
+        for field_name in self.NEW_IDENTIFIER_COLUMNS:
+            with self.subTest(field=field_name):
+                statements = self.add_named_field_ddl("Product", field_name)
+                add_column = [s for s, _ in statements if "ADD COLUMN" in s]
+
+                self.assertEqual(len(add_column), 1, statements)
+                self.assertIn(field_name, add_column[0])
+                self.assertNotIn(field_name, self.OLD_CODE_PRODUCT_COLUMNS)
+                self.assertNotIn("NOT NULL", add_column[0])
