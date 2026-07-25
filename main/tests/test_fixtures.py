@@ -53,6 +53,7 @@ class InitialProductsFixtureTest(TestCase):
     def test_cart_with_physical_book_shows_shipping_notice(self, payments):
         payments.create_product.return_value = "prod_test"
         payments.create_price.return_value = "price_test"
+        Product.objects.filter(pk=100).update(stock=1)
         self.client.post("/add-to-cart/100/1")
         response = self.client.get("/cart")
         self.assertEqual(response.status_code, 200)

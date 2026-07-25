@@ -22,6 +22,7 @@ class CartTestBase(TestCase):
         self.addCleanup(patcher.stop)
         payments.create_product.return_value = "prod_test"
         payments.create_price.return_value = "price_test"
+        Product.objects.filter(cat=Product.Categories.BOOKS).update(stock=99)
 
     def make_user(self, email="buyer@example.com", username="buyer"):
         return User.objects.create_user(

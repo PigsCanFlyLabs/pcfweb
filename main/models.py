@@ -9,7 +9,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from main.payments import Payments
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from easy_thumbnails.files import get_thumbnailer
 
@@ -39,6 +39,7 @@ class Product(models.Model):
     preorder_only = models.BooleanField(default=False, null=False)
     noorder = models.BooleanField(default=False, null=False)
     backorder = models.BooleanField(default=False, null=False)
+    stock = models.PositiveIntegerField(default=0, db_default=0)
     date_available = models.DateField(null=True, blank=True)
     brand = models.CharField(null=True, blank=True, max_length=200)
     sizes = models.CharField(null=True, blank=True, max_length=200)
@@ -175,6 +176,11 @@ class Product(models.Model):
         return (self.mode == Product.Modes.PAYMENT
                 and self.cat != Product.Categories.SERVICES)
 
+    def is_purchasable(self) -> bool:
+        return not self.noorder and (
+            not self.is_physical_good() or cast(int, self.stock) > 0
+        )
+
     def get_display_text(self):
         if self.isbn:
             return f"{self.description}<p>All of Holden's books are available signed on request</p>"
@@ -185,7 +191,9 @@ class Product(models.Model):
         return self.isbn or self.upc
 
     def get_availability(self):
-        if self.preorder_only:
+        if self.is_physical_good() and self.stock == 0:
+            return "out_of_stock"
+        elif self.preorder_only:
             return "preorder"
         elif self.backorder:
             return "backorder"
@@ -193,7 +201,9 @@ class Product(models.Model):
             return "in_stock"
 
     def buy_text(self):
-        if self.preorder_only:
+        if not self.is_purchasable():
+            return "Out of Stock"
+        elif self.preorder_only:
             return "Pre-Order"
         elif self.backorder:
             return "Back Order"
@@ -201,7 +211,9 @@ class Product(models.Model):
             return "Add to Cart"
 
     def stock_description(self):
-        if self.backorder:
+        if self.is_physical_good() and self.stock == 0:
+            return "***Out of Stock***"
+        elif self.backorder:
             return "***Back Order Only***"
         elif self.preorder_only:
             return "***PreOrder Only***"

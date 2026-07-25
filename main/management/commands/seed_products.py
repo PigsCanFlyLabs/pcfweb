@@ -1,10 +1,11 @@
 """
-Seed fixture-owned products without clobbering lazily-generated fields.
+Seed fixture-owned products without clobbering runtime-owned fields.
 
 Replaces ``manage.py loaddata initial_products`` so that every deploy still
-updates fixture-owned fields (name, description, price, links, tax_code, …)
-but never overwrites fields that are lazily generated at runtime — most
-importantly ``external_product_id`` (the Stripe product id).
+updates fixture-owned fields (name, description, price, links, tax_code, ...)
+but never overwrites fields that are owned outside the fixture -- generated
+runtime fields like ``external_product_id`` and admin-edited fields like
+``stock``.
 
 The fixture file ``main/fixtures/initial_products.yaml`` is still the single
 source of truth for fixture-owned fields; edit it to change product metadata.
@@ -21,12 +22,13 @@ from django.db import transaction
 from main.models import Product
 
 # ---------------------------------------------------------------------------
-# Fields that are NOT fixture-owned — they are populated lazily at runtime
-# (e.g. Stripe product ids generated on first add-to-cart).  The seed command
-# must never touch these on existing rows.  Add new generated fields here.
+# Fields that are NOT fixture-owned.  The seed command must never touch these
+# on existing rows: some are generated lazily at runtime, and some are owned by
+# the Django admin after initial fixture creation.
 # ---------------------------------------------------------------------------
-GENERATED_FIELDS: Set[str] = {
+SEED_PROTECTED_FIELDS: Set[str] = {
     "external_product_id",
+    "stock",
 }
 
 
@@ -42,7 +44,7 @@ def _load_fixture(path: str) -> list[dict[str, Any]]:
 class Command(BaseCommand):
     help = (
         "Upsert fixture-owned products from main/fixtures/initial_products.yaml, "
-        "preserving lazily-generated fields like external_product_id."
+        "preserving runtime/admin-owned fields like external_product_id and stock."
     )
 
     def handle(self, **options: Any) -> None:
@@ -75,9 +77,10 @@ class Command(BaseCommand):
                 pk: int = entry["pk"]
                 raw_fields: dict = entry["fields"]
 
-                # Strip any generated fields that might sneak into the fixture.
+                # Strip any non-fixture-owned fields that might sneak in.
                 fixture_fields = {
-                    k: v for k, v in raw_fields.items() if k not in GENERATED_FIELDS
+                    k: v for k, v in raw_fields.items()
+                    if k not in SEED_PROTECTED_FIELDS
                 }
 
                 if Product.objects.filter(pk=pk).exists():

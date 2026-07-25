@@ -15,7 +15,7 @@ from unittest import mock
 from django.core import mail
 from django.test import TestCase, override_settings
 
-from main.models import Order
+from main.models import Order, Product
 
 
 SHIPPING_NOTICE_TEXT = "shipping times for physical goods are currently long"
@@ -62,6 +62,7 @@ class OrderTestBase(TestCase):
         prices = itertools.count(1)
         payments.create_price.side_effect = (
             lambda *a, **kw: f"price_test_{next(prices)}")
+        Product.objects.filter(cat=Product.Categories.BOOKS).update(stock=99)
 
         # By default Stripe reports exactly what was snapshotted, i.e. the
         # customer changed nothing. Tests override these to model an
