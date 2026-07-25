@@ -1,12 +1,17 @@
+import hashlib
+import hmac
+import json
 import re
+import time
 from unittest import mock
 
 import stripe
 from django.contrib.auth.models import User
+from django.core import mail
 from django.db import IntegrityError, transaction
 from django.test import Client, RequestFactory, TestCase, override_settings
 
-from main.models import Cart, CartProduct, Product
+from main.models import Cart, CartProduct, Order, OrderItem, Product
 from main.payments import Payments
 from main.utils import get_client_ip
 from main.views import AddToCartView
@@ -809,15 +814,673 @@ class PageSmokeTest(TestCase):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 200)
 
+    @mock.patch("main.models.Payments")
     @mock.patch("main.views.Payments")
-    def test_checkout_redirects_to_the_payment_provider(self, payments):
-        payments.checkout.return_value = "https://checkout.example/session"
+    def test_checkout_redirects_to_the_payment_provider(
+            self, payments, model_payments):
+        # Checkout now records a PENDING order first, so it needs a non-empty
+        # cart -- and Payments.checkout returns (url, session_id).
+        model_payments.create_product.return_value = "prod_test"
+        model_payments.create_price.return_value = "price_test"
+        payments.checkout.return_value = (
+            "https://checkout.example/session", "cs_test_smoke")
+        self.client.post("/add-to-cart/100/1")
+
         response = self.client.get("/checkout")
+
         self.assertEqual(response.status_code, 302)
         self.assertEqual(
             response["Location"], "https://checkout.example/session")
+
+    def test_checkout_with_an_empty_cart_goes_back_to_the_cart(self):
+        self.assertRedirects(self.client.get("/checkout"), "/cart")
 
     def test_logout_requires_a_login(self):
         response = self.client.get("/logout")
         self.assertEqual(response.status_code, 302)
         self.assertIn("/login", response["Location"])
+
+
+WEBHOOK_SECRET = "whsec_test_secret_value"
+WEBHOOK_URL = "/stripe/webhook"
+OWNER_EMAIL = "owner@example.com"
+
+
+def stripe_signature(payload: str, secret: str = WEBHOOK_SECRET,
+                     timestamp=None) -> str:
+    """Build a real Stripe-Signature header.
+
+    Deliberately the genuine HMAC construction rather than a mocked-out
+    construct_event: a suite that never runs the signature check cannot tell
+    a working verification from a missing one, which is the one bug in this
+    feature that actually matters.
+    """
+    timestamp = int(time.time()) if timestamp is None else timestamp
+    signature = hmac.new(
+        secret.encode(), f"{timestamp}.{payload}".encode(),
+        hashlib.sha256).hexdigest()
+    return f"t={timestamp},v1={signature}"
+
+
+@override_settings(
+    STRIPE_WEBHOOK_SECRET=WEBHOOK_SECRET,
+    ADMINS=[("Owner", OWNER_EMAIL)],
+    DEFAULT_FROM_EMAIL="support@pigscanfly.ca")
+class OrderTestBase(TestCase):
+    """Orders and the Stripe webhook. Stripe itself is stubbed; the signature
+    verification is not."""
+
+    fixtures = ["initial_products"]
+
+    def setUp(self):
+        patcher = mock.patch("main.models.Payments")
+        payments = patcher.start()
+        self.addCleanup(patcher.stop)
+        payments.create_product.return_value = "prod_test"
+        payments.create_price.return_value = "price_test"
+
+    def place_order(self, product_pk=100, quantity=2,
+                    session_id="cs_test_session", client=None):
+        """Run the real checkout path, with only Stripe's HTTP call stubbed."""
+        client = client or self.client
+        client.post(f"/add-to-cart/{product_pk}/{quantity}")
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/session", id=session_id)
+            response = client.post("/checkout")
+        self.create_call = create
+        self.checkout_response = response
+        return Order.objects.get(stripe_session_id=session_id)
+
+    def session_payload(self, order, **overrides):
+        """A checkout.session object shaped like Stripe's."""
+        session = {
+            "id": order.stripe_session_id or "cs_test_session",
+            "object": "checkout.session",
+            "client_reference_id": str(order.pk),
+            "metadata": {"order_id": str(order.pk)},
+            "payment_status": "paid",
+            "currency": "usd",
+            # Subtotal agrees with the snapshot; the mismatch case has its
+            # own test.
+            "amount_subtotal": order.snapshot_subtotal(),
+            "amount_total": order.snapshot_subtotal() + 700,
+            "total_details": {"amount_tax": 200, "amount_shipping": 500},
+            "customer_details": {
+                "email": "buyer@example.com",
+                "name": "Buyer Person",
+                "address": {
+                    "line1": "1 Billing Way", "line2": "",
+                    "city": "San Francisco", "state": "CA",
+                    "postal_code": "94110", "country": "US",
+                },
+            },
+            "shipping_details": {
+                "name": "Buyer Person",
+                "address": {
+                    "line1": "2 Ship Lane", "line2": "Apt 3",
+                    "city": "Oakland", "state": "CA",
+                    "postal_code": "94607", "country": "US",
+                },
+            },
+        }
+        session.update(overrides)
+        return session
+
+    def event_body(self, order, event_type="checkout.session.completed",
+                   **overrides) -> str:
+        return json.dumps({
+            "id": "evt_test_1",
+            "object": "event",
+            "type": event_type,
+            "data": {"object": self.session_payload(order, **overrides)},
+        })
+
+    def deliver(self, body: str, signature=None, secret=WEBHOOK_SECRET):
+        """POST a webhook body, signed for real unless told otherwise."""
+        if signature is None:
+            signature = stripe_signature(body, secret=secret)
+        extra = {} if signature is False else {
+            "HTTP_STRIPE_SIGNATURE": signature}
+        return self.client.post(
+            WEBHOOK_URL, data=body, content_type="application/json", **extra)
+
+
+class CheckoutCreatesOrderTest(OrderTestBase):
+    """Requirement 1: checkout writes the snapshot the webhook will need."""
+
+    def test_checkout_records_a_pending_order_with_a_line_item_snapshot(self):
+        order = self.place_order(product_pk=100, quantity=2)
+        product = Product.objects.get(pk=100)
+
+        self.assertEqual(self.checkout_response.status_code, 302)
+        self.assertEqual(
+            self.checkout_response["Location"],
+            "https://checkout.example/session")
+        self.assertEqual(order.status, Order.Status.PENDING)
+        self.assertEqual(order.stripe_session_id, "cs_test_session")
+        self.assertEqual(order.currency, "usd")
+        self.assertEqual(order.amount_total, product.price * 2)
+        self.assertIsNone(order.paid_at)
+        self.assertIsNone(order.notified_at)
+
+        item = order.items.get()
+        self.assertEqual(item.product_id, 100)
+        self.assertEqual(item.product_name, product.name)
+        self.assertEqual(item.unit_amount, product.price)
+        self.assertEqual(item.quantity, 2)
+        self.assertEqual(item.currency, "usd")
+        self.assertEqual(item.price_id, "price_test")
+
+    def test_the_order_id_is_sent_to_stripe_as_the_client_reference(self):
+        # Without this there is nothing at all tying a Stripe session to
+        # anything local.
+        order = self.place_order()
+        kwargs = self.create_call.call_args.kwargs
+        self.assertEqual(kwargs["client_reference_id"], str(order.pk))
+        self.assertEqual(kwargs["metadata"], {"order_id": str(order.pk)})
+
+    def test_a_logged_in_buyers_order_is_attached_to_them(self):
+        user = User.objects.create_user(
+            username="buyer", email="buyer@example.com",
+            password="hunter2hunter2")
+        self.client.force_login(user)
+
+        order = self.place_order()
+
+        self.assertEqual(order.user_id, user.pk)
+
+    def test_an_anonymous_buyers_order_has_no_user(self):
+        self.assertIsNone(self.place_order().user_id)
+
+    def test_the_snapshot_outlives_the_product_and_its_price(self):
+        # Product.price is edited in place and Stripe Price objects are minted
+        # per cart row, so neither can be trusted for a historical order.
+        order = self.place_order(product_pk=100, quantity=2)
+        product = Product.objects.get(pk=100)
+        original_price = product.price
+
+        Product.objects.filter(pk=100).update(price=original_price + 5000)
+        Product.objects.filter(pk=100).delete()
+
+        item = order.items.get()
+        self.assertIsNone(item.product_id)
+        self.assertEqual(item.unit_amount, original_price)
+        self.assertEqual(item.product_name, "Learning Spark (1st edition)")
+        self.assertEqual(item.total_amount(), original_price * 2)
+
+    def test_checking_out_an_empty_cart_records_nothing(self):
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            response = self.client.post("/checkout")
+
+        self.assertRedirects(response, "/cart")
+        create.assert_not_called()
+        self.assertFalse(Order.objects.exists())
+
+    def test_multiple_cart_lines_are_all_snapshotted(self):
+        self.client.post("/add-to-cart/100/1")
+        self.client.post("/add-to-cart/101/3")
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/session", id="cs_multi")
+            self.client.post("/checkout")
+
+        order = Order.objects.get()
+        self.assertEqual(
+            sorted((i.product_id, i.quantity) for i in order.items.all()),
+            [(100, 1), (101, 3)])
+        self.assertEqual(order.amount_total, order.snapshot_subtotal())
+
+
+class WebhookSignatureTest(OrderTestBase):
+    """Requirement 3, and the security boundary of the whole feature: an
+    unverified payload must never be processed."""
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order()
+        self.body = self.event_body(self.order)
+
+    def assertNothingHappened(self, response):
+        self.assertEqual(response.status_code, 400)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+        self.assertIsNone(self.order.paid_at)
+        self.assertIsNone(self.order.notified_at)
+        self.assertEqual(self.order.customer_email, "")
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_a_missing_signature_header_is_rejected(self):
+        self.assertNothingHappened(self.deliver(self.body, signature=False))
+
+    def test_an_empty_signature_header_is_rejected(self):
+        self.assertNothingHappened(self.deliver(self.body, signature=""))
+
+    def test_a_garbage_signature_header_is_rejected(self):
+        self.assertNothingHappened(
+            self.deliver(self.body, signature="t=1,v1=deadbeef"))
+
+    def test_a_signature_made_with_the_wrong_secret_is_rejected(self):
+        self.assertNothingHappened(
+            self.deliver(self.body, secret="whsec_not_the_real_secret"))
+
+    def test_a_body_swapped_after_signing_is_rejected(self):
+        # The forgery that matters: a real signature for a payload the
+        # attacker then replaces with their own.
+        signature = stripe_signature(self.body)
+        forged = self.event_body(self.order, payment_status="paid",
+                                 amount_total=1)
+        self.assertNotEqual(forged, self.body)
+
+        self.assertNothingHappened(self.deliver(forged, signature=signature))
+
+    def test_a_stale_signature_outside_the_tolerance_is_rejected(self):
+        old = stripe_signature(self.body, timestamp=int(time.time()) - 3600)
+        self.assertNothingHappened(self.deliver(self.body, signature=old))
+
+    def test_a_malformed_body_with_a_valid_signature_is_rejected(self):
+        self.assertNothingHappened(self.deliver("this is not json{{"))
+
+    @override_settings(STRIPE_WEBHOOK_SECRET="")
+    def test_an_unconfigured_secret_rejects_everything(self):
+        # Failing closed: with no secret nothing can be verified, so a
+        # correctly signed-looking delivery must still be refused.
+        self.assertNothingHappened(self.deliver(self.body))
+
+    def test_the_webhook_refuses_get(self):
+        response = self.client.get(WEBHOOK_URL)
+        self.assertEqual(response.status_code, 405)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+
+    def test_the_webhook_does_not_require_a_csrf_token(self):
+        # Stripe has no token to send; the signature is the authentication.
+        strict = Client(enforce_csrf_checks=True)
+        body = self.event_body(self.order)
+        response = strict.post(
+            WEBHOOK_URL, data=body, content_type="application/json",
+            HTTP_STRIPE_SIGNATURE=stripe_signature(body))
+        self.assertEqual(response.status_code, 200)
+
+
+class WebhookPaymentTest(OrderTestBase):
+    """Requirement 2: a validly-signed completed session pays the order and
+    tells the owner, exactly once."""
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order(product_pk=100, quantity=2)
+
+    def test_a_valid_completed_event_marks_the_order_paid(self):
+        response = self.deliver(self.event_body(self.order))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertIsNotNone(self.order.paid_at)
+        self.assertEqual(self.order.customer_email, "buyer@example.com")
+        self.assertEqual(self.order.customer_name, "Buyer Person")
+        self.assertEqual(self.order.amount_total,
+                         self.order.snapshot_subtotal() + 700)
+        self.assertEqual(self.order.amount_tax, 200)
+        self.assertEqual(self.order.currency, "usd")
+
+    def test_the_reported_addresses_are_recorded(self):
+        self.deliver(self.event_body(self.order))
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.shipping_line1, "2 Ship Lane")
+        self.assertEqual(self.order.shipping_line2, "Apt 3")
+        self.assertEqual(self.order.shipping_city, "Oakland")
+        self.assertEqual(self.order.shipping_state, "CA")
+        self.assertEqual(self.order.shipping_postal_code, "94607")
+        self.assertEqual(self.order.shipping_country, "US")
+        self.assertEqual(self.order.billing_line1, "1 Billing Way")
+        self.assertEqual(self.order.billing_city, "San Francisco")
+
+    def test_shipping_reported_under_collected_information_is_recorded(self):
+        # Newer Stripe API versions moved it; both shapes must work.
+        body = self.event_body(
+            self.order,
+            shipping_details=None,
+            collected_information={"shipping_details": {
+                "name": "Newer Shape",
+                "address": {"line1": "9 New Way", "city": "Berkeley",
+                            "state": "CA", "postal_code": "94704",
+                            "country": "US"},
+            }})
+        self.deliver(body)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.shipping_name, "Newer Shape")
+        self.assertEqual(self.order.shipping_line1, "9 New Way")
+
+    def test_exactly_one_email_goes_to_the_owner(self):
+        self.deliver(self.event_body(self.order))
+
+        self.assertEqual(len(mail.outbox), 1)
+        message = mail.outbox[0]
+        self.assertEqual(message.to, [OWNER_EMAIL])
+        self.assertEqual(message.from_email, "support@pigscanfly.ca")
+        self.assertIn(str(self.order.pk), message.subject)
+
+    def test_the_email_carries_everything_needed_to_fulfil(self):
+        self.deliver(self.event_body(self.order))
+
+        body = mail.outbox[0].body
+        self.assertIn(f"Order #{self.order.pk}", body)
+        self.assertIn("2 x Learning Spark", body)
+        self.assertIn("buyer@example.com", body)
+        for line in ["2 Ship Lane", "Apt 3", "Oakland, CA", "94607"]:
+            self.assertIn(line, body)
+        self.order.refresh_from_db()
+        self.assertIn(self.order.total_display_price(), body)
+
+    def test_a_successful_notification_is_recorded_on_the_order(self):
+        self.deliver(self.event_body(self.order))
+
+        self.order.refresh_from_db()
+        self.assertIsNotNone(self.order.notified_at)
+        self.assertEqual(self.order.notification_error, "")
+
+    def test_an_adjusted_quantity_is_flagged_in_the_email(self):
+        # Checkout enables adjustable_quantity, so the snapshot can disagree
+        # with what Stripe actually billed. The owner has to be told.
+        self.deliver(self.event_body(
+            self.order, amount_subtotal=self.order.snapshot_subtotal() + 1234))
+
+        self.order.refresh_from_db()
+        self.assertFalse(self.order.quantities_match())
+        self.assertIn("WARNING", mail.outbox[0].body)
+
+    def test_a_completed_but_unpaid_session_does_not_pay_the_order(self):
+        # e.g. an ACH debit that has not settled yet.
+        response = self.deliver(
+            self.event_body(self.order, payment_status="unpaid"))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_a_later_async_success_pays_that_same_order(self):
+        self.deliver(self.event_body(self.order, payment_status="unpaid"))
+        response = self.deliver(self.event_body(
+            self.order, event_type="checkout.session.async_payment_succeeded"))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_an_async_failure_cancels_the_pending_order(self):
+        response = self.deliver(self.event_body(
+            self.order, event_type="checkout.session.async_payment_failed"))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.CANCELLED)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_an_expired_session_cancels_the_pending_order(self):
+        response = self.deliver(self.event_body(
+            self.order, event_type="checkout.session.expired"))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.CANCELLED)
+
+    def test_a_cancellation_event_cannot_undo_a_payment(self):
+        self.deliver(self.event_body(self.order))
+        self.deliver(self.event_body(
+            self.order, event_type="checkout.session.expired"))
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+
+    def test_an_event_for_an_unknown_order_is_accepted_without_side_effects(self):
+        body = self.event_body(
+            self.order, id="cs_never_seen", client_reference_id="999999",
+            metadata={})
+
+        response = self.deliver(body)
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_an_order_is_found_by_client_reference_when_the_session_differs(self):
+        # Belt and braces: the id is persisted at checkout, but the reference
+        # is what Stripe echoes back, and either must be enough.
+        Order.objects.filter(pk=self.order.pk).update(stripe_session_id=None)
+
+        response = self.deliver(self.event_body(self.order, id="cs_other_id"))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertEqual(self.order.stripe_session_id, "cs_other_id")
+
+
+class WebhookIdempotencyTest(OrderTestBase):
+    """Requirement 4: Stripe retries on any non-2xx and can duplicate
+    deliveries outright."""
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order()
+
+    def test_redelivering_the_same_event_pays_and_mails_once(self):
+        body = self.event_body(self.order)
+
+        first = self.deliver(body)
+        second = self.deliver(body)
+        third = self.deliver(body)
+
+        self.assertEqual(
+            [first.status_code, second.status_code, third.status_code],
+            [200, 200, 200])
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(OrderItem.objects.count(), 1)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_the_paid_transition_only_ever_runs_from_pending(self):
+        # The guard is a conditional UPDATE, not a read-then-write, so it is
+        # the database that refuses the second transition.
+        self.deliver(self.event_body(self.order))
+        self.order.refresh_from_db()
+        first_paid_at = self.order.paid_at
+
+        self.deliver(self.event_body(self.order, amount_total=999999))
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.paid_at, first_paid_at)
+        self.assertNotEqual(self.order.amount_total, 999999)
+
+    def test_a_redelivery_after_fulfilment_does_not_re_notify(self):
+        self.deliver(self.event_body(self.order))
+        # The owner ships it and marks it done in the admin.
+        Order.objects.filter(pk=self.order.pk).update(
+            status=Order.Status.FULFILLED)
+        mail.outbox.clear()
+
+        response = self.deliver(self.event_body(self.order))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.FULFILLED)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_a_redelivery_after_a_failed_email_does_not_retry_the_email(self):
+        # Deliberate: the order is recorded either way, and re-mailing on
+        # every one of Stripe's retries is exactly the flood being avoided.
+        with mock.patch("main.models.send_mail",
+                        side_effect=OSError("SMTP is down")):
+            with self.assertLogs("main.models", level="ERROR"):
+                self.deliver(self.event_body(self.order))
+
+        response = self.deliver(self.event_body(self.order))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mail.outbox), 0)
+
+
+class WebhookEmailFailureTest(OrderTestBase):
+    """Requirement 5: a failing send_mail must not fail the webhook.
+
+    A 500 here makes Stripe retry for up to three days, so an SMTP outage
+    would turn into an order that looks unrecorded plus a mail flood later.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order()
+
+    def deliver_with_broken_mail(self, exception=None):
+        exception = exception or OSError("SMTP server is unreachable")
+        # assertLogs both proves the failure is not swallowed silently and
+        # keeps the deliberate traceback out of the test output.
+        with mock.patch("main.models.send_mail", side_effect=exception):
+            with self.assertLogs("main.models", level="ERROR"):
+                return self.deliver(self.event_body(self.order))
+
+    def test_a_send_failure_still_returns_200(self):
+        self.assertEqual(self.deliver_with_broken_mail().status_code, 200)
+
+    def test_a_send_failure_still_records_the_paid_order(self):
+        self.deliver_with_broken_mail()
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertIsNotNone(self.order.paid_at)
+        self.assertEqual(self.order.customer_email, "buyer@example.com")
+        self.assertEqual(self.order.shipping_line1, "2 Ship Lane")
+
+    def test_a_send_failure_is_visible_on_the_order(self):
+        self.deliver_with_broken_mail()
+
+        self.order.refresh_from_db()
+        self.assertIsNone(self.order.notified_at)
+        self.assertIn("SMTP server is unreachable", self.order.notification_error)
+
+    @override_settings(ADMINS=[])
+    def test_no_configured_admins_is_recorded_rather_than_raised(self):
+        with self.assertLogs("main.models", level="ERROR"):
+            response = self.deliver(self.event_body(self.order))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertIsNone(self.order.notified_at)
+        self.assertIn("ADMINS", self.order.notification_error)
+
+
+class WebhookUnhandledEventTest(OrderTestBase):
+    """Requirement 6: anything this endpoint has no opinion about gets a 200
+    so Stripe stops retrying it."""
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order()
+
+    def test_an_unrelated_event_type_is_accepted_and_ignored(self):
+        for event_type in ["payment_intent.succeeded", "invoice.paid",
+                           "customer.created", "charge.refunded"]:
+            with self.subTest(event_type=event_type):
+                response = self.deliver(
+                    self.event_body(self.order, event_type=event_type))
+
+                self.assertEqual(response.status_code, 200)
+                self.order.refresh_from_db()
+                self.assertEqual(self.order.status, Order.Status.PENDING)
+                self.assertIsNone(self.order.paid_at)
+                self.assertEqual(len(mail.outbox), 0)
+
+    def test_an_event_with_no_recognisable_object_is_accepted(self):
+        body = json.dumps({
+            "id": "evt_weird", "object": "event",
+            "type": "some.new.event.type", "data": {},
+        })
+        response = self.deliver(body)
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+
+
+class CheckoutSuccessPageTest(OrderTestBase):
+    """The success page keeps clearing the cart, but never decides payment."""
+
+    def test_the_cart_is_still_cleared(self):
+        self.place_order()
+        self.assertTrue(CartProduct.objects.exists())
+
+        response = self.client.get("/checkout/success")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(CartProduct.objects.exists())
+
+    def test_loading_the_success_page_does_not_pay_the_order(self):
+        order = self.place_order()
+
+        self.client.get(f"/checkout/success?session_id={order.stripe_session_id}")
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PENDING)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_a_known_session_id_shows_the_recorded_order(self):
+        order = self.place_order()
+        self.deliver(self.event_body(order))
+
+        response = self.client.get(
+            f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertContains(response, f"Order #{order.pk}")
+        self.assertContains(response, "Learning Spark")
+        self.assertContains(response, "Paid")
+
+    def test_an_unknown_session_id_just_renders_the_plain_page(self):
+        response = self.client.get("/checkout/success?session_id=cs_nope")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Checkout Successful!")
+        self.assertNotContains(response, "Order #")
+
+
+class OrderModelTest(OrderTestBase):
+    def test_the_snapshot_subtotal_sums_the_lines(self):
+        order = Order.objects.create()
+        OrderItem.objects.create(
+            order=order, product_name="A", unit_amount=1000, quantity=2)
+        OrderItem.objects.create(
+            order=order, product_name="B", unit_amount=250, quantity=3)
+
+        self.assertEqual(order.snapshot_subtotal(), 2750)
+
+    def test_quantities_match_when_stripe_reported_no_subtotal(self):
+        order = Order.objects.create()
+        self.assertIsNone(order.amount_subtotal)
+        self.assertTrue(order.quantities_match())
+
+    def test_display_prices_are_dollars(self):
+        order = Order.objects.create(amount_total=123456)
+        self.assertEqual(order.total_display_price(), "1234.56")
+
+    def test_an_order_with_no_shipping_address_says_so(self):
+        order = Order.objects.create(customer_email="x@example.com")
+        self.assertEqual(order.shipping_address_lines(), [])
+        self.assertIn("no shipping address", order.notification_body())
+
+    def test_two_orders_cannot_share_a_stripe_session(self):
+        Order.objects.create(stripe_session_id="cs_dupe")
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Order.objects.create(stripe_session_id="cs_dupe")
+
+    def test_pending_orders_may_all_have_no_session_id_yet(self):
+        Order.objects.create()
+        Order.objects.create()
+        self.assertEqual(
+            Order.objects.filter(stripe_session_id__isnull=True).count(), 2)

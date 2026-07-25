@@ -1,16 +1,24 @@
 import logging
 
+from django.conf import settings
 from django.contrib.auth.models import User
+from django.core.mail import send_mail
 from django.db import models
 from django.templatetags.static import static
 from django.urls import reverse
+from django.utils import timezone
 
 from main.payments import Payments
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from easy_thumbnails.files import get_thumbnailer
 
 logger = logging.getLogger(__name__)
+
+# Everything on this site is priced and charged in USD; it is hardcoded at
+# every Stripe call site. Orders store it explicitly anyway so a historical
+# order still says what it was actually charged in if that ever changes.
+DEFAULT_CURRENCY = "usd"
 
 
 # Create your models here.
@@ -293,3 +301,287 @@ class CartProduct(models.Model):
 
     def total_display_price(self):
         return "{0:.2f}".format(self.total_price() / 100)
+
+
+def _display_amount(cents: Optional[int]) -> str:
+    if cents is None:
+        return "-"
+    return "{0:.2f}".format(cents / 100)
+
+
+class Order(models.Model):
+    """A purchase.
+
+    Written as PENDING at checkout time, *before* the customer leaves for
+    Stripe, because by the time a webhook could run the cart is gone: the
+    success page empties it, and an anonymous cart is session-scoped so a
+    server-to-server callback has no way to find it. The line items are
+    therefore snapshotted here (see OrderItem) rather than looked up later.
+
+    Only the Stripe webhook moves an order to PAID. The browser redirect to
+    /checkout/success proves nothing -- anyone can request that URL.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending payment'
+        PAID = 'PAID', 'Paid'
+        FULFILLED = 'FULFILLED', 'Fulfilled'
+        CANCELLED = 'CANCELLED', 'Cancelled'
+
+    # Null until Session.create() comes back with an id; unique so a webhook
+    # can never attach the same Stripe session to two orders.
+    stripe_session_id = models.CharField(
+        max_length=255, unique=True, null=True, blank=True)
+    user = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='orders')
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING,
+        db_index=True)
+
+    # As reported by Stripe on the paid session; blank while PENDING.
+    customer_email = models.EmailField(blank=True)
+    customer_name = models.CharField(max_length=250, blank=True)
+
+    shipping_name = models.CharField(max_length=250, blank=True)
+    shipping_line1 = models.CharField(max_length=250, blank=True)
+    shipping_line2 = models.CharField(max_length=250, blank=True)
+    shipping_city = models.CharField(max_length=250, blank=True)
+    shipping_state = models.CharField(max_length=250, blank=True)
+    shipping_postal_code = models.CharField(max_length=50, blank=True)
+    shipping_country = models.CharField(max_length=2, blank=True)
+
+    billing_name = models.CharField(max_length=250, blank=True)
+    billing_line1 = models.CharField(max_length=250, blank=True)
+    billing_line2 = models.CharField(max_length=250, blank=True)
+    billing_city = models.CharField(max_length=250, blank=True)
+    billing_state = models.CharField(max_length=250, blank=True)
+    billing_postal_code = models.CharField(max_length=50, blank=True)
+    billing_country = models.CharField(max_length=2, blank=True)
+
+    # All in the smallest currency unit (cents), like everything else here.
+    # amount_total starts as the cart snapshot's subtotal and is overwritten
+    # with Stripe's authoritative number once the payment lands.
+    amount_total = models.IntegerField(default=0)
+    # Stripe's pre-tax, pre-shipping line-item total. Compared against the
+    # snapshot to detect a customer-adjusted quantity, see quantities_match().
+    amount_subtotal = models.IntegerField(null=True, blank=True)
+    amount_tax = models.IntegerField(null=True, blank=True)
+    currency = models.CharField(max_length=3, default=DEFAULT_CURRENCY)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+
+    # Whether the owner actually got told about this order. A send failure
+    # must not fail the webhook (Stripe would retry for days), so it is
+    # recorded here instead of being silently swallowed.
+    notified_at = models.DateTimeField(null=True, blank=True)
+    notification_error = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'Order #{self.pk} ({self.get_status_display()})'
+
+    def __repr__(self) -> str:
+        return f'<Order: #{self.pk} {self.status}>'
+
+    @classmethod
+    def create_from_cart(cls, cart: Cart, user: Optional[User] = None) -> "Order":
+        """Snapshot a cart into a new PENDING order.
+
+        Reads the cart through the same M2M that Payments.checkout() bills
+        from, so the snapshot and the Stripe line items come from one list.
+        """
+        cart_products = list(cart.products.select_related('product'))
+        order = cls.objects.create(
+            user=user,
+            status=cls.Status.PENDING,
+            currency=DEFAULT_CURRENCY,
+            amount_total=sum(cp.total_price() for cp in cart_products),
+        )
+        OrderItem.objects.bulk_create([
+            OrderItem(
+                order=order,
+                product=cp.product,
+                product_name=cp.product.name,
+                unit_amount=cp.product.price,
+                currency=DEFAULT_CURRENCY,
+                quantity=cp.quantity,
+                price_id=cp.price_id or "",
+            ) for cp in cart_products
+        ])
+        return order
+
+    def snapshot_subtotal(self) -> int:
+        """Pre-tax, pre-shipping total of the snapshotted line items."""
+        return sum(item.total_amount() for item in self.items.all())
+
+    def quantities_match(self) -> bool:
+        """Whether Stripe billed for exactly what we snapshotted.
+
+        Checkout is created with adjustable_quantity enabled, so a customer
+        can change quantities on Stripe's page after we have written the
+        snapshot. When these disagree, the snapshot is not what was bought.
+        """
+        if self.amount_subtotal is None:
+            return True
+        return self.amount_subtotal == self.snapshot_subtotal()
+
+    def total_display_price(self) -> str:
+        return _display_amount(self.amount_total)
+
+    def shipping_address_lines(self) -> List[str]:
+        city_line = " ".join(
+            part for part in [
+                ", ".join(p for p in [self.shipping_city, self.shipping_state] if p),
+                self.shipping_postal_code,
+            ] if part)
+        return [line for line in [
+            self.shipping_name,
+            self.shipping_line1,
+            self.shipping_line2,
+            city_line,
+            self.shipping_country,
+        ] if line]
+
+    def notification_subject(self) -> str:
+        return f"[pigscanfly] New paid order #{self.pk}"
+
+    def notification_body(self) -> str:
+        lines = [
+            f"Order #{self.pk} was paid and is ready to fulfil.",
+            "",
+            f"Status:   {self.get_status_display()}",
+            f"Placed:   {self.created_at:%Y-%m-%d %H:%M %Z}",
+            f"Customer: {self.customer_name or '(no name)'} "
+            f"<{self.customer_email or 'no email reported'}>",
+            f"Stripe session: {self.stripe_session_id or '(none)'}",
+            "",
+            "Items",
+            "-----",
+        ]
+        for item in self.items.all():
+            lines.append(
+                f"  {item.quantity} x {item.product_name} "
+                f"@ {_display_amount(item.unit_amount)} "
+                f"= {_display_amount(item.total_amount())}")
+        if not self.quantities_match():
+            lines += [
+                "",
+                "*** WARNING: Stripe's line-item subtotal "
+                f"({_display_amount(self.amount_subtotal)}) does not match the "
+                f"cart snapshot above ({_display_amount(self.snapshot_subtotal())}). "
+                "Checkout allows the customer to adjust quantities, so check "
+                "the Stripe Dashboard for what was actually bought before "
+                "shipping. ***",
+            ]
+        lines += [
+            "",
+            f"Tax:   {_display_amount(self.amount_tax)}",
+            f"Total: {_display_amount(self.amount_total)} "
+            f"{self.currency.upper()}",
+            "",
+            "Ship to",
+            "-------",
+        ]
+        address = self.shipping_address_lines()
+        lines += [f"  {line}" for line in address] or [
+            "  (no shipping address collected -- digital/service order?)"]
+        lines += [
+            "",
+            "Mark the order FULFILLED in the admin once it has shipped.",
+        ]
+        return "\n".join(lines)
+
+    def notification_recipients(self) -> List[str]:
+        recipients = []
+        for entry in getattr(settings, "ADMINS", None) or []:
+            # Django 5.2 requires 2-tuples, but be forgiving about the bare
+            # string form so a mis-set env var is not a crash in a webhook.
+            recipients.append(entry if isinstance(entry, str) else entry[1])
+        return [r for r in recipients if r]
+
+    def notify_owner(self) -> bool:
+        """Email the owner so they can pick, pack and ship this order.
+
+        Never raises: the caller is a Stripe webhook, and a non-2xx there
+        makes Stripe retry for up to three days -- which would mean duplicate
+        mail on top of the original failure. A failure is recorded on the row
+        instead, so it is visible in the admin rather than silent.
+        """
+        recipients = self.notification_recipients()
+        if not recipients:
+            message = ("No ADMINS configured, so nobody was told about this "
+                       "order. Set the ORDER_NOTIFICATION_EMAIL env var.")
+            logger.error("Order #%s: %s", self.pk, message)
+            self._record_notification_failure(message)
+            return False
+        try:
+            send_mail(
+                self.notification_subject(),
+                self.notification_body(),
+                settings.DEFAULT_FROM_EMAIL,
+                recipients,
+                fail_silently=False,
+            )
+        except Exception as e:
+            logger.exception(
+                "Order #%s: failed to send the owner notification.", self.pk)
+            self._record_notification_failure(f"{type(e).__name__}: {e}")
+            return False
+        Order.objects.filter(pk=self.pk).update(
+            notified_at=timezone.now(), notification_error="")
+        self.notified_at = timezone.now()
+        self.notification_error = ""
+        return True
+
+    def _record_notification_failure(self, message: str) -> None:
+        # A targeted UPDATE, not save(): this runs after the paid transition
+        # has committed and must not write back any other stale field.
+        try:
+            Order.objects.filter(pk=self.pk).update(
+                notification_error=message[:2000])
+        except Exception:
+            logger.exception(
+                "Order #%s: could not even record the notification failure.",
+                self.pk)
+        self.notification_error = message[:2000]
+
+
+class OrderItem(models.Model):
+    """One line of an order, snapshotted at checkout time.
+
+    Nothing here may be looked up live at fulfilment time: Product.price is
+    edited in place, and a fresh Stripe Price is minted per CartProduct row,
+    so both drift away from what was actually charged.
+    """
+
+    order = models.ForeignKey(
+        Order, on_delete=models.CASCADE, related_name='items')
+    # Kept for convenience only -- deleting a product must not erase the
+    # record of having sold it, hence SET_NULL and the name/price copies.
+    product = models.ForeignKey(
+        Product, on_delete=models.SET_NULL, null=True, blank=True)
+    product_name = models.CharField(max_length=250)
+    unit_amount = models.IntegerField()
+    currency = models.CharField(max_length=3, default=DEFAULT_CURRENCY)
+    quantity = models.PositiveBigIntegerField(default=1)
+    price_id = models.CharField(max_length=250, blank=True)
+
+    def total_amount(self) -> int:
+        return self.unit_amount * self.quantity
+
+    def total_display_price(self) -> str:
+        return _display_amount(self.total_amount())
+
+    def unit_display_price(self) -> str:
+        return _display_amount(self.unit_amount)
+
+    def __str__(self) -> str:
+        return f'{self.quantity} x {self.product_name}'
+
+    def __repr__(self) -> str:
+        return f'<OrderItem: {self.quantity} x {self.product_name}>'

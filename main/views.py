@@ -1,4 +1,7 @@
+import logging
+
 from typing import *
+from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
@@ -6,15 +9,21 @@ from django.contrib.staticfiles import finders
 from django.contrib.staticfiles.storage import staticfiles_storage
 from django.db import transaction
 from django.db.models import Q
-from django.http import Http404, HttpResponseBadRequest
+from django.http import Http404, HttpResponse, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views import View
+from django.views.decorators.csrf import csrf_exempt
 
-from main.models import Cart, CartProduct, Product
+import stripe
+
+from main.models import Cart, CartProduct, Order, Product
 from main.payments import Payments
 from main.utils import generate_username, get_country_code
+
+logger = logging.getLogger(__name__)
 
 
 # Create your views here.
@@ -295,13 +304,29 @@ class RemoveFromCartView(View, BaseCartView):
 class CheckoutView(View, BaseCartView):
     def post(self, request):
         coupon = request.POST.get("coupon") or None
-        cart = self.get_cart(request)
-        redirect_url = Payments.checkout(request, cart, coupon=coupon)
-        return redirect(redirect_url)
+        return self.start_checkout(request, coupon=coupon)
 
     def get(self, request):
+        return self.start_checkout(request)
+
+    def start_checkout(self, request, coupon=None):
+        """Record the order, then hand the customer to Stripe.
+
+        The PENDING order has to exist *before* Session.create, because its id
+        is what gets passed as client_reference_id -- that is the only thread
+        back from a webhook to this cart, which will be gone by then.
+        """
         cart = self.get_cart(request)
-        redirect_url = Payments.checkout(request, cart)
+        if not cart.products.exists():
+            # Stripe rejects a session with no line items anyway; bailing here
+            # keeps empty checkouts from leaving orphan PENDING orders behind.
+            return redirect('cart')
+        user = request.user if request.user.is_authenticated else None
+        order = Order.create_from_cart(cart, user=user)
+        redirect_url, session_id = Payments.checkout(
+            request, cart, coupon=coupon, order=order)
+        order.stripe_session_id = session_id
+        order.save(update_fields=['stripe_session_id', 'updated_at'])
         return redirect(redirect_url)
 
 
@@ -309,7 +334,203 @@ class CheckoutSuccessView(View, BaseCartView):
     def get(self, request):
         cart = self.get_cart(request)
         cart.clear()
-        return render(request, 'checkout_success.html', context={'title': 'Success! - Checkout'})
+        # Deliberately *not* the source of payment truth: this is an
+        # unauthenticated GET anyone can request. The order shown here is
+        # whatever the webhook has already recorded, and its status is
+        # displayed as-is rather than asserted to be paid.
+        #
+        # TODO: success_url does not carry ?session_id={CHECKOUT_SESSION_ID}
+        # yet, so this lookup finds nothing today and the page falls back to
+        # the plain thank-you. Adding the parameter means editing the
+        # success_url in payments.py, which is mid-refactor on another branch;
+        # do it there once that lands and this starts working with no change
+        # here.
+        order = None
+        session_id = request.GET.get("session_id")
+        if session_id:
+            order = Order.objects.filter(
+                stripe_session_id=session_id).prefetch_related('items').first()
+        return render(request, 'checkout_success.html', context={
+            'title': 'Success! - Checkout',
+            'order': order,
+        })
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class StripeWebhookView(View):
+    """Stripe's server-to-server callback. The only thing that marks a
+    payment as real.
+
+    POST only, CSRF exempt (Stripe has no token to send), and authenticated
+    solely by the signature on the body. Every path out of here that is not a
+    verified payload is a 400 before any state is touched.
+
+    Everything runs synchronously: the work is one UPDATE and one email, and
+    a queue would be more moving parts than the whole feature.
+    """
+
+    # Both mean "the money arrived". async_payment_succeeded is the delayed
+    # follow-up for payment methods that settle after checkout (ACH, some
+    # bank debits), where the original completed event arrives unpaid.
+    PAID_EVENTS = frozenset({
+        "checkout.session.completed",
+        "checkout.session.async_payment_succeeded",
+    })
+    # Terminal failures. Only ever applied to a still-PENDING order, so they
+    # can never undo a payment that already landed.
+    CANCELLED_EVENTS = {
+        "checkout.session.async_payment_failed": "the payment failed",
+        "checkout.session.expired": "the checkout session expired",
+    }
+
+    def post(self, request):
+        secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
+        if not secret:
+            # Failing closed: with no secret nothing can be verified, so
+            # nothing may be processed.
+            logger.error(
+                "STRIPE_WEBHOOK_SECRET is not set; rejecting a Stripe "
+                "webhook delivery. Orders will stay PENDING until it is.")
+            return HttpResponseBadRequest("Webhook secret is not configured.")
+
+        signature = request.META.get("HTTP_STRIPE_SIGNATURE", "")
+        try:
+            event = stripe.Webhook.construct_event(
+                request.body, signature, secret)
+        except stripe.SignatureVerificationError:
+            logger.warning("Rejected a Stripe webhook: bad signature.")
+            return HttpResponseBadRequest("Invalid signature.")
+        except ValueError:
+            logger.warning("Rejected a Stripe webhook: malformed payload.")
+            return HttpResponseBadRequest("Invalid payload.")
+
+        event_type = event.get("type")
+        session = (event.get("data") or {}).get("object") or {}
+
+        if event_type in self.PAID_EVENTS:
+            self.handle_paid(session)
+        elif event_type in self.CANCELLED_EVENTS:
+            self.handle_cancelled(session, self.CANCELLED_EVENTS[event_type])
+        else:
+            # 200 with no action, so Stripe stops redelivering event types
+            # this endpoint has no opinion about.
+            logger.debug("Ignoring Stripe event type %s.", event_type)
+        return HttpResponse(status=200)
+
+    def handle_paid(self, session) -> None:
+        if session.get("payment_status") != "paid":
+            # e.g. a completed session whose ACH debit has not settled. The
+            # matching async_payment_succeeded will arrive later.
+            logger.info(
+                "Stripe session %s completed but is not paid (%s); leaving "
+                "the order pending.",
+                session.get("id"), session.get("payment_status"))
+            return
+
+        order = self.find_order(session)
+        if order is None:
+            # Nothing to attach it to and a retry would not change that, so
+            # do not make Stripe keep trying.
+            logger.warning(
+                "No local order for Stripe session %s (ref %s).",
+                session.get("id"), session.get("client_reference_id"))
+            return
+
+        fields = self.paid_fields(session)
+        with transaction.atomic():
+            # select_for_update serialises concurrent deliveries on Postgres;
+            # the guarded UPDATE below is what actually makes this idempotent,
+            # and it holds on any backend. Two simultaneous deliveries both
+            # try to move PENDING -> PAID and exactly one row is affected, so
+            # exactly one of them goes on to send the email.
+            Order.objects.select_for_update().filter(pk=order.pk).first()
+            updated = Order.objects.filter(
+                pk=order.pk, status=Order.Status.PENDING).update(**fields)
+
+        if not updated:
+            logger.info(
+                "Order #%s is already past PENDING; ignoring a duplicate "
+                "delivery of Stripe session %s.", order.pk, session.get("id"))
+            return
+
+        order.refresh_from_db()
+        order.notify_owner()
+
+    def handle_cancelled(self, session, reason: str) -> None:
+        order = self.find_order(session)
+        if order is None:
+            return
+        updated = Order.objects.filter(
+            pk=order.pk, status=Order.Status.PENDING).update(
+                status=Order.Status.CANCELLED)
+        if updated:
+            logger.info("Order #%s cancelled: %s.", order.pk, reason)
+
+    @staticmethod
+    def find_order(session) -> Optional[Order]:
+        """Map a Stripe session back to a local order.
+
+        The payload is signed, so both of these are trustworthy; the session
+        id is tried first because it is the one we persisted ourselves.
+        """
+        session_id = session.get("id")
+        if session_id:
+            order = Order.objects.filter(stripe_session_id=session_id).first()
+            if order is not None:
+                return order
+        reference = (session.get("client_reference_id")
+                     or (session.get("metadata") or {}).get("order_id"))
+        if not reference:
+            return None
+        try:
+            return Order.objects.filter(pk=int(reference)).first()
+        except (TypeError, ValueError):
+            logger.warning(
+                "Stripe session %s carried an unusable order reference %r.",
+                session_id, reference)
+            return None
+
+    @staticmethod
+    def paid_fields(session) -> Dict[str, Any]:
+        """The order columns a paid Stripe session dictates."""
+        customer = session.get("customer_details") or {}
+        billing = customer.get("address") or {}
+        # Newer Stripe API versions moved shipping under collected_information;
+        # older ones report it top level. Accept whichever this account sends.
+        collected = session.get("collected_information") or {}
+        shipping = (collected.get("shipping_details")
+                    or session.get("shipping_details") or {})
+        shipping_address = shipping.get("address") or {}
+        totals = session.get("total_details") or {}
+
+        fields: Dict[str, Any] = {
+            "status": Order.Status.PAID,
+            "paid_at": timezone.now(),
+            "stripe_session_id": session.get("id"),
+            "customer_email": customer.get("email") or "",
+            "customer_name": customer.get("name") or "",
+            "amount_total": session.get("amount_total") or 0,
+            "amount_subtotal": session.get("amount_subtotal"),
+            "amount_tax": totals.get("amount_tax"),
+            "currency": (session.get("currency") or "usd").lower()[:3],
+        }
+        fields.update({
+            "billing_name": customer.get("name") or "",
+            "billing_line1": billing.get("line1") or "",
+            "billing_line2": billing.get("line2") or "",
+            "billing_city": billing.get("city") or "",
+            "billing_state": billing.get("state") or "",
+            "billing_postal_code": billing.get("postal_code") or "",
+            "billing_country": billing.get("country") or "",
+            "shipping_name": shipping.get("name") or "",
+            "shipping_line1": shipping_address.get("line1") or "",
+            "shipping_line2": shipping_address.get("line2") or "",
+            "shipping_city": shipping_address.get("city") or "",
+            "shipping_state": shipping_address.get("state") or "",
+            "shipping_postal_code": shipping_address.get("postal_code") or "",
+            "shipping_country": shipping_address.get("country") or "",
+        })
+        return fields
 
 
 class CheckoutCancelView(View, BaseCartView):
