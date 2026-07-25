@@ -26,9 +26,15 @@ class Payments:
     stripe.api_key = API_KEY
 
     @classmethod
-    def create_product(cls, name: str, description: str, price: int, currency: str = "usd") -> str:
-        product = stripe.Product.create(
-            name=name, description=description)
+    def create_product(cls, name: str, description: str, price: int, currency: str = "usd",
+                       tax_code: Optional[str] = None) -> str:
+        tax_code = (tax_code or "").strip()
+        if tax_code:
+            product = stripe.Product.create(
+                name=name, description=description, tax_code=tax_code)
+        else:
+            product = stripe.Product.create(
+                name=name, description=description)
         return product['id']
 
     @classmethod
