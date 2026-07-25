@@ -1,11 +1,15 @@
 """Schema guards for rolling-deploy-safe product fields."""
 
+import importlib
+
+from django.apps import apps
 from django.db import models as django_models
+from django.db import migrations as django_migrations
 from django.db.backends.postgresql.schema import (
     DatabaseSchemaEditor as PostgresSchemaEditor,
 )
 from django.db.utils import ConnectionHandler
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from main.models import Product
 
@@ -159,3 +163,35 @@ class RollingDeployOldCodeProductInsertTest(PostgresDDLRecorder, SimpleTestCase)
                 self.assertIn(field_name, add_column[0])
                 self.assertNotIn(field_name, self.OLD_CODE_PRODUCT_COLUMNS)
                 self.assertNotIn("NOT NULL", add_column[0])
+
+
+class ProductFormatIdentifierMigrationTest(TestCase):
+    def copy_operation(self):
+        migration_module = importlib.import_module(
+            "main.migrations.0009_product_format_identifiers")
+        operations = [
+            operation for operation in migration_module.Migration.operations
+            if (
+                isinstance(operation, django_migrations.RunPython)
+                and operation.code.__name__ == "copy_isbn_to_print_isbn"
+            )
+        ]
+        self.assertEqual(len(operations), 1)
+        return operations[0]
+
+    def test_copy_isbn_to_print_isbn_backfills_existing_rows(self):
+        Product.objects.bulk_create([
+            Product(pk=200, name="Existing print book", isbn="9781449358624"),
+            Product(pk=201, name="Null ISBN book", isbn=None),
+            Product(pk=202, name="Blank ISBN book", isbn=""),
+        ])
+
+        self.copy_operation().code(apps, None)
+
+        values = {
+            product.pk: (product.isbn, product.print_isbn)
+            for product in Product.objects.filter(pk__in=[200, 201, 202])
+        }
+        self.assertEqual(values[200], ("9781449358624", "9781449358624"))
+        self.assertEqual(values[201], (None, None))
+        self.assertEqual(values[202], ("", ""))

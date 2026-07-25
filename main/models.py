@@ -37,7 +37,15 @@ class Product(models.Model):
     kickstarter = models.CharField(max_length=200, blank=True, null=True)
     kindle_link = models.CharField(max_length=200, blank=True, null=True)
     amazon_link = models.CharField(max_length=200, blank=True, null=True)
-    default_asin = models.CharField(max_length=20, blank=True, null=True)
+    default_asin = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        help_text=(
+            "Print/catalogue ASIN fallback for Amazon print links; not used "
+            "for Kindle."
+        ),
+    )
     print_asin = models.CharField(max_length=20, blank=True, null=True)
     ebook_asin = models.CharField(max_length=20, blank=True, null=True)
     bookshop_link = models.CharField(max_length=250, blank=True, null=True)
@@ -196,9 +204,6 @@ class Product(models.Model):
     def _print_asin(self) -> Optional[str]:
         return self.print_asin or self.default_asin
 
-    def _ebook_asin(self) -> Optional[str]:
-        return self.ebook_asin or self.default_asin
-
     def get_amazon_link(self) -> Optional[str]:
         # Explicit curated links always win. Otherwise use the format-specific
         # ASIN first, with default_asin only as the catalogue-level fallback.
@@ -214,9 +219,9 @@ class Product(models.Model):
         )
 
     def get_kindle_link(self) -> Optional[str]:
-        # Kindle is the e-book offer: ebook_asin first, default_asin fallback.
-        return self.kindle_link or self._amazon_url(
-            "amazon.com", self._ebook_asin())
+        # Kindle must never fall back to default_asin: default_asin may be a
+        # print/catalogue ASIN, which would create an e-book link to paperback.
+        return self.kindle_link or self._amazon_url("amazon.com", self.ebook_asin)
 
     def is_physical_good(self) -> bool:
         return (self.mode == Product.Modes.PAYMENT

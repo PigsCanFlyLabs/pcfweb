@@ -38,7 +38,7 @@ class ProductIdentifierTest(SimpleTestCase):
             "https://www.amazon.com/dp/EBOOKASIN",
         )
 
-    def test_default_asin_fills_missing_format_specific_asins(self):
+    def test_default_asin_fills_missing_print_asins_only(self):
         product = Product(default_asin="DEFAULTASIN")
 
         self.assertEqual(
@@ -49,10 +49,21 @@ class ProductIdentifierTest(SimpleTestCase):
             product.get_amazon_in_link(),
             "https://www.amazon.in/dp/DEFAULTASIN",
         )
+        self.assertIsNone(product.get_kindle_link())
+
+    def test_default_asin_alone_does_not_create_a_kindle_alt_link(self):
+        print_product = Product(default_asin="DEFAULTASIN")
+        ebook_product = Product(ebook_asin="EBOOKASIN")
+
+        print_links = dict(print_product.get_alt_links())
+        ebook_links = dict(ebook_product.get_alt_links())
+
+        # Anti-vacuity: a real e-book ASIN still creates the Kindle link.
         self.assertEqual(
-            product.get_kindle_link(),
-            "https://www.amazon.com/dp/DEFAULTASIN",
+            ebook_links["Buy on Kindle (e-book)"],
+            "https://www.amazon.com/dp/EBOOKASIN",
         )
+        self.assertNotIn("Buy on Kindle (e-book)", print_links)
 
     def test_alt_links_use_derived_amazon_links(self):
         product = Product(print_asin="PRINTASIN", ebook_asin="EBOOKASIN")

@@ -19,7 +19,15 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="product",
             name="default_asin",
-            field=models.CharField(blank=True, max_length=20, null=True),
+            field=models.CharField(
+                blank=True,
+                help_text=(
+                    "Print/catalogue ASIN fallback for Amazon print links; "
+                    "not used for Kindle."
+                ),
+                max_length=20,
+                null=True,
+            ),
         ),
         migrations.AddField(
             model_name="product",
