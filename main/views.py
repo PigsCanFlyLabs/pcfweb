@@ -58,6 +58,7 @@ class FamilyView(View):
                     "value-priced queer and nerdy stuff."
                 ),
                 "url": None,
+                "coming_soon": False,
             },
             {
                 "name": "Fight Health Insurance",
@@ -65,11 +66,13 @@ class FamilyView(View):
                     "Helps people appeal health insurance denials."
                 ),
                 "url": "https://www.fighthealthinsurance.com/",
+                "coming_soon": False,
             },
             {
                 "name": "Liberated Bread",
                 "description": "Coming soon.",
                 "url": None,
+                "coming_soon": True,
             },
         ]
         return render(request, "family.html", context={
