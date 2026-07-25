@@ -63,7 +63,7 @@ class RollingDeployOldCodeWriteTest(TestCase):
     INSERT.
     """
 
-    def insert_order_naming_only_pre_0008_columns(self):
+    def insert_order_naming_only_pre_0009_columns(self):
         """An INSERT exactly as the code before this branch would issue it."""
         columns = [
             "status", "customer_email", "customer_name",
@@ -88,7 +88,7 @@ class RollingDeployOldCodeWriteTest(TestCase):
                 f'({", ".join(["%s"] * len(columns))})',
                 values)
 
-    def insert_product_naming_only_pre_0008_columns(self):
+    def insert_product_naming_only_pre_0009_columns(self):
         columns = [
             "description", "preorder_only", "noorder", "backorder", "name",
             "page", "price", "image", "image_name", "tax_code", "cat", "mode",
@@ -105,7 +105,7 @@ class RollingDeployOldCodeWriteTest(TestCase):
 
     def test_an_old_pod_can_still_record_an_order_mid_deploy(self):
         # The urgent one: old pods create an Order on every single checkout.
-        self.insert_order_naming_only_pre_0008_columns()
+        self.insert_order_naming_only_pre_0009_columns()
 
         order = Order.objects.get()
         self.assertEqual(order.status, Order.Status.PENDING)
@@ -117,7 +117,7 @@ class RollingDeployOldCodeWriteTest(TestCase):
         # Products are only written by the admin and by seeding, so this is
         # far less likely to be hit than the Order case -- but a deploy that
         # overlaps a `loaddata`/`seed_products` would hit it.
-        self.insert_product_naming_only_pre_0008_columns()
+        self.insert_product_naming_only_pre_0009_columns()
 
         product = Product.objects.get(name="Old product")
         self.assertEqual(product.delivery_type,
@@ -130,7 +130,7 @@ class RollingDeployOldCodeWriteTest(TestCase):
         # The default has to be the *safe* one, not merely present: a product
         # that lands as DIGITAL would be one the shipping logic ignores, and
         # one that lands with sells_ebook set would be distributable.
-        self.insert_product_naming_only_pre_0008_columns()
+        self.insert_product_naming_only_pre_0009_columns()
 
         product = Product.objects.get(name="Old product")
         self.assertTrue(product.is_physical_good())
@@ -233,14 +233,14 @@ class PostgresDigitalColumnDefaultDDLTest(SimpleTestCase):
     backend nobody deploys.
 
     This asserts the DDL Django *would* emit for PostgreSQL: each of the five
-    NOT NULL columns migration 0008 adds carries a DEFAULT, and none of them
+    NOT NULL columns migration 0009 adds carries a DEFAULT, and none of them
     is followed by the ALTER COLUMN ... DROP DEFAULT that was the original
     bug. No server is needed -- the statements are collected rather than run,
     which works because PostgreSQL takes defaults as bound parameters rather
     than literals, so nothing here needs a live connection to interpolate.
     """
 
-    # Exactly the NOT NULL columns 0008 adds. digital_delivery_sent_at is
+    # Exactly the NOT NULL columns 0009 adds. digital_delivery_sent_at is
     # nullable and so is not at risk.
     NEW_NOT_NULL_COLUMNS = [
         ("Order", "digital_delivery_error"),
@@ -313,7 +313,7 @@ class PostgresDigitalColumnDefaultDDLTest(SimpleTestCase):
         # Guards the guard. If add_field_ddl ever silently stopped recording,
         # or PostgreSQL stopped emitting DROP DEFAULT, the two tests above
         # would pass vacuously and defend nothing. So assert the failure mode
-        # is still detectable: a field declared the way 0008 originally
+        # is still detectable: a field declared the way 0009 originally
         # declared these must still produce the DROP DEFAULT.
         field = django_models.TextField(blank=True)
         field.set_attributes_from_name("column_without_a_db_default")

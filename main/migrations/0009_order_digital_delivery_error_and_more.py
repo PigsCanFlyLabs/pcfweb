@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("main", "0007_order_reconciled_at_order_reconciliation_error_and_more"),
+        ("main", "0008_product_stock"),
     ]
 
     operations = [

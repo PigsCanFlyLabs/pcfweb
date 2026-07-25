@@ -27,7 +27,7 @@ def unset_service_delivery_type(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("main", "0008_order_digital_delivery_error_and_more"),
+        ("main", "0009_order_digital_delivery_error_and_more"),
     ]
 
     operations = [

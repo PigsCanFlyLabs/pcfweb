@@ -20,7 +20,7 @@ class ServiceProductTest(TestCase):
             tax_code=Product.TaxTypes.SERVICES,
             mode=Product.Modes.SUBSCRIPTION,
             # Now stated rather than inferred from the category. Migration
-            # 0009 backfills the existing service rows the same way.
+            # 0010 backfills the existing service rows the same way.
             delivery_type=Product.DeliveryTypes.SERVICE,
         )
 
