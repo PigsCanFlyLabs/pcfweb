@@ -8,9 +8,70 @@ from main.models import Product
 from main.tests.base import SHIPPING_NOTICE_TEXT
 
 
+def isbn13_check_digit(isbn: str) -> str:
+    """The check digit ISBN-13 requires for the first twelve digits.
+
+    Weights alternate 1, 3 from the left; the check digit is whatever brings
+    the weighted sum up to a multiple of ten.
+    """
+    total = sum(int(digit) * (3 if position % 2 else 1)
+                for position, digit in enumerate(isbn[:12]))
+    return str((10 - total % 10) % 10)
+
+
 AMAZON_IN_LABEL = "Buy on Amazon.in (print)"
 FLIPKART_LABEL = "Buy on Flipkart (print)"
 BOOKSHOP_LABEL = "Buy on Bookshop.org (support local bookstores)"
+
+
+class BookIsbnTest(TestCase):
+    """Every shipped ISBN has to be a real one.
+
+    get_gtin() hands `isbn` straight to the Google Merchant feed as the
+    product's GTIN, and Google disapproves a product submitted with an
+    incorrect one. A single mistyped digit is therefore a silent feed
+    failure: nothing here breaks, the listing just stops being accepted.
+    Checking the check digit is the cheapest possible defence, and it covers
+    every book added later rather than only the ones in the fixture today.
+    """
+
+    fixtures = ["initial_products"]
+
+    def books_with_isbns(self):
+        return [book for book
+                in Product.objects.filter(cat=Product.Categories.BOOKS)
+                if book.isbn]
+
+    def test_every_book_isbn_is_a_valid_isbn13(self):
+        books = self.books_with_isbns()
+        # Guards against the whole test passing because the queryset is empty.
+        self.assertGreaterEqual(len(books), 6)
+        for book in books:
+            with self.subTest(pk=book.pk, isbn=book.isbn):
+                isbn = str(book.isbn)
+                self.assertRegex(isbn, r"^\d{13}$")
+                self.assertEqual(isbn[-1], isbn13_check_digit(isbn))
+
+    def test_the_check_digit_rule_rejects_a_typo(self):
+        # Without this, a bug in isbn13_check_digit() that made it agree with
+        # anything would leave the test above passing and useless. Every real
+        # ISBN in the fixture, with its last digit bumped, must be rejected.
+        for book in self.books_with_isbns():
+            isbn = str(book.isbn)
+            typo = isbn[:12] + str((int(isbn[-1]) + 1) % 10)
+            with self.subTest(pk=book.pk, typo=typo):
+                self.assertNotEqual(typo, isbn)
+                self.assertNotEqual(typo[-1], isbn13_check_digit(typo))
+
+    def test_no_two_products_share_a_gtin(self):
+        # Two SKUs submitted under one GTIN are a duplicate in the feed. The
+        # Executive Edition exists precisely to carry a different number from
+        # the standard edition, so a copy-paste here is a real hazard.
+        gtins = [product.get_gtin() for product in Product.objects.all()
+                 if product.get_gtin()]
+
+        self.assertTrue(gtins)
+        self.assertEqual(len(gtins), len(set(gtins)))
 
 
 class InitialProductsFixtureTest(TestCase):

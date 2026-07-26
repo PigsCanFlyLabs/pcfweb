@@ -102,16 +102,16 @@
 # cover. Unlike the four O'Reilly titles above, this one is ours to sell and
 # ours to hand out -- which is what sells_ebook records on the e-book.
 #
-# The standard print edition's ISBN is assigned and set below. The other two
-# are still unset, and are deliberately left blank rather than placeheld with
-# zeros: get_gtin() feeds the Google Merchant feed, where three SKUs sharing
-# one id is a duplicate. Add each real ISBN here as it is assigned.
+# Both print editions' ISBNs are assigned and set below, and they are
+# different from each other -- a distinct ISBN is the entire premise of the
+# Executive Edition, and get_gtin() feeds the Google Merchant feed, where two
+# SKUs sharing one id is a duplicate. Add each real ISBN here as it is
+# assigned; never placehold one with zeros or a copy of a sibling's.
 #
-# The Executive Edition's has not been issued yet. The e-book's belongs in the
-# separate ebook_isbn field being added elsewhere, not in `isbn` -- an EPUB
-# gets its own ISBN, and get_display_text() offers "available signed on
-# request" whenever `isbn` is set, which for a PDF means offering to sign a
-# download.
+# The e-book's ISBN is still unset. It belongs in the separate ebook_isbn
+# field being added elsewhere, not in `isbn` -- an EPUB gets its own ISBN, and
+# get_display_text() offers "available signed on request" whenever `isbn` is
+# set, which for a PDF means offering to sign a download.
 - model: main.product
   pk: 104
   fields:
@@ -140,13 +140,23 @@
   pk: 105
   fields:
     name: "Distributed Computing 4 Kids (and Executives) — Executive Edition"
+    # The owner's own copy, verbatim -- embedded double quotes, apostrophes,
+    # literal $ and all. A folded block scalar so none of it needs escaping;
+    # test_dc4k pins the loaded string character for character, so reflow the
+    # source lines if you must but do not edit the words.
     description: >-
-      Identical to the standard edition in every respect except the ISBN,
-      which is different. The extra $12 helps keep a developer from turning to
-      a life of enterprise support contracts. Same gnomes, same Python, same
-      distributed systems explained without the jargon — now with a number you
-      can expense.
+      This special executive edition is the almost exact same content as
+      regular Distributed Computing 4 Kids and Executives but it costs
+      (roughly) $10.42 more with a different ISBN. You might be saying to
+      yourself, "Holden, why would I want this special executive edition?"
+      the answer is to be even more executive, and support creation of books
+      like these. You're not just reading a book for kids and executives,
+      you're reading the executive edition.
     price: 4200
+    # Its own ISBN, distinct from pk 104's -- that difference is what this SKU
+    # is. Self-published like the standard edition, so on_oreilly_safari stays
+    # unset: the Safari link tracks the publisher, never the ISBN.
+    isbn: "9781960595003"
     image_name: "distributed_computing_4_kids.jpg"
     cat: "B"
     brand: "Pigs Can Fly Labs"

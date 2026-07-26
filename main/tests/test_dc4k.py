@@ -12,10 +12,28 @@ import zipfile
 from pathlib import Path
 
 from django.test import TestCase
+from django.utils.html import escape
 
 from main import digital
 from main.models import Product
 from main.tests.base import EBOOK_PK, EBOOK_STEM, REPO_ROOT
+
+
+# The Executive Edition's copy, exactly as the owner wrote it. Spelled out
+# here rather than read back out of the fixture, so that this is an
+# independent statement of what the words are and not a tautology: a
+# well-meaning edit to the fixture copy has to fail a test, which is the
+# whole point. The voice is deliberate -- the embedded double quotes, the
+# lower-case "the answer", "almost exact same content". Do not tidy it.
+EXECUTIVE_EDITION_COPY = (
+    'This special executive edition is the almost exact same content as '
+    'regular Distributed Computing 4 Kids and Executives but it costs '
+    '(roughly) $10.42 more with a different ISBN. You might be saying to '
+    'yourself, "Holden, why would I want this special executive edition?" '
+    'the answer is to be even more executive, and support creation of books '
+    "like these. You're not just reading a book for kids and executives, "
+    "you're reading the executive edition."
+)
 
 
 class BookAssetGuardTest(TestCase):
@@ -200,26 +218,57 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         # falling back to a made-up mpn.
         self.assertEqual(standard.get_gtin(), "9781960595997")
 
-    def test_the_print_edition_offers_a_signature_and_the_others_do_not(self):
-        # get_display_text() adds the note whenever isbn is set. That is right
-        # for a printed book Holden can physically sign, and is the reason the
-        # e-book's ISBN must not be parked in `isbn` -- see the fixture
-        # comment and ebook_isbn.
-        self.assertIn("signed on request",
-                      Product.objects.get(pk=104).get_display_text())
-        for pk in (105, EBOOK_PK):
-            with self.subTest(pk=pk):
-                self.assertNotIn("signed on request",
-                                 Product.objects.get(pk=pk).get_display_text())
+    def test_the_executive_edition_carries_its_own_isbn(self):
+        executive = Product.objects.get(pk=105)
 
-    def test_the_unassigned_isbns_are_left_unset_rather_than_placeheld(self):
-        # A shared placeholder would emit Merchant-feed products with one id.
-        # 105's ISBN is not issued yet; 106's belongs in ebook_isbn.
-        for pk in (105, EBOOK_PK):
+        self.assertEqual(executive.isbn, "9781960595003")
+        self.assertEqual(executive.get_gtin(), "9781960595003")
+
+    def test_the_two_print_editions_do_not_share_an_isbn(self):
+        # The whole premise of the Executive Edition is a different number on
+        # the same book, so a copy-paste of 104's ISBN onto 105 would make the
+        # SKU pointless -- and would collide in the Merchant feed, where
+        # get_gtin() is the product identifier.
+        isbns = [Product.objects.get(pk=pk).isbn for pk in (104, 105, EBOOK_PK)]
+        assigned = [isbn for isbn in isbns if isbn]
+
+        self.assertEqual(len(assigned), 2)
+        self.assertEqual(len(set(assigned)), len(assigned))
+
+    def test_both_print_editions_offer_a_signature_and_the_ebook_does_not(self):
+        # get_display_text() adds the note whenever isbn is set. That is right
+        # for a printed book Holden can physically sign -- including the
+        # Executive Edition, which is a print run like any other -- and is the
+        # reason the e-book's ISBN must not be parked in `isbn`; see the
+        # fixture comment and ebook_isbn.
+        #
+        # The note contains an apostrophe ("Holden's"), and get_display_text()
+        # returns escaped markup, so the raw note is NOT a substring of it:
+        # asserting `NOTE in get_display_text()` fails even when the note is
+        # there. Escape it here rather than asserting on a conveniently
+        # apostrophe-free fragment, which is how a vacuous assertion gets in.
+        escaped_note = escape(Product.SIGNED_ON_REQUEST_NOTE)
+        self.assertNotEqual(escaped_note, Product.SIGNED_ON_REQUEST_NOTE)
+        for pk in (104, 105):
             with self.subTest(pk=pk):
                 product = Product.objects.get(pk=pk)
-                self.assertFalse(product.isbn)
-                self.assertIsNone(product.get_gtin())
+                self.assertIn(escaped_note, product.get_display_text())
+                # The feed is plain text, so there the note is unescaped.
+                self.assertIn(Product.SIGNED_ON_REQUEST_NOTE,
+                              product.get_feed_description())
+
+        ebook = Product.objects.get(pk=EBOOK_PK)
+        self.assertNotIn(escaped_note, ebook.get_display_text())
+        self.assertNotIn(Product.SIGNED_ON_REQUEST_NOTE,
+                         ebook.get_feed_description())
+
+    def test_the_ebooks_isbn_is_left_unset_rather_than_placeheld(self):
+        # A shared placeholder would emit Merchant-feed products with one id.
+        # 106's belongs in ebook_isbn, not here.
+        ebook = Product.objects.get(pk=EBOOK_PK)
+
+        self.assertFalse(ebook.isbn)
+        self.assertIsNone(ebook.get_gtin())
 
     def test_the_new_skus_do_not_collide_in_the_merchant_feed(self):
         response = self.client.get("/google_products.xml")
@@ -229,11 +278,12 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         ids = re.findall(r"<g:id>(\d+)</g:id>", body)
         self.assertEqual(len(ids), len(set(ids)))
         self.assertIn("104", ids)
-        # 104 now has a real ISBN, so it is identified by gtin; 105 and 106
-        # still have none and fall back to a distinct mpn each.
+        # Both print editions now have a real ISBN, so each is identified by
+        # its own gtin; only the e-book still has none and falls back to mpn.
         self.assertIn("<g:gtin>9781960595997</g:gtin>", body)
+        self.assertIn("<g:gtin>9781960595003</g:gtin>", body)
         mpns = re.findall(r"<g:mpn>(PCF\d+)</g:mpn>", body)
-        self.assertEqual(sorted(mpns), ["PCF105", "PCF106"])
+        self.assertEqual(sorted(mpns), ["PCF106"])
         # Whatever identifies each SKU, no two may share it.
         gtins = re.findall(r"<g:gtin>(\d+)</g:gtin>", body)
         self.assertEqual(len(gtins), len(set(gtins)))
@@ -254,13 +304,28 @@ class DistributedComputing4KidsCatalogTest(TestCase):
                       standard.description)
 
         executive = Product.objects.get(pk=105)
-        self.assertIn("a number you can expense", executive.description)
-        self.assertIn("enterprise support contracts", executive.description)
+        self.assertEqual(executive.description, EXECUTIVE_EDITION_COPY)
 
         ebook = Product.objects.get(pk=EBOOK_PK)
         self.assertIn("garden gnomes", ebook.description)
         self.assertIn("DRM-free ZIP", ebook.description)
         self.assertIn("EPUB", ebook.description)
+
+    def test_the_executive_copy_survives_yaml_intact(self):
+        # The copy carries two double quotes, two apostrophes, a literal $ and
+        # a pair of parentheses, all of which are ways a YAML round-trip can
+        # quietly mangle a string. Asserted on the model field rather than on
+        # rendered HTML: the page escapes both the quotes and the apostrophes,
+        # so an assertion there would be about the escaping, not the words.
+        executive = Product.objects.get(pk=105)
+
+        self.assertEqual(executive.description, EXECUTIVE_EDITION_COPY)
+        self.assertIn('"Holden, why would I want this special executive '
+                      'edition?"', executive.description)
+        self.assertIn("(roughly) $10.42 more", executive.description)
+        self.assertIn("almost exact same content", executive.description)
+        self.assertEqual(executive.description.count('"'), 2)
+        self.assertEqual(executive.description.count("'"), 2)
 
     def test_every_sku_has_its_own_product_page(self):
         for pk in (104, 105, EBOOK_PK):
@@ -320,14 +385,18 @@ class OReillySafariLinkTest(TestCase):
                 self.assertIsNone(self.safari_url(pk))
 
     def test_an_isbn_alone_does_not_produce_the_link(self):
-        # The actual regression. pk 104 has a real ISBN and must still be
-        # Safari-free; asserting on the flag as well as the link keeps this
-        # from passing for the accidental reason that 104 has no ISBN.
-        standard = Product.objects.get(pk=104)
+        # The actual regression, now covering both print editions: each has a
+        # real ISBN of its own and must still be Safari-free. Asserting on the
+        # ISBN as well as the link keeps this from passing for the accidental
+        # reason that the row has no ISBN to infer from -- which is exactly
+        # what pk 105 used to be.
+        for pk in (104, 105):
+            with self.subTest(pk=pk):
+                product = Product.objects.get(pk=pk)
 
-        self.assertTrue(standard.isbn)
-        self.assertFalse(standard.on_oreilly_safari)
-        self.assertIsNone(self.safari_url(104))
+                self.assertTrue(product.isbn)
+                self.assertFalse(product.on_oreilly_safari)
+                self.assertIsNone(self.safari_url(pk))
 
     def test_the_link_follows_the_flag_and_not_the_isbn(self):
         # Guards the guard, in both directions: an O'Reilly book stripped of
