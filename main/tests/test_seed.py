@@ -41,6 +41,7 @@ class SeedProductsCommandTest(TestCase):
         for book in books:
             self.assertEqual(book.cat, Product.Categories.BOOKS)
             self.assertTrue(book.isbn)
+            self.assertEqual(book.print_isbn, book.isbn)
             self.assertTrue(book.name)
 
     # -- idempotency -------------------------------------------------------
@@ -89,6 +90,27 @@ class SeedProductsCommandTest(TestCase):
         # Fixture-owned fields must be updated.
         self.assertEqual(product.price, 3999)
         self.assertEqual(product.name, "Learning Spark (1st edition)")
+
+    def test_preserves_admin_owned_asins_on_existing_product(self):
+        Product.objects.create(
+            pk=100,
+            name="Old name that should be clobbered",
+            description="Old desc",
+            price=1,
+            external_product_id="prod_live",
+            cat=Product.Categories.BOOKS,
+            isbn="9781449358624",
+            default_asin="DEFAULTASIN",
+            print_asin="PRINTASIN",
+            ebook_asin="EBOOKASIN",
+        )
+
+        self._run_seed()
+
+        product = Product.objects.get(pk=100)
+        self.assertEqual(product.default_asin, "DEFAULTASIN")
+        self.assertEqual(product.print_asin, "PRINTASIN")
+        self.assertEqual(product.ebook_asin, "EBOOKASIN")
 
     # -- non-fixture products untouched ------------------------------------
 
@@ -209,6 +231,30 @@ class SeedProductsCommandTest(TestCase):
                 ):
                     with self.assertRaises(CommandError):
                         self._run_seed()
+
+    def test_fixture_with_protected_product_field_fails_loudly(self):
+        from django.core.management.base import CommandError
+
+        protected_fixture = [
+            {
+                "model": "main.product",
+                "pk": 100,
+                "fields": {
+                    "name": "Learning Spark (1st edition)",
+                    "price": 3999,
+                    "print_asin": "",
+                },
+            }
+        ]
+
+        with mock.patch(
+            "main.management.commands.seed_products._load_fixture",
+            return_value=protected_fixture,
+        ):
+            with self.assertRaisesMessage(CommandError, "print_asin"):
+                self._run_seed()
+
+        self.assertFalse(Product.objects.filter(pk=100).exists())
 
 
 class SeedProductsStripeTest(TestCase):

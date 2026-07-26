@@ -18,6 +18,7 @@
       and Scala -- from simple batch jobs to streaming and MLlib.
     price: 3999
     isbn: "9781449358624"
+    print_isbn: "9781449358624"
     amazon_link: "https://www.amazon.com/dp/1449358624"
     # 2015 1st edition has no bookshop.org product page; link to its search.
     bookshop_link: "https://bookshop.org/search?keywords=9781449358624"
@@ -38,6 +39,7 @@
       handle larger data sizes, and use fewer resources.
     price: 4999
     isbn: "9781491943205"
+    print_isbn: "9781491943205"
     amazon_link: "https://www.amazon.com/dp/1491943203"
     bookshop_link: "https://bookshop.org/p/books/high-performance-spark-best-practices-for-scaling-and-optimizing-apache-spark-holden-karau/8133976"
     amazon_in_link: "https://www.amazon.in/dp/1491943203"
@@ -57,6 +59,7 @@
       Filonenko.
     price: 4999
     isbn: "9781492050124"
+    print_isbn: "9781492050124"
     amazon_link: "https://www.amazon.com/dp/1492050121"
     bookshop_link: "https://bookshop.org/books/kubeflow-for-machine-learning-from-lab-to-production/9781492050124"
     amazon_in_link: "https://www.amazon.in/dp/1492050121"
@@ -75,6 +78,7 @@
       complexity of traditional distributed systems.
     price: 6599
     isbn: "9781098118808"
+    print_isbn: "9781098118808"
     amazon_link: "https://www.amazon.com/dp/1098118804"
     bookshop_link: "https://bookshop.org/search?keywords=9781098118808"
     amazon_in_link: "https://www.amazon.in/dp/1098118804"
