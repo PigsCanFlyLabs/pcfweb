@@ -181,8 +181,11 @@ class DistributedComputing4KidsCatalogTest(TestCase):
                 self.assertTrue(product.name.startswith(self.TITLE))
                 self.assertEqual(product.price, price)
                 self.assertEqual(product.cat, Product.Categories.BOOKS)
+                # main moved the book covers into images/book_covers/ in
+                # the assets repo; this branch predates that move.
                 self.assertEqual(
-                    product.image_name, "distributed_computing_4_kids.jpg")
+                    product.image_name,
+                    "book_covers/distributed_computing_4_kids.jpg")
 
     def test_the_printed_editions_are_physical_and_not_ours_to_send(self):
         for pk in (104, 105):
@@ -272,10 +275,22 @@ class DistributedComputing4KidsCatalogTest(TestCase):
     def test_the_ebooks_isbn_is_left_unset_rather_than_placeheld(self):
         # A shared placeholder would emit Merchant-feed products with one id.
         # 106's belongs in ebook_isbn, not here.
+        #
+        # This branch asserted get_gtin() was None, which held only while
+        # ebook_isbn did not exist -- the per-format identifier branch adds it,
+        # and the comment above already said this is where 106's ISBN belongs.
+        # The invariant being defended is "no placeholder and no borrowed
+        # number", so assert the e-book is identified by its own ISBN and by
+        # nobody else's.
         ebook = Product.objects.get(pk=EBOOK_PK)
 
         self.assertFalse(ebook.isbn)
-        self.assertIsNone(ebook.get_gtin())
+        self.assertFalse(ebook.print_isbn)
+        self.assertEqual(ebook.ebook_isbn, "9781960595980")
+        self.assertEqual(ebook.get_gtin(), "9781960595980")
+        for print_pk in (104, 105):
+            self.assertNotEqual(
+                Product.objects.get(pk=print_pk).get_gtin(), ebook.get_gtin())
 
     def test_the_new_skus_do_not_collide_in_the_merchant_feed(self):
         response = self.client.get("/google_products.xml")
@@ -285,12 +300,14 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         ids = re.findall(r"<g:id>(\d+)</g:id>", body)
         self.assertEqual(len(ids), len(set(ids)))
         self.assertIn("104", ids)
-        # Both print editions now have a real ISBN, so each is identified by
-        # its own gtin; only the e-book still has none and falls back to mpn.
+        # All three SKUs now have a real identifier, so each is identified by
+        # its own gtin and none falls back to mpn. This branch expected the
+        # e-book to fall back, which held only while ebook_isbn did not exist.
         self.assertIn("<g:gtin>9781960595997</g:gtin>", body)
         self.assertIn("<g:gtin>9781960595003</g:gtin>", body)
+        self.assertIn("<g:gtin>9781960595980</g:gtin>", body)
         mpns = re.findall(r"<g:mpn>(PCF\d+)</g:mpn>", body)
-        self.assertEqual(sorted(mpns), ["PCF106"])
+        self.assertEqual(sorted(mpns), [])
         # Whatever identifies each SKU, no two may share it.
         gtins = re.findall(r"<g:gtin>(\d+)</g:gtin>", body)
         self.assertEqual(len(gtins), len(set(gtins)))

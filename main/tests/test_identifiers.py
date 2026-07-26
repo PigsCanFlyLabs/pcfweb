@@ -89,13 +89,37 @@ class ProductIdentifierTest(SimpleTestCase):
             "https://www.amazon.com/dp/EBOOKASIN",
         )
 
-    def test_safari_alt_link_is_keyed_to_print_isbn(self):
-        print_product = Product(print_isbn="9781449358624")
-        ebook_product = Product(ebook_isbn="9781449358625")
+    def test_safari_alt_link_is_keyed_to_the_publisher_not_the_isbn(self):
+        """Renamed from test_safari_alt_link_is_keyed_to_print_isbn.
 
-        print_labels = [label for label, _ in print_product.get_alt_links()]
+        This branch keyed the Safari trial link to print_isbn, having inherited
+        an older rule that keyed it to `isbn`. The DC4K branch replaced that
+        inference outright with an explicit on_oreilly_safari flag, because the
+        inference is wrong: DC4K is self-published, carries a real print ISBN,
+        and is not on O'Reilly's platform, so an ISBN-keyed rule offers a
+        Safari trial for a book that is not there. The two rules cannot both
+        hold; the flag is the correct one and OReillySafariLinkTest in
+        test_dc4k.py pins it.
+
+        The distinction this test existed to defend -- a print title offers the
+        Safari link and an e-book-only product does not -- is preserved, now
+        stated against the publisher flag.
+        """
+        oreilly_print = Product(print_isbn="9781449358624",
+                                on_oreilly_safari=True)
+        ebook_product = Product(ebook_isbn="9781449358625",
+                                on_oreilly_safari=False)
+        # An ISBN alone must no longer be enough to conjure the link.
+        self_published_print = Product(print_isbn="9781960595997",
+                                       on_oreilly_safari=False)
+
+        oreilly_labels = [label for label, _ in oreilly_print.get_alt_links()]
         ebook_labels = [label for label, _ in ebook_product.get_alt_links()]
+        self_pub_labels = [label for label, _
+                           in self_published_print.get_alt_links()]
 
         # Anti-vacuity: the Safari link still appears for the print control.
-        self.assertIn("Read on O'Reilly Safari (free trial)", print_labels)
+        self.assertIn("Read on O'Reilly Safari (free trial)", oreilly_labels)
         self.assertNotIn("Read on O'Reilly Safari (free trial)", ebook_labels)
+        self.assertNotIn(
+            "Read on O'Reilly Safari (free trial)", self_pub_labels)
