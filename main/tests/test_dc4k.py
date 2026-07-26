@@ -181,8 +181,15 @@ class DistributedComputing4KidsCatalogTest(TestCase):
                 self.assertTrue(product.name.startswith(self.TITLE))
                 self.assertEqual(product.price, price)
                 self.assertEqual(product.cat, Product.Categories.BOOKS)
+                # book_covers/ prefix, not the flat name this branch was
+                # written against: PR #23 relocated every cover into
+                # images/book_covers/ in the pcfweb-assets repo. The prefixed
+                # path is the one that actually resolves there -- checked at
+                # build time by scripts/check-product-images.sh, against the
+                # real asset checkout rather than against this code.
                 self.assertEqual(
-                    product.image_name, "distributed_computing_4_kids.jpg")
+                    product.image_name,
+                    "book_covers/distributed_computing_4_kids.jpg")
 
     def test_the_printed_editions_are_physical_and_not_ours_to_send(self):
         for pk in (104, 105):
@@ -272,10 +279,29 @@ class DistributedComputing4KidsCatalogTest(TestCase):
     def test_the_ebooks_isbn_is_left_unset_rather_than_placeheld(self):
         # A shared placeholder would emit Merchant-feed products with one id.
         # 106's belongs in ebook_isbn, not here.
+        #
+        # This test originally also asserted get_gtin() was None. That was a
+        # true statement about a world where ebook_isbn did not yet exist --
+        # the field arrives with the per-format identifier work -- not about
+        # the property the test is named for. The e-book now has its own real
+        # ISBN-13 in ebook_isbn, so it *should* carry a GTIN: an e-book with
+        # an assigned ISBN is identified by it in the Merchant feed, and
+        # get_gtin() resolving print_isbn or ebook_isbn or upc is what puts it
+        # there. The invariant that matters -- 106 is not placeheld, and does
+        # not borrow a sibling's number -- is asserted directly below instead,
+        # which is strictly stronger than the None check it replaces.
         ebook = Product.objects.get(pk=EBOOK_PK)
 
+        # Still nothing in the legacy print column, or in print_isbn: either
+        # would put "available signed on request" on a download.
         self.assertFalse(ebook.isbn)
-        self.assertIsNone(ebook.get_gtin())
+        self.assertFalse(ebook.print_isbn)
+
+        # Its own number, not a placeholder and not a sibling's.
+        self.assertEqual(ebook.ebook_isbn, "9781960595980")
+        self.assertEqual(ebook.get_gtin(), "9781960595980")
+        siblings = [Product.objects.get(pk=pk).get_gtin() for pk in (104, 105)]
+        self.assertNotIn(ebook.get_gtin(), siblings)
 
     def test_the_new_skus_do_not_collide_in_the_merchant_feed(self):
         response = self.client.get("/google_products.xml")
@@ -289,8 +315,14 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         # its own gtin; only the e-book still has none and falls back to mpn.
         self.assertIn("<g:gtin>9781960595997</g:gtin>", body)
         self.assertIn("<g:gtin>9781960595003</g:gtin>", body)
+        # All three SKUs now carry a real ISBN of their own -- the e-book's in
+        # ebook_isbn -- so none of them falls back to a synthesised mpn. The
+        # feed template emits <g:mpn> only when get_gtin() is None, so PCF106
+        # disappearing is the e-book gaining a genuine identifier, which is
+        # better for the listing than the fallback it replaces.
+        self.assertIn("<g:gtin>9781960595980</g:gtin>", body)
         mpns = re.findall(r"<g:mpn>(PCF\d+)</g:mpn>", body)
-        self.assertEqual(sorted(mpns), ["PCF106"])
+        self.assertNotIn("PCF106", mpns)
         # Whatever identifies each SKU, no two may share it.
         gtins = re.findall(r"<g:gtin>(\d+)</g:gtin>", body)
         self.assertEqual(len(gtins), len(set(gtins)))
