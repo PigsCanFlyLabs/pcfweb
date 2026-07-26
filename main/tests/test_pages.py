@@ -222,6 +222,38 @@ class ServicesPageTest(ServicesPageMixin, TestCase):
 
         self.assertNotIn("/product/", section)
 
+    def test_fight_health_insurance_is_marked_as_a_separate_company(self):
+        html = self.page()
+
+        self.assertIn("A separate company that Holden is involved in", html)
+        self.assertIn('href="https://www.fighthealthinsurance.com/"', html)
+
+    def test_services_copy_is_not_copy_pasted_from_the_family_page(self):
+        """/family says who they are, /services says what they offer.
+
+        Both pages list Liberated Bread and Fight Health Insurance, which is
+        intentional -- but shared sentences would mean one page was filled in
+        from the other.
+        """
+        services_html = self.page()
+        family_html = self.client.get("/family").content.decode()
+
+        for family_sentence in (
+                "A separate company and project that helps people appeal "
+                "health insurance denials.",
+                "The same company as Pigs Can Fly Labs, with its own site — "
+                "not a separate company. Coming soon."):
+            with self.subTest(sentence=family_sentence[:40]):
+                self.assertIn(family_sentence, family_html)
+                self.assertNotIn(family_sentence, services_html)
+
+    def test_the_page_no_longer_advertises_fmt2(self):
+        html = self.page()
+
+        for gone in ("IP Transit", "IP transit", "FMT2", "colocation"):
+            with self.subTest(text=gone):
+                self.assertNotIn(gone, html)
+
 
 @override_settings(THUMBNAIL_DEBUG=False)
 class ServicesPageBookLinksTest(ServicesPageMixin, TestCase):
@@ -262,38 +294,6 @@ class ServicesPageBookLinksTest(ServicesPageMixin, TestCase):
 
                 self.assertEqual(response.status_code, 200)
                 self.assertContains(response, stem)
-
-    def test_fight_health_insurance_is_marked_as_a_separate_company(self):
-        html = self.page()
-
-        self.assertIn("A separate company that Holden is involved in", html)
-        self.assertIn('href="https://www.fighthealthinsurance.com/"', html)
-
-    def test_services_copy_is_not_copy_pasted_from_the_family_page(self):
-        """/family says who they are, /services says what they offer.
-
-        Both pages list Liberated Bread and Fight Health Insurance, which is
-        intentional -- but shared sentences would mean one page was filled in
-        from the other.
-        """
-        services_html = self.page()
-        family_html = self.client.get("/family").content.decode()
-
-        for family_sentence in (
-                "A separate company and project that helps people appeal "
-                "health insurance denials.",
-                "The same company as Pigs Can Fly Labs, with its own site — "
-                "not a separate company. Coming soon."):
-            with self.subTest(sentence=family_sentence[:40]):
-                self.assertIn(family_sentence, family_html)
-                self.assertNotIn(family_sentence, services_html)
-
-    def test_the_page_no_longer_advertises_fmt2(self):
-        html = self.page()
-
-        for gone in ("IP Transit", "IP transit", "FMT2", "colocation"):
-            with self.subTest(text=gone):
-                self.assertNotIn(gone, html)
 
 
 @override_settings(THUMBNAIL_DEBUG=False)
