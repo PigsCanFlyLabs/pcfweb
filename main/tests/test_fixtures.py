@@ -168,6 +168,51 @@ class NotForSaleBookTest(TestCase):
         # It does still offer the place you can actually get it.
         self.assertIn("Buy on Amazon (print)", labels)
 
+    def test_its_page_shows_no_price_at_all(self):
+        """A bare "0.00" above a page with no buy button reads as broken.
+
+        price is 0 because there is no price to charge, not because the book
+        is free, so no number is the honest rendering.
+        """
+        html = self.client.get(f"/product/{self.PK}").content.decode()
+
+        self.assertNotIn('<span class="price">0.00</span>', html)
+        self.assertIn('<span class="price">Not sold here</span>', html)
+
+    def test_its_page_surfaces_the_amazon_link_where_the_price_was(self):
+        response = self.client.get(f"/product/{self.PK}")
+
+        self.assertContains(response, "Available from Amazon")
+        self.assertContains(
+            response,
+            "https://www.amazon.com/Fast-Processing-Spark-Holden-Karau/"
+            "dp/1782167064")
+
+    def test_its_page_offers_nothing_that_implies_an_order(self):
+        """Everything order-shaped goes together, or the page still reads wrong.
+
+        "Out of Stock" means temporarily unavailable and would be a different
+        lie; a quantity picker and a running "Total: $0.00" are worse.
+        """
+        html = self.client.get(f"/product/{self.PK}").content.decode()
+
+        self.assertNotIn("Out of Stock", html)
+        self.assertNotIn("No. of Orders", html)
+        self.assertNotIn('h4 class="calc-total"', html)
+        self.assertNotIn('id="quantity"', html)
+        # Not shipped by us either, so the shipping delay notice is noise.
+        self.assertNotIn("shipping-notice", html)
+
+    def test_a_sellable_book_still_shows_all_of_that(self):
+        """Control: the suppression is scoped to noorder, not global."""
+        html = self.client.get("/product/100").content.decode()
+
+        self.assertIn('<span class="price">39.99</span>', html)
+        self.assertIn("No. of Orders", html)
+        self.assertIn('h4 class="calc-total"', html)
+        self.assertIn('id="quantity"', html)
+        self.assertNotIn("Not sold here", html)
+
     def test_it_carries_no_asin_so_the_seed_command_still_runs(self):
         """ASINs are in seed_products' SEED_PROTECTED_FIELDS.
 
