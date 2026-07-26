@@ -220,3 +220,50 @@
     # <stem>.zip under settings.BOOK_ASSET_ROOT; must match the archive
     # committed to the pcfweb-book-assets repo.
     digital_asset_name: "distributed_computing_4_kids"
+# "Fast Data Processing with Spark" (Packt, 2013) -- Holden's first book and
+# the first book written about Apache Spark. Listed for the history, not for
+# sale: noorder makes is_purchasable() false, which suppresses the buy button,
+# and keeps the row out of /products, the homepage highlights and the Google
+# Merchant feed. It keeps a product page, reachable by direct link and by
+# /book/9781782167068, which is what the /services credentials link to.
+#
+# print_asin is deliberately NOT set here even though the ASIN is known
+# (1782167064). ASINs are in seed_products' SEED_PROTECTED_FIELDS, so a
+# fixture carrying one makes the seed command exit 1 -- which under `set -e`
+# in scripts/start-server.sh stops the primary pod from booting. It is also
+# redundant: get_amazon_link() prefers an explicit amazon_link, which is set
+# below, so the ASIN would never be consulted for this row. Set it in the
+# admin if it is ever wanted.
+- model: main.product
+  pk: 107
+  fields:
+    name: "Fast Data Processing with Spark"
+    description: >-
+      My first book, and the first book written about Apache Spark. It covers
+      Spark 0.x, so it is now comprehensively out of date — the API it teaches
+      has been superseded several times over. It's here for the history rather
+      than the instruction. For actually getting work done, High Performance
+      Spark and Learning Spark cover this ground far better, and Kubeflow for
+      Machine Learning and Scaling Python with Ray go deeper on the ML side.
+      Not sold here — available from Amazon.
+    # Not sold through this site, so there is no price to charge. The product
+    # page suppresses the price entirely rather than showing a bare 0.00.
+    price: 0
+    noorder: true
+    isbn: "9781782167068"
+    print_isbn: "9781782167068"
+    amazon_link: "https://www.amazon.com/Fast-Processing-Spark-Holden-Karau/dp/1782167064"
+    # No cover art yet. check-product-images.sh skips empty values, so this
+    # does not fail the build guard; add the file and the name together.
+    image_name: ""
+    cat: "B"
+    # get_brand() defaults the Books category to O'Reilly. This one is Packt,
+    # and saying otherwise on the page that exists to record who published
+    # what would be plainly wrong.
+    brand: "Packt"
+    tax_code: "txcd_35010000"
+    # Packt, not O'Reilly, so the Safari trial link is not a true statement
+    # for this title.
+    on_oreilly_safari: false
+    delivery_type: "PHYSICAL"
+    sells_ebook: false

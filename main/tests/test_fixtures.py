@@ -2,7 +2,7 @@
 
 from unittest import mock
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from main.models import Product
 from main.tests.base import SHIPPING_NOTICE_TEXT
@@ -103,6 +103,87 @@ class BookIsbnTest(TestCase):
 
         self.assertTrue(gtins)
         self.assertEqual(len(gtins), len(set(gtins)))
+
+
+@override_settings(THUMBNAIL_DEBUG=False)
+class NotForSaleBookTest(TestCase):
+    """pk 107, Fast Data Processing with Spark: listed, never buyable.
+
+    It is in the catalogue for the publishing history -- it is the first book
+    written about Apache Spark, which the /services credentials cite -- but it
+    is a 2013 Packt title we do not sell. So it must have a reachable page and
+    must appear nowhere that implies it is on sale.
+    """
+
+    fixtures = ["initial_products"]
+    PK = 107
+
+    def book(self):
+        return Product.objects.get(pk=self.PK)
+
+    def test_the_book_is_in_the_catalogue_but_not_purchasable(self):
+        book = self.book()
+
+        self.assertTrue(book.noorder)
+        self.assertFalse(book.is_purchasable())
+
+    def test_its_page_is_reachable_by_direct_link(self):
+        response = self.client.get(f"/product/{self.PK}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Fast Data Processing with Spark")
+
+    def test_it_is_absent_from_the_products_listing(self):
+        html = self.client.get("/products").content.decode()
+
+        self.assertNotIn("Fast Data Processing with Spark", html)
+        # Anti-vacuity: the listing is really rendering books.
+        self.assertIn("Learning Spark", html)
+
+    def test_it_is_absent_from_the_homepage(self):
+        html = self.client.get("/").content.decode()
+
+        self.assertNotIn("Fast Data Processing with Spark", html)
+
+    def test_it_is_absent_from_the_google_merchant_feed(self):
+        body = self.client.get("/google_products.xml").content.decode()
+
+        self.assertNotIn("Fast Data Processing with Spark", body)
+        self.assertNotIn("<g:id>107</g:id>", body)
+        # Anti-vacuity: the feed really does carry the sellable books.
+        self.assertIn("<g:id>100</g:id>", body)
+
+    def test_it_is_attributed_to_packt_not_oreilly(self):
+        """get_brand() defaults the Books category to O'Reilly.
+
+        This is a Packt title, and this is the page that exists to record who
+        published what, so inheriting the default would be plainly wrong.
+        """
+        self.assertEqual(self.book().get_brand(), "Packt")
+
+    def test_it_does_not_advertise_an_oreilly_safari_trial(self):
+        labels = [label for label, _ in self.book().get_alt_links()]
+
+        self.assertNotIn("Read on O'Reilly Safari (free trial)", labels)
+        # It does still offer the place you can actually get it.
+        self.assertIn("Buy on Amazon (print)", labels)
+
+    def test_it_carries_no_asin_so_the_seed_command_still_runs(self):
+        """ASINs are in seed_products' SEED_PROTECTED_FIELDS.
+
+        A fixture row carrying one makes `seed_products` exit 1, which under
+        `set -e` in scripts/start-server.sh stops the primary pod from
+        booting. The explicit amazon_link below is what get_amazon_link()
+        prefers anyway, so the ASIN would never have been read.
+        """
+        book = self.book()
+
+        self.assertFalse(book.print_asin)
+        self.assertFalse(book.default_asin)
+        self.assertEqual(
+            book.get_amazon_link(),
+            "https://www.amazon.com/Fast-Processing-Spark-Holden-Karau/"
+            "dp/1782167064")
 
 
 class InitialProductsFixtureTest(TestCase):
