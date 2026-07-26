@@ -399,7 +399,13 @@ present one level up:
 
 ```bash
 git clone https://github.com/pigsCanFlyLabs/pcfweb-assets.git ../pcfweb-assets
+cd ../pcfweb-assets
+git lfs install
+git lfs pull
 ```
+
+The asset repo stores images in Git LFS; without the LFS pull, the checkout
+contains pointer files instead of real images.
 
 The build also needs the book archives in `../pcfweb-book-assets` — see
 [Digital products](#digital-products).
