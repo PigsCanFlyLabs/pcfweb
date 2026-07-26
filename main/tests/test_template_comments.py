@@ -7,6 +7,7 @@ not a comment at all: every line of it is emitted verbatim into the
 rendered page. ``{% comment %}``/``{% endcomment %}`` is the multi-line
 form."""
 
+import os
 import re
 from pathlib import Path
 
@@ -16,7 +17,27 @@ from main.models import Product
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-SKIP_DIRS = {".git", ".venv", "venv", "env", "node_modules", "__pycache__"}
+
+# Django renders whatever it is handed, so an .html-only sweep is too
+# narrow: google_products.xml is a template, and a text email body would
+# be one too. Filter by suffix rather than naming the template dirs, so
+# a template added outside main/templates is still covered.
+TEMPLATE_SUFFIXES = {".html", ".htm", ".xml", ".txt", ".svg", ".json"}
+
+# ``static`` and ``media`` hold collected and vendored assets -- Django's
+# admin ships .txt licence files down there, and they are nobody's
+# template.
+SKIP_DIRS = {
+    ".git", ".venv", "venv", "env", "node_modules", "__pycache__",
+    ".mypy_cache", "static", "media",
+}
+
+# One .html and one .xml, so a sweep that quietly stopped covering
+# either fails instead of passing on the files it still reaches.
+KNOWN_TEMPLATES = (
+    "main/templates/single-product.html",
+    "main/templates/google_products.xml",
+)
 
 # Deliberately not re.DOTALL -- this mirrors how Django itself matches a
 # comment, which is exactly why an unclosed one leaks.
@@ -24,9 +45,13 @@ SINGLE_LINE_COMMENT = re.compile(r"\{#.*?#\}")
 
 
 def find_templates():
-    for path in sorted(REPO_ROOT.rglob("*.html")):
-        if SKIP_DIRS.isdisjoint(path.relative_to(REPO_ROOT).parts):
-            yield path
+    for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
+        # Pruned in place, so the walk never descends into them at all.
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        for name in sorted(filenames):
+            path = Path(dirpath) / name
+            if path.suffix in TEMPLATE_SUFFIXES:
+                yield path
 
 
 def find_multiline_comments(text):
@@ -41,9 +66,18 @@ def find_multiline_comments(text):
 
 
 class MultiLineTemplateCommentTest(SimpleTestCase):
-    def test_sweep_finds_templates(self):
-        """A sweep that matches nothing would pass for the wrong reason."""
-        self.assertGreater(len(list(find_templates())), 1)
+    def test_sweep_reaches_known_templates(self):
+        """A sweep that missed the tree would pass for the wrong reason.
+
+        Counting files is not enough: a REPO_ROOT that resolved somewhere
+        wrong could still turn up a couple of stray matches. Name real
+        templates instead, so a misresolved root fails loudly."""
+        swept = {
+            str(path.relative_to(REPO_ROOT)) for path in find_templates()
+        }
+
+        for known in KNOWN_TEMPLATES:
+            self.assertIn(known, swept, f"{known} is not being scanned")
 
     def test_no_multi_line_django_comments(self):
         offenders = []
