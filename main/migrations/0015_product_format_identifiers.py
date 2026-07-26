@@ -12,7 +12,7 @@ def copy_isbn_to_print_isbn(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("main", "0008_product_stock"),
+        ("main", "0014_liberatedbread_slug"),
     ]
 
     operations = [

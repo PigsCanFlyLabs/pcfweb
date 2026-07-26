@@ -302,7 +302,7 @@ class RollingDeployOldCodeProductInsertTest(PostgresDDLRecorder, SimpleTestCase)
 class ProductFormatIdentifierMigrationTest(TestCase):
     def copy_operation(self):
         migration_module = importlib.import_module(
-            "main.migrations.0009_product_format_identifiers")
+            "main.migrations.0015_product_format_identifiers")
         operations = [
             operation for operation in migration_module.Migration.operations
             if (
