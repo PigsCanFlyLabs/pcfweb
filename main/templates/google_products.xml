@@ -39,6 +39,13 @@
 <g:mpn>{{product.get_mpn}}</g:mpn>
 {% endif %}
 {% endif %}
+{% if product.is_physical_good %}
+{# Shipping -- and the handling times inside it -- describes putting a thing #}
+{# in a box and posting it. A DIGITAL product is emailed as a download link, #}
+{# so advertising a delivery service, a postage price and a 1-21 day transit #}
+{# window for one is a false statement to Google and to the customer reading #}
+{# the listing. Same rule as checkout, which asks for a shipping address     #}
+{# only when is_physical_good() is true.                                     #}
 <g:shipping>
   <g:country>US</g:country>
   <g:region>941*</g:region>
@@ -76,6 +83,7 @@
   <g:min_transit_time>1</g:min_transit_time>
   <g:max_transit_time>21</g:max_transit_time>
 </g:shipping>
+{% endif %}
 </item>
 {% endwith %}
 {% endfor %}

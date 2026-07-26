@@ -84,6 +84,82 @@ class ProductFeedTest(TestCase):
         self.assertTrue(link.strip().startswith("https://www.pigscanfly.ca/"))
         self.assertNotIn("None", link)
 
+    def test_a_digital_product_advertises_no_shipping(self):
+        """A download is emailed, so the feed must not offer to post it.
+
+        The feed excludes SERVICES and noorder rows, so a DIGITAL product --
+        the pay-what-you-want e-book this release ships -- is included like
+        any other book. The shipping blocks used to sit unguarded in the item
+        loop, which told Google there was an SF local delivery, US and CA
+        postage prices and a 1-21 day transit window for a file sent by email.
+        """
+        self.make_product(
+            name="An E-book",
+            delivery_type=Product.DeliveryTypes.DIGITAL,
+            sells_ebook=True,
+            digital_asset_name="an_ebook",
+        )
+
+        item = self.feed_items()[0]
+
+        self.assertEqual(item.findall(f"{G}shipping"), [])
+        # The handling times live only inside those blocks, so they go too --
+        # a handling time is how long before the thing is *posted*.
+        self.assertEqual(item.findall(f".//{G}min_handling_time"), [])
+        self.assertEqual(item.findall(f".//{G}max_handling_time"), [])
+        # Anti-vacuity: the item really is in the feed and really is the
+        # digital one, rather than the feed being empty or filtered.
+        self.assertEqual(item.find(f"{G}title").text.strip(), "An E-book")
+
+    def test_a_physical_product_still_advertises_shipping(self):
+        """The control for the test above: physical goods keep every block."""
+        self.make_product(
+            name="A Physical Book",
+            delivery_type=Product.DeliveryTypes.PHYSICAL,
+        )
+
+        item = self.feed_items()[0]
+        services = [s.find(f"{G}service").text.strip()
+                    for s in item.findall(f"{G}shipping")]
+
+        self.assertEqual(services, [
+            "SF Local Delivery",
+            "US Economy Shipping",
+            "Faster US Shipping",
+            "CA Economy Shipping",
+        ])
+        # Handling times come back with them.
+        self.assertEqual(
+            [t.text.strip() for t in item.findall(f".//{G}min_handling_time")],
+            ["3"] * 4)
+
+    def test_shipping_tracks_delivery_type_not_the_books_category(self):
+        """Both SKUs are cat=BOOKS; only the fulfilment method differs.
+
+        Guards against a fix that keyed the shipping blocks off the category
+        instead. The DC4K print and e-book editions are both books, and the
+        print one has to keep its shipping.
+        """
+        self.make_product(
+            name="Print Edition",
+            delivery_type=Product.DeliveryTypes.PHYSICAL)
+        self.make_product(
+            name="E-book Edition",
+            external_product_id="prod_feed_ebook",
+            delivery_type=Product.DeliveryTypes.DIGITAL,
+            sells_ebook=True,
+            digital_asset_name="an_ebook")
+
+        by_title = {
+            item.find(f"{G}title").text.strip(): item
+            for item in self.feed_items()
+        }
+
+        self.assertEqual(len(by_title), 2)
+        self.assertEqual(
+            len(by_title["Print Edition"].findall(f"{G}shipping")), 4)
+        self.assertEqual(by_title["E-book Edition"].findall(f"{G}shipping"), [])
+
 
 @override_settings(THUMBNAIL_DEBUG=False)
 class ProductCopyEscapingTest(TestCase):
