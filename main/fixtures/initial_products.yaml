@@ -124,7 +124,7 @@
       of how computers collaborate that makes a Spark, Databricks, or Fabric
       conversation click, minus the jargon. Written and illustrated by Holden
       Karau.
-    price: 3000
+    price: 2000
     # Standard print edition. Self-published, so this ISBN is ours; it is not
     # an O'Reilly title and on_oreilly_safari stays unset accordingly.
     isbn: "9781960595997"
@@ -157,7 +157,7 @@
       like these. You're not just reading a book for kids and executives,
       you're reading the executive edition. The extra also helps keep a
       developer from turning to a life of enterprise support contracts.
-    price: 4200
+    price: 3042
     # Its own ISBN, distinct from pk 104's -- that difference is what this SKU
     # is. Self-published like the standard edition, so on_oreilly_safari stays
     # unset: the Safari link tracks the publisher, never the ISBN.

@@ -27,8 +27,10 @@ from main.tests.base import EBOOK_PK, EBOOK_STEM, REPO_ROOT
 # lower-case "the answer", "almost exact same content". Do not tidy it.
 #
 # The closing sentence names no dollar amount deliberately. The copy already
-# quotes "(roughly) $10.42 more" and the fixture price is 4200; a second
-# figure in the closer would put two numbers on one product page.
+# quotes "(roughly) $10.42 more" and the fixture prices make that difference
+# exact; a second figure in the closer would put two numbers on one product
+# page. The claim itself is pinned by
+# test_the_executive_premium_is_exactly_what_the_copy_claims.
 EXECUTIVE_EDITION_COPY = (
     'This special executive edition is the almost exact same content as '
     'regular Distributed Computing 4 Kids and Executives but it costs '
@@ -173,7 +175,7 @@ class DistributedComputing4KidsCatalogTest(TestCase):
     TITLE = "Distributed Computing 4 Kids (and Executives)"
 
     def test_all_three_skus_are_present(self):
-        for pk, price in ((104, 3000), (105, 4200), (106, 1500)):
+        for pk, price in ((104, 2000), (105, 3042), (106, 1500)):
             with self.subTest(pk=pk):
                 product = Product.objects.get(pk=pk)
                 self.assertTrue(product.name.startswith(self.TITLE))
@@ -342,6 +344,28 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         escaped = escape(EXECUTIVE_EDITION_COPY)
         self.assertNotEqual(escaped, EXECUTIVE_EDITION_COPY)
         self.assertIn(escaped, executive.get_display_text())
+
+    def test_the_executive_premium_is_exactly_what_the_copy_claims(self):
+        # The copy makes a factual claim about the two prices -- "(roughly)
+        # $10.42 more" -- and nothing else in the suite stops one side of that
+        # from moving without the other. test_all_three_skus_are_present pins
+        # the literals, but literals are exactly what a repricing edits, and it
+        # would go green again the moment both numbers were updated to a pair
+        # the sentence no longer describes. So state the relationship instead:
+        # the premium is the difference between the two rows, and the string
+        # the copy has to carry is derived from that same number rather than
+        # written out a second time. Reprice either edition alone and this
+        # fails; reprice both and it still fails unless the sentence was
+        # updated to match.
+        standard = Product.objects.get(pk=104)
+        executive = Product.objects.get(pk=105)
+
+        premium = executive.price - standard.price
+
+        self.assertEqual(premium, 1042)
+        self.assertIn("$10.42", executive.description)
+        self.assertIn(f"${premium // 100}.{premium % 100:02d} more",
+                      executive.description)
 
     def test_every_sku_has_its_own_product_page(self):
         for pk in (104, 105, EBOOK_PK):
