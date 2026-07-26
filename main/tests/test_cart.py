@@ -475,3 +475,92 @@ class CartBadInputTest(CartTestBase):
         self.assertEqual(
             self.client.post("/add-to-cart/100/1").status_code, 302)
         self.assertEqual(self.client.get("/cart").status_code, 200)
+
+
+class CartNotSoldHereTest(CartTestBase):
+    """A cart line for a product we do not sell must not quote a price.
+
+    Public add-to-cart refuses a noorder product and checkout re-checks, so
+    one is only ever here because it was added before the flag was set -- or
+    because an admin flagged a product that was already in someone's cart.
+    Either way it cannot be bought, so pricing it in the table or in the total
+    quotes a number the customer is never charged.
+    """
+
+    def cart_with(self, product, quantity=1):
+        client = Client()
+        client.post("/add-to-cart/100/1")
+        cart = Cart.objects.get()
+        CartProduct.objects.create(
+            cart=cart, product=product, quantity=quantity)
+        cart.products.add(CartProduct.objects.get(product=product))
+        return client
+
+    def test_the_line_shows_no_price_for_a_noorder_product(self):
+        book = Product.objects.get(pk=107)
+        client = self.cart_with(book)
+
+        html = client.get("/cart").content.decode()
+
+        self.assertIn("Fast Data Processing with Spark", html)
+        self.assertIn("Not sold here", html)
+        # Anti-vacuity: the sellable line beside it still shows its price.
+        self.assertIn("Learning Spark", html)
+        self.assertIn("39.99", html)
+
+    def test_a_noorder_line_is_left_out_of_the_cart_total(self):
+        """The case that actually costs money: a priced product flagged later.
+
+        pk 107 is priced 0, so it could not demonstrate this on its own. An
+        admin toggling noorder on a product already in a cart is the real
+        path, and there the old code left its price in the sum.
+        """
+        book = Product.objects.get(pk=101)   # 49.99, sellable
+        Product.objects.filter(pk=101).update(noorder=True)
+        book.refresh_from_db()
+        client = self.cart_with(book, quantity=2)
+
+        html = client.get("/cart").content.decode()
+
+        # Only Learning Spark's 39.99 counts; 2 x 49.99 does not.
+        self.assertIn("<span>39.99</span>", html)
+        self.assertNotIn("<span>139.97</span>", html)
+        self.assertNotIn("99.98", html)
+
+    def test_the_cart_says_why_the_line_cannot_be_bought(self):
+        client = self.cart_with(Product.objects.get(pk=107))
+
+        html = client.get("/cart").content.decode()
+
+        self.assertIn("unavailable-notice", html)
+        self.assertIn("checkout will not accept it", html)
+
+    def test_a_cart_without_one_shows_no_notice(self):
+        """Control: the notice is scoped, not always on."""
+        client = Client()
+        client.post("/add-to-cart/100/1")
+
+        html = client.get("/cart").content.decode()
+
+        self.assertNotIn("unavailable-notice", html)
+        self.assertNotIn("Not sold here", html)
+        self.assertIn("39.99", html)
+
+    def test_a_noorder_line_does_not_trigger_the_shipping_notice(self):
+        """It is not being shipped, so a delivery warning is noise."""
+        book = Product.objects.get(pk=107)
+        CartProduct.objects.all().delete()
+        client = Client()
+        client.get("/cart")
+        cart = Cart.objects.create()
+        session = client.session
+        session["cart_id"] = cart.cart_id
+        session.save()
+        cart_product = CartProduct.objects.create(
+            cart=cart, product=book, quantity=1)
+        cart.products.add(cart_product)
+
+        html = client.get("/cart").content.decode()
+
+        self.assertIn("Not sold here", html)
+        self.assertNotIn("shipping-notice", html)

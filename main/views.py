@@ -635,19 +635,30 @@ class CartView(View, BaseCartView):
     def get(self, request):
         cart = self.get_cart(request)
         cart_products = cart.products.select_related("product")
-        total_price = sum(map(lambda x: x.total_price(), cart_products))
+        # A noorder line contributes nothing to the total. Public add-to-cart
+        # refuses these and checkout re-checks, so one is only here because it
+        # was added before the flag was set -- but it still cannot be bought,
+        # and billing for it in the displayed total would be a number the
+        # customer is never charged. pk 107 happens to be priced 0, so this
+        # matters for the general case: an admin flagging an existing priced
+        # product noorder would otherwise leave its price silently in the sum.
+        total_price = sum(cp.total_price() for cp in cart_products
+                          if not cp.product.noorder)
         total_display_price = "{0:.2f}".format(total_price / 100)
-        has_physical = any(cp.product.is_physical_good() for cp in cart_products)
+        has_physical = any(cp.product.is_physical_good() for cp in cart_products
+                           if not cp.product.noorder)
         # The displayed total is the sum of list prices, which for a
         # pay-what-you-want line is only a suggestion. Say so rather than
         # showing a number the buyer is not going to be charged.
         has_pwyw = any(cp.product.is_pwyw for cp in cart_products)
+        has_unavailable = any(cp.product.noorder for cp in cart_products)
         return render(request, 'cart.html', context={
             'title': 'Cart',
             'products': cart_products,
             'total_price': total_display_price,
             'has_physical': has_physical,
             'has_pwyw': has_pwyw,
+            'has_unavailable': has_unavailable,
         })
 
 
