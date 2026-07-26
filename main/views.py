@@ -40,8 +40,37 @@ logger = logging.getLogger(__name__)
 # check and the cookie-consent middleware's database query.
 
 
+# Liberated Bread's site, linked from both the family page and the homepage
+# card. One constant so the two cannot drift apart -- they are the same
+# destination and a visitor who sees both should land in the same place.
+# Note this currently serves a domain-parking page; the owner knows.
+LIBERATED_BREAD_URL = "https://www.liberatedbread.com/"
+
+# The homepage features this book by title rather than by primary key.
+# Fixture pks are seeded data: stable today, but a reseed or an admin edit can
+# move them, and a hardcoded pk fails *silently* -- it keeps resolving, just to
+# whatever row happens to hold that number later. Matching on the title the
+# fixture gives all three SKUs means the worst case is a card that falls back
+# to the books listing, which is visible rather than wrong.
+FEATURED_BOOK_TITLE = "Distributed Computing 4 Kids (and Executives)"
+
+
 # Create your views here.
 class HomeView(View):
+    def featured_book(self):
+        """The standard print edition of the featured book, or None.
+
+        Ordered by pk so the three SKUs resolve to the standard print edition
+        rather than the Executive or e-book one; None when the catalogue has
+        not been seeded, which the template handles.
+        """
+        return (Product.objects
+                .filter(name__startswith=FEATURED_BOOK_TITLE,
+                        cat=Product.Categories.BOOKS)
+                .exclude(noorder=True)
+                .order_by('pk')
+                .first())
+
     def get(self, request):
         highlights = map(
             lambda cat: ((cat, cat.label), list(Product.objects.filter(cat = cat).exclude(noorder=True).order_by('-price')[:3])),
@@ -53,6 +82,8 @@ class HomeView(View):
             context={
                 'title': 'Pigs Can Fly Labs',
                 'highlights': highlights,
+                'featured_book': self.featured_book(),
+                'liberated_bread_url': LIBERATED_BREAD_URL,
             })
 
 
@@ -96,7 +127,7 @@ class FamilyView(View):
                     "The same company as Pigs Can Fly Labs, with its own "
                     "site — not a separate company. Coming soon."
                 ),
-                "url": "https://www.liberatedbread.com/",
+                "url": LIBERATED_BREAD_URL,
                 "coming_soon": True,
             },
         ]

@@ -21,6 +21,122 @@ class StaticPagesTest(TestCase):
 
 
 @override_settings(THUMBNAIL_DEBUG=False)
+class HomePageCardsTest(TestCase):
+    """The #explore card grid, after the FMT2 services were retired.
+
+    The cards are the homepage's only editorial surface, so what they
+    advertise is what the company is saying it sells.
+    """
+
+    fixtures = ["initial_products"]
+
+    DC4K_TITLE = "Distributed Computing 4 Kids (and Executives)"
+
+    def homepage(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def explore_section(self):
+        html = self.homepage()
+        section = re.search(
+            r'<section class="" id="explore">(.*?)</section>', html, re.DOTALL)
+        self.assertIsNotNone(section, "explore section missing from homepage")
+        assert section is not None  # for mypy
+        return section.group(1)
+
+    def test_the_homepage_no_longer_advertises_fmt2_network_services(self):
+        # The offering is discontinued. History belongs on /about, not on a
+        # card that reads as something you can still buy.
+        html = self.homepage()
+
+        for gone in ("IP Transit", "IP transit", "FMT2", "servers.jpg"):
+            with self.subTest(text=gone):
+                self.assertNotIn(gone, html)
+
+    def test_the_testimonial_is_kept_but_no_longer_attributed_to_transit(self):
+        html = self.homepage()
+
+        # The quote itself survives, misspelling and all -- it is the owner's
+        # voice, not a typo to correct.
+        self.assertIn("nothing has exploded in a firey death", html)
+        self.assertIn("One of our first customers.", html)
+        self.assertNotIn("Our first IP transit customer", html)
+
+    def test_liberated_bread_card_is_present_and_marked_coming_soon(self):
+        section = self.explore_section()
+
+        self.assertIn("Liberated Bread", section)
+        self.assertIn(">Coming Soon</span>", section)
+
+    def test_liberated_bread_links_to_the_same_place_as_the_family_page(self):
+        """One destination, however the visitor arrives at it.
+
+        Two hardcoded copies of this URL is how the homepage and /family end
+        up pointing at different hosts after one of them is updated.
+        """
+        home_links = re.findall(
+            r'<a href="(https://[^"]*liberatedbread[^"]*)"',
+            self.explore_section())
+        family_links = re.findall(
+            r'<a href="(https://[^"]*liberatedbread[^"]*)"',
+            self.client.get("/family").content.decode())
+
+        self.assertEqual(len(home_links), 1)
+        self.assertEqual(len(family_links), 1)
+        self.assertEqual(home_links, family_links)
+
+    def test_the_featured_book_card_links_to_the_seeded_product(self):
+        section = self.explore_section()
+        book = (Product.objects
+                .filter(name__startswith=self.DC4K_TITLE)
+                .order_by("pk").first())
+
+        assert book is not None  # for mypy
+        # Resolved from the object the view looked up, so this follows the
+        # fixture rather than restating it.
+        self.assertIn(f'href="/product/{book.pk}"', section)
+
+    def test_the_featured_book_card_hardcodes_no_primary_key(self):
+        """A pk in the template keeps resolving after the row moves.
+
+        That is the failure mode worth guarding: it does not 404, it silently
+        links to whatever product later holds that number. So assert the
+        template source contains no literal pk, rather than asserting the
+        rendered link -- which the test above already covers.
+        """
+        with open("main/templates/index.html") as handle:
+            template = handle.read()
+
+        self.assertNotIn("'product' 104", template)
+        self.assertNotIn("'product' 105", template)
+        self.assertNotIn("'product' 106", template)
+        self.assertRegex(template, r"\{% url 'product' featured_book\.pk %\}")
+
+
+@override_settings(THUMBNAIL_DEBUG=False)
+class HomePageWithoutSeedDataTest(TestCase):
+    """The homepage must still render against an unseeded catalogue.
+
+    No fixtures here on purpose: a fresh database is what a new contributor
+    and a first deploy both see, and the featured-book lookup returns None
+    there. A card that assumed the row existed would 500 the front page.
+    """
+
+    def test_the_homepage_renders_with_no_products_at_all(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Product.objects.count(), 0)
+
+    def test_the_featured_book_card_falls_back_to_the_books_listing(self):
+        html = self.client.get("/").content.decode()
+
+        self.assertIn("Distributed Computing 4 Kids", html)
+        self.assertIn('href="/products/B"', html)
+
+
+@override_settings(THUMBNAIL_DEBUG=False)
 class PageSmokeTest(TestCase):
     """These pages had no coverage at all; at minimum they must render."""
 
