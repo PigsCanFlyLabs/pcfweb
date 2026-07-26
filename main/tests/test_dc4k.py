@@ -25,6 +25,10 @@ from main.tests.base import EBOOK_PK, EBOOK_STEM, REPO_ROOT
 # well-meaning edit to the fixture copy has to fail a test, which is the
 # whole point. The voice is deliberate -- the embedded double quotes, the
 # lower-case "the answer", "almost exact same content". Do not tidy it.
+#
+# The closing sentence names no dollar amount deliberately. The copy already
+# quotes "(roughly) $10.42 more" and the fixture price is 4200; a second
+# figure in the closer would put two numbers on one product page.
 EXECUTIVE_EDITION_COPY = (
     'This special executive edition is the almost exact same content as '
     'regular Distributed Computing 4 Kids and Executives but it costs '
@@ -32,7 +36,8 @@ EXECUTIVE_EDITION_COPY = (
     'yourself, "Holden, why would I want this special executive edition?" '
     'the answer is to be even more executive, and support creation of books '
     "like these. You're not just reading a book for kids and executives, "
-    "you're reading the executive edition."
+    "you're reading the executive edition. The extra also helps keep a "
+    "developer from turning to a life of enterprise support contracts."
 )
 
 
@@ -324,8 +329,19 @@ class DistributedComputing4KidsCatalogTest(TestCase):
                       'edition?"', executive.description)
         self.assertIn("(roughly) $10.42 more", executive.description)
         self.assertIn("almost exact same content", executive.description)
+        self.assertIn("The extra also helps keep a developer from turning to "
+                      "a life of enterprise support contracts.",
+                      executive.description)
         self.assertEqual(executive.description.count('"'), 2)
         self.assertEqual(executive.description.count("'"), 2)
+
+        # And the whole thing reaches the page. get_display_text() escapes the
+        # copy, so the raw words are NOT a substring of it -- escape the
+        # expected side, as test_both_print_editions_offer_a_signature... does
+        # with the note, or the assertion passes while proving nothing.
+        escaped = escape(EXECUTIVE_EDITION_COPY)
+        self.assertNotEqual(escaped, EXECUTIVE_EDITION_COPY)
+        self.assertIn(escaped, executive.get_display_text())
 
     def test_every_sku_has_its_own_product_page(self):
         for pk in (104, 105, EBOOK_PK):

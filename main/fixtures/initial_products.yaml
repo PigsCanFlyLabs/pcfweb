@@ -144,6 +144,10 @@
     # literal $ and all. A folded block scalar so none of it needs escaping;
     # test_dc4k pins the loaded string character for character, so reflow the
     # source lines if you must but do not edit the words.
+    #
+    # The closing sentence carries no dollar figure on purpose: the copy
+    # already says "(roughly) $10.42 more" and `price` below is 4200, so a
+    # second figure in the closer would contradict both on the product page.
     description: >-
       This special executive edition is the almost exact same content as
       regular Distributed Computing 4 Kids and Executives but it costs
@@ -151,7 +155,8 @@
       yourself, "Holden, why would I want this special executive edition?"
       the answer is to be even more executive, and support creation of books
       like these. You're not just reading a book for kids and executives,
-      you're reading the executive edition.
+      you're reading the executive edition. The extra also helps keep a
+      developer from turning to a life of enterprise support contracts.
     price: 4200
     # Its own ISBN, distinct from pk 104's -- that difference is what this SKU
     # is. Self-published like the standard edition, so on_oreilly_safari stays
