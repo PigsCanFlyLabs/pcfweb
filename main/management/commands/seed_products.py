@@ -5,7 +5,7 @@ Replaces ``manage.py loaddata initial_products`` so that every deploy still
 updates fixture-owned fields (name, description, price, links, tax_code, ...)
 but never overwrites fields that are owned outside the fixture -- generated
 runtime fields like ``external_product_id`` and admin-edited fields like
-``stock``.
+``stock`` and ASINs.
 
 The fixture file ``main/fixtures/initial_products.yaml`` is still the single
 source of truth for fixture-owned fields; edit it to change product metadata.
@@ -27,7 +27,10 @@ from main.models import Product
 # the Django admin after initial fixture creation.
 # ---------------------------------------------------------------------------
 SEED_PROTECTED_FIELDS: Set[str] = {
+    "default_asin",
+    "ebook_asin",
     "external_product_id",
+    "print_asin",
     "stock",
 }
 
@@ -44,7 +47,8 @@ def _load_fixture(path: str) -> list[dict[str, Any]]:
 class Command(BaseCommand):
     help = (
         "Upsert fixture-owned products from main/fixtures/initial_products.yaml, "
-        "preserving runtime/admin-owned fields like external_product_id and stock."
+        "preserving runtime/admin-owned fields like external_product_id, "
+        "stock, and ASINs."
     )
 
     def handle(self, **options: Any) -> None:
@@ -76,12 +80,17 @@ class Command(BaseCommand):
             for entry in entries:
                 pk: int = entry["pk"]
                 raw_fields: dict = entry["fields"]
+                protected_fields = sorted(
+                    set(raw_fields) & SEED_PROTECTED_FIELDS)
+                if protected_fields:
+                    raise CommandError(
+                        f"Product fixture pk={pk} contains protected "
+                        f"field(s): {', '.join(protected_fields)}. "
+                        "Remove them from the fixture; those fields are "
+                        "managed outside seed_products."
+                    )
 
-                # Strip any non-fixture-owned fields that might sneak in.
-                fixture_fields = {
-                    k: v for k, v in raw_fields.items()
-                    if k not in SEED_PROTECTED_FIELDS
-                }
+                fixture_fields = raw_fields
 
                 if Product.objects.filter(pk=pk).exists():
                     # Existing row — update ONLY fixture-owned fields via a

@@ -29,12 +29,27 @@ class Product(models.Model):
     description = models.TextField(default="No description.")
     external_product_id = models.CharField(max_length=250, blank=True, null=True)
     product_id = models.AutoField(primary_key=True)
+    # Deprecated rolling-deploy compatibility column. Follow-up PR removes it
+    # after print_isbn has been fully deployed and old pods no longer read it.
     isbn = models.CharField(max_length=20, blank=True, null=True)
+    print_isbn = models.CharField(max_length=20, blank=True, null=True)
+    ebook_isbn = models.CharField(max_length=20, blank=True, null=True)
     upc = models.CharField(max_length=20, blank=True, null=True)
     mpn = models.CharField(max_length=100, blank=True, null=True)
     kickstarter = models.CharField(max_length=200, blank=True, null=True)
     kindle_link = models.CharField(max_length=200, blank=True, null=True)
     amazon_link = models.CharField(max_length=200, blank=True, null=True)
+    default_asin = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        help_text=(
+            "Print/catalogue ASIN fallback for Amazon print links; not used "
+            "for Kindle."
+        ),
+    )
+    print_asin = models.CharField(max_length=20, blank=True, null=True)
+    ebook_asin = models.CharField(max_length=20, blank=True, null=True)
     bookshop_link = models.CharField(max_length=250, blank=True, null=True)
     # Shown to visitors detected as being in India.
     amazon_in_link = models.CharField(max_length=250, blank=True, null=True)
@@ -232,19 +247,52 @@ class Product(models.Model):
         candidates = []
         if country == "IN":
             candidates += [
-                ("Buy on Amazon.in (print)", self.amazon_in_link),
+                ("Buy on Amazon.in (print)", self.get_amazon_in_link()),
                 ("Buy on Flipkart (print)", self.flipkart_link),
             ]
         candidates += [
-            ("Buy on Amazon (print)", self.amazon_link),
+            ("Buy on Amazon (print)", self.get_amazon_link()),
             ("Buy on Bookshop.org (support local bookstores)",
              self.bookshop_link),
             ("Read on O'Reilly Safari (free trial)",
+             # Explicit flag, not an ISBN inference. The DC4K SKUs are
+             # self-published and carry real print ISBNs, so keying this off
+             # print_isbn would advertise an O'Reilly free trial for a book
+             # that is not on the platform. The flag also fails safe: a new
+             # title added without it loses a link rather than inventing one.
              self.OREILLY_SAFARI_URL if self.on_oreilly_safari else None),
-            ("Buy on Kindle (e-book)", self.kindle_link),
+            ("Buy on Kindle (e-book)", self.get_kindle_link()),
             ("Follow along on Kickstarter", self.kickstarter),
         ]
         return [(label, url) for label, url in candidates if url]
+
+    @staticmethod
+    def _amazon_url(domain: str, asin: Optional[str]) -> Optional[str]:
+        if not asin:
+            return None
+        return f"https://www.{domain}/dp/{asin}"
+
+    def _print_asin(self) -> Optional[str]:
+        return self.print_asin or self.default_asin
+
+    def get_amazon_link(self) -> Optional[str]:
+        # Explicit curated links always win. Otherwise use the format-specific
+        # ASIN first, with default_asin only as the catalogue-level fallback.
+        return self.amazon_link or self._amazon_url(
+            "amazon.com", self._print_asin())
+
+    def get_amazon_in_link(self) -> Optional[str]:
+        # amazon.in is a print-store variant, so it uses the same print ASIN
+        # resolution as amazon.com before changing only the domain.
+        return (
+            self.amazon_in_link
+            or self._amazon_url("amazon.in", self._print_asin())
+        )
+
+    def get_kindle_link(self) -> Optional[str]:
+        # Kindle must never fall back to default_asin: default_asin may be a
+        # print/catalogue ASIN, which would create an e-book link to paperback.
+        return self.kindle_link or self._amazon_url("amazon.com", self.ebook_asin)
 
     def is_physical_good(self) -> bool:
         """Whether this needs a box, a stamp and an address.
@@ -300,7 +348,7 @@ class Product(models.Model):
         adds; the description itself is escaped, so a stray angle bracket in
         admin-entered copy renders as text instead of as live HTML.
         """
-        if self.isbn:
+        if self.print_isbn:
             return format_html(
                 "{}<p>{}</p>", self.description, self.SIGNED_ON_REQUEST_NOTE)
         return format_html("{}", self.description)
@@ -311,7 +359,7 @@ class Product(models.Model):
         The feed is XML, so markup from get_display_text() would arrive at
         Google as escaped angle brackets and show up literally in the listing.
         """
-        if self.isbn:
+        if self.print_isbn:
             return f"{self.description}\n\n{self.SIGNED_ON_REQUEST_NOTE}"
         return self.description
 
@@ -325,7 +373,10 @@ class Product(models.Model):
         return "{0:.2f}".format(self.price / 100)
 
     def get_gtin(self):
-        return self.isbn or self.upc
+        # Each Product row is one offer; prefer the print ISBN because the
+        # current book rows are print offers, then use an e-book ISBN for
+        # digital rows, and only fall back to UPC for non-book products.
+        return self.print_isbn or self.ebook_isbn or self.upc
 
     def get_availability(self):
         if self.preorder_only:

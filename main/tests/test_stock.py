@@ -5,6 +5,7 @@ from unittest import mock
 
 from django.contrib import admin
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import connection
 from django.test import RequestFactory, TestCase
 
@@ -269,7 +270,7 @@ class ProductStockTest(TestCase):
         self.assertEqual(
             response["Location"], "https://checkout.example/session")
 
-    def test_seed_preserves_admin_managed_stock(self):
+    def test_seed_rejects_fixture_owned_stock(self):
         product = Product.objects.create(
             pk=100,
             name="Old stock-managed book",
@@ -295,11 +296,12 @@ class ProductStockTest(TestCase):
             "main.management.commands.seed_products._load_fixture",
             return_value=fixture,
         ):
-            call_command("seed_products", stdout=StringIO())
+            with self.assertRaisesMessage(CommandError, "stock"):
+                call_command("seed_products", stdout=StringIO())
 
         product.refresh_from_db()
         self.assertEqual(product.stock, 7)
-        self.assertEqual(product.price, 3999)
+        self.assertEqual(product.price, 1)
 
     def test_product_admin_form_includes_editable_stock(self):
         product_admin = admin.site._registry[Product]

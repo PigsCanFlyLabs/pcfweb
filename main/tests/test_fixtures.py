@@ -84,6 +84,7 @@ class InitialProductsFixtureTest(TestCase):
             self.assertEqual(book.cat, Product.Categories.BOOKS)
             self.assertEqual(book.tax_code, Product.TaxTypes.BOOKS)
             self.assertTrue(book.isbn)
+            self.assertEqual(book.print_isbn, book.isbn)
 
     def test_fixture_products_have_no_stripe_id_until_first_use(self):
         book = Product.objects.get(pk=100)

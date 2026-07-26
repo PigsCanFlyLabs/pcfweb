@@ -6,8 +6,8 @@ for the length of every rollout the new schema is written by code that has
 never heard of the new columns. A NOT NULL column with no database default
 makes an old pod's INSERT fail, which 500s checkout for real customers.
 
-Three classes, because two independent features each added columns needing
-the same guard and the checks are not interchangeable:
+Five classes, because three independent features each added columns needing
+this guard and the checks are not interchangeable:
 
 ``RollingDeployOldCodeWriteTest``      issues a genuine old-code INSERT.
 ``PostgresColumnDefaultDDLTest``       the stock column (from the product
@@ -18,14 +18,24 @@ the same guard and the checks are not interchangeable:
 ``PostgresDigitalColumnDefaultDDLTest`` the five columns the digital/PWYW
                                        migration adds, same technique but
                                        recording statements only.
+``RollingDeployOldCodeProductInsertTest`` the five per-format identifier
+                                       columns, which take the other route to
+                                       the same safety: NULLable rather than
+                                       NOT NULL-with-a-default.
+``ProductFormatIdentifierMigrationTest`` the isbn -> print_isbn data backfill.
 
-The two DDL classes are deliberately separate rather than merged: their
-recorders have different shapes, and collapsing them would mean one
-feature's guard could be weakened while appearing to still cover the other's
-columns."""
+The DDL classes are deliberately separate rather than merged: their recorders
+have different shapes, and collapsing them would mean one feature's guard
+could be weakened while appearing to still cover the other's columns.
+``PostgresColumnDefaultDDLTest`` and ``PostgresDigitalColumnDefaultDDLTest``
+share two method *names* but are distinct classes, so both sets run."""
 
+import importlib
+
+from django.apps import apps
 from django.db import connection
 from django.db import models as django_models
+from django.db import migrations as django_migrations
 from django.db.backends.postgresql.schema import (
     DatabaseSchemaEditor as PostgresSchemaEditor)
 from django.db.utils import ConnectionHandler
@@ -138,16 +148,7 @@ class RollingDeployOldCodeWriteTest(TestCase):
         self.assertFalse(product.is_digitally_fulfilled())
 
 
-class PostgresColumnDefaultDDLTest(SimpleTestCase):
-    """Assert PostgreSQL keeps a real default for the new stock column.
-
-    The runtime raw-INSERT test proves old-code writes work on the local test
-    backend. Production is PostgreSQL, so this records the DDL Django would
-    emit there without needing a live server.
-    """
-
-    NEW_NOT_NULL_COLUMNS = [("Product", "stock")]
-
+class PostgresDDLRecorder:
     @staticmethod
     def postgres_connection():
         return ConnectionHandler({
@@ -176,6 +177,17 @@ class PostgresColumnDefaultDDLTest(SimpleTestCase):
     def add_named_field_ddl(self, model_name, field_name):
         model = {"Product": Product}[model_name]
         return self.add_field_ddl(model, model._meta.get_field(field_name))
+
+
+class PostgresColumnDefaultDDLTest(PostgresDDLRecorder, SimpleTestCase):
+    """Assert PostgreSQL keeps a real default for the new stock column.
+
+    The runtime raw-INSERT test proves old-code writes work on the local test
+    backend. Production is PostgreSQL, so this records the DDL Django would
+    emit there without needing a live server.
+    """
+
+    NEW_NOT_NULL_COLUMNS = [("Product", "stock")]
 
     def test_add_column_statement_includes_default_for_backfill(self):
         """The discriminating durable-default checks live in the sibling tests.
@@ -327,3 +339,97 @@ class PostgresDigitalColumnDefaultDDLTest(SimpleTestCase):
             statements)
         self.assertTrue(
             [s for s in statements if "DROP DEFAULT" in s], statements)
+
+
+class RollingDeployOldCodeProductInsertTest(PostgresDDLRecorder, SimpleTestCase):
+    """Guards for columns added while old Product writers still run."""
+
+    OLD_CODE_PRODUCT_COLUMNS = [
+        "description",
+        "external_product_id",
+        "isbn",
+        "upc",
+        "mpn",
+        "kickstarter",
+        "kindle_link",
+        "amazon_link",
+        "bookshop_link",
+        "amazon_in_link",
+        "flipkart_link",
+        "preorder_only",
+        "noorder",
+        "backorder",
+        "date_available",
+        "brand",
+        "sizes",
+        "name",
+        "page",
+        "price",
+        "image",
+        "image_name",
+        "tax_code",
+        "cat",
+        "mode",
+    ]
+    NEW_IDENTIFIER_COLUMNS = [
+        "print_isbn",
+        "ebook_isbn",
+        "default_asin",
+        "print_asin",
+        "ebook_asin",
+    ]
+
+    def test_old_code_raw_insert_can_omit_new_identifier_columns(self):
+        """Old-code INSERTs omit new identifiers, so they must be NULLable."""
+        raw_insert_sql = (
+            "INSERT INTO main_product "
+            f"({', '.join(self.OLD_CODE_PRODUCT_COLUMNS)}) "
+            f"VALUES ({', '.join(['%s'] * len(self.OLD_CODE_PRODUCT_COLUMNS))})"
+        )
+
+        # Anti-vacuity: the compatibility SQL really is an old-code Product
+        # insert, not an empty or unrelated statement.
+        self.assertIn("INSERT INTO main_product", raw_insert_sql)
+        self.assertIn("isbn", self.OLD_CODE_PRODUCT_COLUMNS)
+
+        for field_name in self.NEW_IDENTIFIER_COLUMNS:
+            with self.subTest(field=field_name):
+                statements = self.add_named_field_ddl("Product", field_name)
+                add_column = [s for s, _ in statements if "ADD COLUMN" in s]
+
+                self.assertEqual(len(add_column), 1, statements)
+                self.assertIn(field_name, add_column[0])
+                self.assertNotIn(field_name, self.OLD_CODE_PRODUCT_COLUMNS)
+                self.assertNotIn("NOT NULL", add_column[0])
+
+
+class ProductFormatIdentifierMigrationTest(TestCase):
+    def copy_operation(self):
+        migration_module = importlib.import_module(
+            "main.migrations.0009_product_format_identifiers")
+        operations = [
+            operation for operation in migration_module.Migration.operations
+            if (
+                isinstance(operation, django_migrations.RunPython)
+                and operation.code.__name__ == "copy_isbn_to_print_isbn"
+            )
+        ]
+        self.assertEqual(len(operations), 1)
+        return operations[0]
+
+    def test_copy_isbn_to_print_isbn_backfills_existing_rows(self):
+        Product.objects.bulk_create([
+            Product(pk=200, name="Existing print book", isbn="9781449358624"),
+            Product(pk=201, name="Null ISBN book", isbn=None),
+            Product(pk=202, name="Blank ISBN book", isbn=""),
+        ])
+
+        self.copy_operation().code(apps, None)
+
+        values = {
+            product.pk: (product.isbn, product.print_isbn)
+            for product in Product.objects.filter(pk__in=[200, 201, 202])
+        }
+        self.assertEqual(values[200], ("9781449358624", "9781449358624"))
+        self.assertEqual(values[201], (None, None))
+        self.assertEqual(values[202], ("", ""))
