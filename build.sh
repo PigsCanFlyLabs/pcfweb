@@ -1,33 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 set -x
-# Hack, for now. Only pcfweb-assets/images is copied -- that repo also keeps
-# an originals/ directory of full-resolution masters, which deliberately does
-# not ship.
-rm -rf main/static/assets/images
-cp -af ../pcfweb-assets/images main/static/assets/
-
-# Everything copied above lands in the image and is then duplicated by
-# collectstatic, in an artifact Kubernetes re-pulls on every rollout. The
-# per-file budget is 2MB (see pcfweb-assets/README.md); this is the hard
-# ceiling that catches a master committed to images/ by mistake, which is how
-# a single 50MB panorama used to ship.
-ASSET_MAX_BYTES=5000000
-oversized=$(find main/static/assets/images -type f -size +${ASSET_MAX_BYTES}c \
-  -printf '%s\t%p\n' | sort -rn || true)
-if [ -n "$oversized" ]; then
-  set +x
-  echo >&2
-  echo "ERROR: image assets over $((ASSET_MAX_BYTES / 1000000))MB:" >&2
-  echo "$oversized" | awk -F'\t' '{printf "  %6.1fMB  %s\n", $1/1000000, $2}' >&2
-  echo >&2
-  echo "Put the master in pcfweb-assets/originals/ and a resized copy in" >&2
-  echo "pcfweb-assets/images/ under the same name." >&2
-  exit 1
-fi
-./scripts/check-image-assets.sh main/static/assets/images "source image assets"
-
-./scripts/check-product-images.sh
+# Re-sync main/static/assets/images out of the sibling pcfweb-assets checkout
+# and run the three guards over what landed: the per-file size ceiling, the
+# Git LFS pointer check, and the fixture-references-real-files check. Same
+# steps in the same order as when they were inline here, and each one is still
+# fatal -- the script's default mode is fatal precisely so that this call site
+# needs no flag to stay strict.
+#
+# Shared with run_local.sh, which passes --warn, so the deploy path and the
+# local path cannot drift. The local path had no copy step at all, which is how
+# a checkout could sit on a stale image tree from a build months earlier; see
+# the header of scripts/sync-local-assets.sh.
+./scripts/sync-local-assets.sh
 
 # Digital book archives, from the sibling pcfweb-book-assets checkout (Git
 # LFS). These are the files paying customers get emailed a link to, so every
