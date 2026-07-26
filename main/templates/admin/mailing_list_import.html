@@ -13,12 +13,12 @@
 
   <div class="module">
     <p>A CSV: a Mailchimp or Google Forms export as it comes, or a bare
-      column of addresses. Any heading with "email" in it is the address
-      column and any with "name" in it are the name; everything else
-      (Mailchimp's ratings, a Google Forms timestamp) is ignored, and a row
-      that makes no sense is skipped rather than failing the upload.
-      Addresses already on the chosen list are left alone, including anyone
-      who unsubscribed from it.</p>
+      column of addresses. Any heading with "email" in it is the address, and
+      "name" / "last name" columns become the person's name in that order;
+      everything else (Mailchimp's ratings, a Google Forms timestamp) is
+      ignored, and a row that makes no sense is skipped rather than failing
+      the upload. Addresses already on the chosen list are left alone,
+      including anyone who unsubscribed from it.</p>
     <p><strong>Subscriber imports skip the confirmation email</strong> — an
       import is you saying you already have consent for these addresses. That
       is why the notice is worth leaving ticked: it tells people where they

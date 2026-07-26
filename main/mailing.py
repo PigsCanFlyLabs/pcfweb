@@ -287,7 +287,7 @@ def import_addresses(addresses: Dict[str, str], newsletter: Newsletter,
         newsletter=newsletter).annotate(
             normalized=Lower("email_field")).filter(
                 normalized__in=[normalize_email(a) for a in addresses]
-            ).values_list("normalized", flat=True))
+    ).values_list("normalized", flat=True))
     imported = []
     for email, name in addresses.items():
         email = normalize_email(email)
@@ -431,12 +431,16 @@ def _heading_columns(row: List[str]) -> Optional[Dict[str, int]]:
         if "email" not in columns and any(
                 word in heading for word in EMAIL_HEADINGS):
             columns["email"] = index
+        elif "surname" not in columns and any(
+                word in heading for word in SURNAME_HEADINGS):
+            # Before the name check, not after: every surname heading contains
+            # the substring "name", so a "Surname" column ahead of a "Given
+            # Name" one would otherwise claim the name slot and the given name
+            # would be dropped. Mailchimp's First/Last order hides this.
+            columns["surname"] = index
         elif "name" not in columns and any(
                 word in heading for word in NAME_HEADINGS):
             columns["name"] = index
-        elif "surname" not in columns and any(
-                word in heading for word in SURNAME_HEADINGS):
-            columns["surname"] = index
     return columns if "email" in columns else None
 
 

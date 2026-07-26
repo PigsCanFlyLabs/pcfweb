@@ -444,6 +444,36 @@ class ConfirmAndUnsubscribeTest(MailingListTestBase):
         self.assertEqual(len(mail.outbox), 1)
 
 
+class HeadingDetectionTest(TestCase):
+    """Which column is which, for files other people's tools produced."""
+
+    def parse(self, text):
+        upload = io.BytesIO(text.encode("utf-8"))
+        upload.name = "export.csv"
+        return mailing.parse_addresses(upload)
+
+    def test_a_surname_column_before_the_given_name_keeps_both(self):
+        # Every surname heading contains the substring "name", so the surname
+        # used to claim the name slot and the given name was dropped -- the
+        # person ended up recorded as their surname alone. Mailchimp's
+        # First/Last ordering hides this; a hand-made export need not use it.
+        self.assertEqual(
+            self.parse("Email,Surname,Given Name\n"
+                       "ada@example.com,Lovelace,Ada\n"),
+            {"ada@example.com": "Ada Lovelace"})
+
+    def test_mailchimps_own_ordering_still_works(self):
+        self.assertEqual(
+            self.parse("Email Address,First Name,Last Name\n"
+                       "ada@example.com,Ada,Lovelace\n"),
+            {"ada@example.com": "Ada Lovelace"})
+
+    def test_a_lone_name_column_is_the_name(self):
+        self.assertEqual(
+            self.parse("Email,Name\nada@example.com,Ada\n"),
+            {"ada@example.com": "Ada"})
+
+
 class SuppressionAtSignupTest(MailingListTestBase):
     """The never-email list has to hold on the open endpoint too.
 
@@ -478,6 +508,17 @@ class SuppressionAtSignupTest(MailingListTestBase):
             self.signup("STOP@Example.com")
 
         self.assertFalse(Subscription.objects.exists())
+
+    def test_a_suppressed_row_written_outside_save_is_still_excluded(self):
+        # bulk_create, loaddata and raw SQL skip the save() that lower-cases,
+        # so the stored value can be mixed case. The audience query has to fold
+        # case on both sides or it mails somebody it was told not to.
+        Subscription(newsletter=self.general, email_field="bulk@example.com",
+                     subscribed=True).save()
+        SuppressedAddress.objects.bulk_create(
+            [SuppressedAddress(email="Bulk@Example.COM")])
+
+        self.assertEqual(list(self.message(self.general).recipients()), [])
 
     def test_a_suppressed_address_is_excluded_from_a_mailing(self):
         # Belt and braces: suppressing takes people off their lists, but a row

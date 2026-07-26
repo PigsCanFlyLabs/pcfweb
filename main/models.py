@@ -30,7 +30,8 @@ DEFAULT_CURRENCY = "usd"
 # Create your models here.
 class Product(models.Model):
     description = models.TextField(default="No description.")
-    external_product_id = models.CharField(max_length=250, blank=True, null=True)
+    external_product_id = models.CharField(
+        max_length=250, blank=True, null=True)
     product_id = models.AutoField(primary_key=True)
     # Deprecated rolling-deploy compatibility column. Follow-up PR removes it
     # after print_isbn has been fully deployed and old pods no longer read it.
@@ -200,6 +201,7 @@ class Product(models.Model):
             return f"Pre-order: {formatted_price}"
         else:
             return formatted_price
+
     def get_absolute_url(self) -> str:
         # The route is product/<int:pk>, so the kwarg has to be pk.
         return reverse('product', kwargs={'pk': self.pk})
@@ -428,13 +430,14 @@ class Product(models.Model):
     def get_mpn(self):
         return self.mpn or f"PCF{self.pk}"
 
+
 class Cart(models.Model):
     user = models.OneToOneField(
         User,
         on_delete=models.CASCADE,
         null=True,
         blank=True,
-        )
+    )
     cart_id = models.AutoField(primary_key=True)
     products: "models.ManyToManyField[CartProduct, Any]" = models.ManyToManyField(
         'CartProduct', related_name='cart_products')
@@ -496,6 +499,7 @@ class CartProduct(models.Model):
                 interval="year", pay_what_you_want=self.product.is_pwyw
             )
         return price_id
+
     def save(self, *args, **kwargs):
         if not self.price_id:
             self.price_id = self.generate_price_id()
@@ -686,7 +690,8 @@ class Order(models.Model):
     def shipping_address_lines(self) -> List[str]:
         city_line = " ".join(
             part for part in [
-                ", ".join(p for p in [self.shipping_city, self.shipping_state] if p),
+                ", ".join(p for p in [self.shipping_city,
+                          self.shipping_state] if p),
                 self.shipping_postal_code,
             ] if part)
         return [line for line in [
@@ -1421,8 +1426,12 @@ class MailingListMessage(models.Model):
         # Suppressing takes people off their lists, but a row that slipped
         # past that -- a user-linked subscription, a case variant, one created
         # afterwards -- must still never be mailed.
+        # Lower on both sides, for the same reason matching() does it: save()
+        # normalises, but bulk_create, loaddata and raw SQL do not, and a
+        # suppressed address this misses is one we mail.
         recipients = recipients.exclude(
-            address__in=SuppressedAddress.objects.values("email"))
+            address__in=SuppressedAddress.objects.annotate(
+                normalized=Lower("email")).values("normalized"))
         interests = list(self.interests.all()) if self.pk else []
         if interests:
             addressed = models.Q(newsletter__in=interests)

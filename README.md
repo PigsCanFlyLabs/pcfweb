@@ -147,7 +147,7 @@ mail scanner reaching it late, could put somebody back on a list they left.
 
 ### The lists
 
-Seeded by migration `0010_seed_interest_areas`:
+Seeded by migration `0013_seed_interest_areas`:
 
 `all` · `general` · `books` · `dc4k` · `high-performance-spark` ·
 `liberatedbread` · `fight-health-insurance`
