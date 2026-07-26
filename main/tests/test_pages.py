@@ -87,6 +87,7 @@ class FamilyPageTest(TestCase):
     """
 
     COMING_SOON_BADGE = ">Coming Soon</span>"
+    LIBERATED_BREAD_URL = "https://www.liberatedbread.com/"
     PROJECT_NAMES = [
         "Pigs Can Fly Labs", "Fight Health Insurance", "Liberated Bread"]
 
@@ -165,9 +166,18 @@ class FamilyPageTest(TestCase):
             self.COMING_SOON_BADGE,
             self.get_project_cards()["Pigs Can Fly Labs"])
 
-    def test_liberated_bread_does_not_link_anywhere(self):
-        # It has no site yet, so no plausible-looking URL may be invented.
-        self.assertNotIn("<a href", self.get_project_cards()["Liberated Bread"])
+    def test_liberated_bread_links_to_owner_supplied_url(self):
+        # The owner supplied this exact URL; do not invent alternatives.
+        card = self.get_project_cards()["Liberated Bread"]
+        self.assertEqual(
+            re.findall(r'<a href="([^"]+)"', card),
+            [self.LIBERATED_BREAD_URL])
+
+    def test_liberated_bread_can_link_while_still_coming_soon(self):
+        # URL and coming_soon are independent fields: both can be true at once.
+        card = self.get_project_cards()["Liberated Bread"]
+        self.assertIn(f'href="{self.LIBERATED_BREAD_URL}"', card)
+        self.assertIn(self.COMING_SOON_BADGE, card)
 
     def test_family_page_renders_the_family_template(self):
         response = self.client.get("/family")
