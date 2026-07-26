@@ -21,6 +21,133 @@ class StaticPagesTest(TestCase):
 
 
 @override_settings(THUMBNAIL_DEBUG=False)
+class ServicesPageTest(TestCase):
+    """The curated /services page that replaced the Product-backed listing.
+
+    The old page listed Product rows with cat=SERVICES. Nothing here is a
+    Product, so the point of these tests is that the page says what it offers
+    without ever offering to sell it through the cart.
+    """
+
+    EXPECTED = [
+        "Liberated Bread",
+        "Apache Spark Consulting",
+        "AI Consulting",
+        "Fight Health Insurance",
+    ]
+
+    def page(self):
+        response = self.client.get("/services")
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def test_services_page_renders_the_services_template(self):
+        response = self.client.get("/services")
+        self.assertTemplateUsed(response, "services.html")
+
+    def test_all_four_services_are_listed(self):
+        html = self.page()
+        for name in self.EXPECTED:
+            with self.subTest(name=name):
+                self.assertIn(name, html)
+
+    def test_the_page_does_not_depend_on_product_rows(self):
+        """The old queryset is gone, so an empty catalogue changes nothing.
+
+        No fixtures on this class: if the page still read Product rows this
+        would render an empty list.
+        """
+        self.assertEqual(Product.objects.count(), 0)
+
+        html = self.page()
+
+        for name in self.EXPECTED:
+            self.assertIn(name, html)
+
+    def test_a_service_product_row_no_longer_leaks_onto_the_page(self):
+        """A SERVICES Product in the database must not appear here.
+
+        Admin-created service rows still exist in production. The page is
+        curated now, so one appearing would mean the old queryset came back.
+        """
+        with mock.patch("main.models.Payments") as payments:
+            payments.create_product.return_value = "prod_svc"
+            Product.objects.create(
+                name="Some Admin Created Service",
+                description="Left over in the database.",
+                price=100000,
+                cat=Product.Categories.SERVICES,
+                external_product_id="prod_svc",
+            )
+
+        self.assertNotIn("Some Admin Created Service", self.page())
+
+    def test_nothing_on_the_page_is_buyable(self):
+        """Consulting is an enquiry, not a checkout."""
+        html = self.page()
+
+        self.assertNotIn("add-to-cart", html)
+        self.assertNotIn("Add to Cart", html)
+        self.assertNotIn("Buy", html)
+
+    def test_both_consulting_entries_point_at_the_contact_page(self):
+        html = self.page()
+
+        self.assertEqual(html.count("Reach out for more info"), 2)
+        self.assertIn('href="/contact"', html)
+
+    def test_the_spark_credentials_avoid_the_first_spark_book_claim(self):
+        """Learning Spark 1e (2015) is not provably the first Spark book.
+
+        Fast Data Processing with Spark (Packt, 2013) predates it, so "the
+        first Spark book" would be a publishing claim this page cannot back.
+        "one of the first" is true either way. This test exists so the
+        stronger phrasing cannot be reintroduced without someone deciding to.
+        """
+        html = self.page()
+
+        self.assertIn(
+            "From the co-author of Learning Spark (1st edition) and High "
+            "Performance Spark (1st and 2nd editions), and one of the first "
+            "books written about Apache Spark.",
+            html)
+        self.assertNotIn("the first Spark book", html)
+        self.assertNotIn("the first book about Apache Spark", html)
+
+    def test_fight_health_insurance_is_marked_as_a_separate_company(self):
+        html = self.page()
+
+        self.assertIn("A separate company that Holden is involved in", html)
+        self.assertIn('href="https://www.fighthealthinsurance.com/"', html)
+
+    def test_services_copy_is_not_copy_pasted_from_the_family_page(self):
+        """/family says who they are, /services says what they offer.
+
+        Both pages list Liberated Bread and Fight Health Insurance, which is
+        intentional -- but shared sentences would mean one page was filled in
+        from the other.
+        """
+        services_html = self.page()
+        family_html = self.client.get("/family").content.decode()
+
+        for family_sentence in (
+                "A separate company and project that helps people appeal "
+                "health insurance denials.",
+                "The same company as Pigs Can Fly Labs, with its own site — "
+                "not a separate company. Coming soon."):
+            with self.subTest(sentence=family_sentence[:40]):
+                self.assertIn(family_sentence, family_html)
+                self.assertNotIn(family_sentence, services_html)
+
+    def test_the_page_no_longer_advertises_fmt2(self):
+        html = self.page()
+
+        for gone in ("IP Transit", "IP transit", "FMT2", "colocation"):
+            with self.subTest(text=gone):
+                self.assertNotIn(gone, html)
+
+
+@override_settings(THUMBNAIL_DEBUG=False)
 class HomePageCardsTest(TestCase):
     """The #explore card grid, after the FMT2 services were retired.
 

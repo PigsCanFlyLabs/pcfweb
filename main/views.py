@@ -272,12 +272,106 @@ class ProductsView(View):
 
 
 class ServicesView(View):
+    """A curated page, not a product listing.
+
+    This used to render products.html from
+    ``Product.objects.filter(cat=SERVICES).exclude(noorder=True)``. With the
+    FMT2 network services retired there is nothing left in that queryset, and
+    the things the owner does want listed are a poor fit for Product rows:
+    saving one auto-creates a Stripe product, wants a tax code, puts the row
+    in the Google Merchant feed and runs it past the stock gate -- all wrong
+    for "email us about consulting".
+
+    ``noorder=True`` cannot express "listed but not buyable" here either,
+    because the old queryset explicitly *excluded* noorder rows, so anything
+    marked that way vanished from the page instead of appearing unbuyable.
+
+    So this follows FamilyView: a hand-written list of dicts rendered by a
+    template. Two of these -- Liberated Bread and Fight Health Insurance --
+    also appear on /family, which is deliberate. /family says who they are;
+    this page says what they offer, so the copy is different on purpose.
+    """
+
+    def services(self):
+        return [
+            {
+                "name": "Liberated Bread",
+                "kind": "Same company, its own site",
+                "description": (
+                    "The bread side of Pigs Can Fly Labs, with a site of its "
+                    "own. There is nothing to order through this site — it "
+                    "is still coming together."
+                ),
+                "url": LIBERATED_BREAD_URL,
+                "cta_label": "Visit Liberated Bread",
+                "cta_route": None,
+                "credentials": None,
+                "note": None,
+                "coming_soon": True,
+            },
+            {
+                "name": "Apache Spark Consulting",
+                "kind": "Consulting",
+                "description": (
+                    "Help with Apache Spark: getting jobs to run, getting "
+                    "them to run faster, and working out which of those two "
+                    "problems you actually have."
+                ),
+                # Deliberately does NOT claim "the first Spark book" -- see
+                # the note in the PR. This wording is true either way.
+                "credentials": (
+                    "From the co-author of Learning Spark (1st edition) and "
+                    "High Performance Spark (1st and 2nd editions), and one "
+                    "of the first books written about Apache Spark."
+                ),
+                "url": None,
+                "cta_label": "Reach out for more info",
+                "cta_route": "contact",
+                "note": None,
+                "coming_soon": False,
+            },
+            {
+                "name": "AI Consulting",
+                "kind": "Consulting",
+                "description": (
+                    "Help with machine learning and AI systems — training, "
+                    "serving, and the plumbing between them."
+                ),
+                "credentials": (
+                    "From a co-author of Kubeflow for Machine Learning "
+                    "(O'Reilly)."
+                ),
+                "url": None,
+                "cta_label": "Reach out for more info",
+                "cta_route": "contact",
+                "note": None,
+                "coming_soon": False,
+            },
+            {
+                "name": "Fight Health Insurance",
+                "kind": "Separate company",
+                "description": (
+                    "If your health insurance has denied a claim, Fight "
+                    "Health Insurance helps you put an appeal together."
+                ),
+                "url": "https://www.fighthealthinsurance.com/",
+                "cta_label": "Go to Fight Health Insurance",
+                "cta_route": None,
+                "credentials": None,
+                # Stated outright rather than left to be inferred: this is
+                # not a Pigs Can Fly Labs service and should not read as one.
+                "note": (
+                    "A separate company that Holden is involved in, not a "
+                    "Pigs Can Fly Labs service."
+                ),
+                "coming_soon": False,
+            },
+        ]
+
     def get(self, request):
-        products = Product.objects.filter(cat=Product.Categories.SERVICES).exclude(noorder=True)
-        return render(request, 'products.html', context={
+        return render(request, 'services.html', context={
             'title': 'Services',
-            'type': "Services",
-            'products': products})
+            'services': self.services()})
 
 
 class SubscribeView(View):
