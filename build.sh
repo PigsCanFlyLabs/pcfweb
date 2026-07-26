@@ -25,6 +25,7 @@ if [ -n "$oversized" ]; then
   echo "pcfweb-assets/images/ under the same name." >&2
   exit 1
 fi
+./scripts/check-image-assets.sh main/static/assets/images
 
 ./scripts/checks.sh
 # deploy.yaml is the single source of truth for the image tag.
