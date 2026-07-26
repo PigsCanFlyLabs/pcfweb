@@ -43,6 +43,8 @@ urlpatterns = [
     path('about', views.AboutView.as_view(), name="about"),
     path('family', views.FamilyView.as_view(), name="family"),
     path('contact', views.ContactView.as_view(), name="contact"),
+    # Captcha-gated; the invite itself is only ever assembled in the browser.
+    path('discord', views.DiscordJoinView.as_view(), name="discord"),
     path('tos', views.TosView.as_view(), name='tos'),
     path('privacy', views.PrivacyView.as_view(), name='privacy'),
     path('returns', views.ReturnView.as_view(), name='returns'),

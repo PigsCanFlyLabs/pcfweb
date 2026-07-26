@@ -1,4 +1,5 @@
 import logging
+import re
 
 from typing import *
 from django.conf import settings
@@ -22,6 +23,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 import stripe
 
+from main import captcha
 from main.models import Cart, CartProduct, Order, Product
 from main.payments import Payments
 from main.utils import generate_username, get_country_code
@@ -113,6 +115,92 @@ class ReturnView(View):
 class ContactView(View):
     def get(self, request):
         return render(request, 'contact.html', context={'title': 'Contact Us'})
+
+
+class DiscordJoinView(View):
+    """The captcha-gated door to the Discord invite.
+
+    A Discord invite URL is a bearer token: whatever reads it can join, and
+    every link-following crawler on the internet reads pages like this one. So
+    the URL is never in the page as a URL. It lives as two halves (see
+    Base.DISCORD_INVITE_PART_ONE/TWO), the halves are only put in a response
+    once a captcha has been answered, and the joining happens in the visitor's
+    browser.
+
+    None of that is a wall -- a determined scraper runs JavaScript. It is a
+    speed bump sized to the actual threat, and if the invite starts filling up
+    with bots anyway the fallback is already here: unset the halves and this
+    page becomes "e-mail us and we'll invite you", which is also what a
+    misconfigured pair renders.
+    """
+
+    # The joined halves must look like this or the page will not offer them.
+    # Two jobs: it catches a bad ConfigMap edit (a half dropped, an invite
+    # pasted with a trailing newline) before it becomes a dead button, and it
+    # keeps anything that is not an https discord.gg link -- a javascript:
+    # URL, an attacker-chosen host -- from being handed to the browser to open.
+    INVITE_PATTERN = re.compile(r"^https://discord\.gg/[A-Za-z0-9-]{2,64}$")
+
+    # The name is bait for form-filling bots and deliberately looks worth
+    # filling in; real visitors never see the field. See the template.
+    HONEYPOT_FIELD = "email_confirm"
+
+    def invite_parts(self, request) -> Optional[Tuple[str, str]]:
+        """The two halves, or None when they don't make a usable invite."""
+        first = settings.DISCORD_INVITE_PART_ONE  # type: ignore[misc]
+        second = settings.DISCORD_INVITE_PART_TWO  # type: ignore[misc]
+        if not first or not second:
+            # Both halves have to be set, even though one of them could hold
+            # a complete-looking URL on its own: an empty half is how a
+            # dropped ConfigMap key looks, and there is no way to tell that
+            # from a deliberate one-sided split. Fail to the e-mail page.
+            logger.warning(
+                "Only one half of the Discord invite is set; serving the "
+                "e-mail fallback. Set both DISCORD_INVITE_PART_ONE and "
+                "DISCORD_INVITE_PART_TWO.")
+            return None
+        if not self.INVITE_PATTERN.match(first + second):
+            logger.warning(
+                "The Discord invite halves do not join into a "
+                "https://discord.gg/... link; serving the e-mail fallback.")
+            return None
+        return first, second
+
+    def page(self, request, *, solved: bool, error: Optional[str] = None):
+        parts = self.invite_parts(request)
+        context = {
+            "title": "Join our Discord",
+            "support_email": settings.DISCORD_SUPPORT_EMAIL,  # type: ignore[misc]
+            "invite_configured": parts is not None,
+            "error": error,
+        }
+        if parts is None:
+            # Nothing to gate, so don't make anyone answer a question first.
+            return render(request, "discord.html", context=context)
+        if solved:
+            context["invite_part_one"], context["invite_part_two"] = parts
+        else:
+            context["challenge"] = captcha.new_challenge(request.session)
+        context["solved"] = solved
+        return render(request, "discord.html", context=context)
+
+    def get(self, request):
+        return self.page(request, solved=False)
+
+    def post(self, request):
+        # A filled honeypot is a bot; answer exactly as a wrong answer does so
+        # it learns nothing about which field gave it away.
+        if request.POST.get(self.HONEYPOT_FIELD, "").strip():
+            return self.page(
+                request, solved=False,
+                error="That didn't match — here's a new question.")
+        if not captcha.check_answer(request.session,
+                                    request.POST.get("captcha_answer", "")):
+            return self.page(
+                request, solved=False,
+                error=("That didn't match (or the question timed out) — "
+                       "here's a new one."))
+        return self.page(request, solved=True)
 
 
 class ProductsView(View):
