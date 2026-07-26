@@ -1,4 +1,6 @@
 import logging
+import re
+from urllib.parse import quote
 
 from typing import *
 from django.conf import settings
@@ -12,7 +14,8 @@ from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import transaction
 from django.db.models import Q
-from django.http import Http404, HttpResponse, HttpResponseBadRequest
+from django.http import (
+    FileResponse, Http404, HttpResponse, HttpResponseBadRequest)
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -22,6 +25,10 @@ from django.views.decorators.csrf import csrf_exempt
 
 import stripe
 
+from main import captcha
+from main.digital import (
+    BadSignature, DigitalAssetError, SignatureExpired, link_lifetime_days,
+    open_asset, parse_download_token)
 from main.models import Cart, CartProduct, Order, Product
 from main.payments import Payments
 from main.utils import generate_username, get_country_code
@@ -34,8 +41,37 @@ logger = logging.getLogger(__name__)
 # check and the cookie-consent middleware's database query.
 
 
+# Liberated Bread's site, linked from both the family page and the homepage
+# card. One constant so the two cannot drift apart -- they are the same
+# destination and a visitor who sees both should land in the same place.
+# Note this currently serves a domain-parking page; the owner knows.
+LIBERATED_BREAD_URL = "https://www.liberatedbread.com/"
+
+# The homepage features this book by title rather than by primary key.
+# Fixture pks are seeded data: stable today, but a reseed or an admin edit can
+# move them, and a hardcoded pk fails *silently* -- it keeps resolving, just to
+# whatever row happens to hold that number later. Matching on the title the
+# fixture gives all three SKUs means the worst case is a card that falls back
+# to the books listing, which is visible rather than wrong.
+FEATURED_BOOK_TITLE = "Distributed Computing 4 Kids (and Executives)"
+
+
 # Create your views here.
 class HomeView(View):
+    def featured_book(self):
+        """The standard print edition of the featured book, or None.
+
+        Ordered by pk so the three SKUs resolve to the standard print edition
+        rather than the Executive or e-book one; None when the catalogue has
+        not been seeded, which the template handles.
+        """
+        return (Product.objects
+                .filter(name__startswith=FEATURED_BOOK_TITLE,
+                        cat=Product.Categories.BOOKS)
+                .exclude(noorder=True)
+                .order_by('pk')
+                .first())
+
     def get(self, request):
         highlights = map(
             lambda cat: ((cat, cat.label), list(Product.objects.filter(cat = cat).exclude(noorder=True).order_by('-price')[:3])),
@@ -47,6 +83,8 @@ class HomeView(View):
             context={
                 'title': 'Pigs Can Fly Labs',
                 'highlights': highlights,
+                'featured_book': self.featured_book(),
+                'liberated_bread_url': LIBERATED_BREAD_URL,
             })
 
 
@@ -90,7 +128,7 @@ class FamilyView(View):
                     "The same company as Pigs Can Fly Labs, with its own "
                     "site — not a separate company. Coming soon."
                 ),
-                "url": None,
+                "url": LIBERATED_BREAD_URL,
                 "coming_soon": True,
             },
         ]
@@ -113,6 +151,92 @@ class ReturnView(View):
 class ContactView(View):
     def get(self, request):
         return render(request, 'contact.html', context={'title': 'Contact Us'})
+
+
+class DiscordJoinView(View):
+    """The captcha-gated door to the Discord invite.
+
+    A Discord invite URL is a bearer token: whatever reads it can join, and
+    every link-following crawler on the internet reads pages like this one. So
+    the URL is never in the page as a URL. It lives as two halves (see
+    Base.DISCORD_INVITE_PART_ONE/TWO), the halves are only put in a response
+    once a captcha has been answered, and the joining happens in the visitor's
+    browser.
+
+    None of that is a wall -- a determined scraper runs JavaScript. It is a
+    speed bump sized to the actual threat, and if the invite starts filling up
+    with bots anyway the fallback is already here: unset the halves and this
+    page becomes "e-mail us and we'll invite you", which is also what a
+    misconfigured pair renders.
+    """
+
+    # The joined halves must look like this or the page will not offer them.
+    # Two jobs: it catches a bad ConfigMap edit (a half dropped, an invite
+    # pasted with a trailing newline) before it becomes a dead button, and it
+    # keeps anything that is not an https discord.gg link -- a javascript:
+    # URL, an attacker-chosen host -- from being handed to the browser to open.
+    INVITE_PATTERN = re.compile(r"^https://discord\.gg/[A-Za-z0-9-]{2,64}$")
+
+    # The name is bait for form-filling bots and deliberately looks worth
+    # filling in; real visitors never see the field. See the template.
+    HONEYPOT_FIELD = "email_confirm"
+
+    def invite_parts(self, request) -> Optional[Tuple[str, str]]:
+        """The two halves, or None when they don't make a usable invite."""
+        first = settings.DISCORD_INVITE_PART_ONE  # type: ignore[misc]
+        second = settings.DISCORD_INVITE_PART_TWO  # type: ignore[misc]
+        if not first or not second:
+            # Both halves have to be set, even though one of them could hold
+            # a complete-looking URL on its own: an empty half is how a
+            # dropped ConfigMap key looks, and there is no way to tell that
+            # from a deliberate one-sided split. Fail to the e-mail page.
+            logger.warning(
+                "Only one half of the Discord invite is set; serving the "
+                "e-mail fallback. Set both DISCORD_INVITE_PART_ONE and "
+                "DISCORD_INVITE_PART_TWO.")
+            return None
+        if not self.INVITE_PATTERN.match(first + second):
+            logger.warning(
+                "The Discord invite halves do not join into a "
+                "https://discord.gg/... link; serving the e-mail fallback.")
+            return None
+        return first, second
+
+    def page(self, request, *, solved: bool, error: Optional[str] = None):
+        parts = self.invite_parts(request)
+        context = {
+            "title": "Join our Discord",
+            "support_email": settings.DISCORD_SUPPORT_EMAIL,  # type: ignore[misc]
+            "invite_configured": parts is not None,
+            "error": error,
+        }
+        if parts is None:
+            # Nothing to gate, so don't make anyone answer a question first.
+            return render(request, "discord.html", context=context)
+        if solved:
+            context["invite_part_one"], context["invite_part_two"] = parts
+        else:
+            context["challenge"] = captcha.new_challenge(request.session)
+        context["solved"] = solved
+        return render(request, "discord.html", context=context)
+
+    def get(self, request):
+        return self.page(request, solved=False)
+
+    def post(self, request):
+        # A filled honeypot is a bot; answer exactly as a wrong answer does so
+        # it learns nothing about which field gave it away.
+        if request.POST.get(self.HONEYPOT_FIELD, "").strip():
+            return self.page(
+                request, solved=False,
+                error="That didn't match — here's a new question.")
+        if not captcha.check_answer(request.session,
+                                    request.POST.get("captcha_answer", "")):
+            return self.page(
+                request, solved=False,
+                error=("That didn't match (or the question timed out) — "
+                       "here's a new one."))
+        return self.page(request, solved=True)
 
 
 class ProductsView(View):
@@ -149,17 +273,240 @@ class ProductsView(View):
 
 
 class ServicesView(View):
+    """A curated page, not a product listing.
+
+    This used to render products.html from
+    ``Product.objects.filter(cat=SERVICES).exclude(noorder=True)``. With the
+    FMT2 network services retired there is nothing left in that queryset, and
+    the things the owner does want listed are a poor fit for Product rows:
+    saving one auto-creates a Stripe product, wants a tax code, puts the row
+    in the Google Merchant feed and runs it past the stock gate -- all wrong
+    for "email us about consulting".
+
+    ``noorder=True`` cannot express "listed but not buyable" here either,
+    because the old queryset explicitly *excluded* noorder rows, so anything
+    marked that way vanished from the page instead of appearing unbuyable.
+
+    So this follows FamilyView: a hand-written list of dicts rendered by a
+    template. Two of these -- Liberated Bread and Fight Health Insurance --
+    also appear on /family, which is deliberate. /family says who they are;
+    this page says what they offer, so the copy is different on purpose.
+    """
+
+    # Where consulting enquiries go. The owner asked for email with the
+    # project described, rather than the generic contact form.
+    CONSULTING_EMAIL = "holden@pigscanfly.ca"
+
+    # Stated once for the consulting group rather than repeated on each card:
+    # both engagements are the same shape, and the same sentence twice reads
+    # like boilerplate.
+    CONSULTING_SCOPE = (
+        "Both consulting engagements cover architecture review, performance "
+        "tuning, training, and a retainer for periodic consulting."
+    )
+
+    # Titles cited in the credentials, with the ISBN each one links by. Linked
+    # through /book/<isbn> so no fixture primary key ever appears in markup --
+    # a pk that moves keeps resolving, to the wrong book.
+    LEARNING_SPARK = ("Learning Spark (1st edition)", "9781449358624")
+    HIGH_PERFORMANCE_SPARK = (
+        "High Performance Spark (1st and 2nd editions)", "9781491943205")
+    FAST_DATA_PROCESSING = ("Fast Data Processing with Spark", "9781782167068")
+    KUBEFLOW = ("Kubeflow for Machine Learning", "9781492050124")
+    SCALING_PYTHON_RAY = ("Scaling Python with Ray", "9781098118808")
+
+    @staticmethod
+    def credential(*parts):
+        """Build a credential line as linkable and plain segments.
+
+        A string is literal copy; a (title, isbn) pair becomes a link to
+        /book/<isbn>. Keeping the sentence as segments rather than as a blob
+        of HTML means a test can reassemble the plain text and assert the
+        owner's exact wording, which is the point -- these are publishing
+        claims and the page must not drift away from what he approved.
+        """
+        segments = []
+        for part in parts:
+            if isinstance(part, str):
+                segments.append({"text": part, "isbn": None})
+            else:
+                segments.append({"text": part[0], "isbn": part[1]})
+        return segments
+
+    def consulting_mailto(self, subject: str) -> str:
+        return f"mailto:{self.CONSULTING_EMAIL}?subject={quote(subject)}"
+
+    def services(self):
+        return [
+            {
+                "name": "Liberated Bread",
+                "kind": "Same company, its own site",
+                "description": (
+                    "The bread side of Pigs Can Fly Labs, with a site of its "
+                    "own. There is nothing to order through this site — it "
+                    "is still coming together."
+                ),
+                "url": LIBERATED_BREAD_URL,
+                "cta_label": "Visit Liberated Bread",
+                "cta_url": LIBERATED_BREAD_URL,
+                "credentials": None,
+                "note": None,
+                "consulting": False,
+                "coming_soon": True,
+            },
+            {
+                "name": "Apache Spark Consulting",
+                "kind": "Consulting",
+                "description": (
+                    "Help with Apache Spark: getting jobs to run, getting "
+                    "them to run faster, and working out which of those two "
+                    "problems you actually have."
+                ),
+                # The owner has confirmed he wrote both Fast Data Processing
+                # with Spark (Packt, 2013) and Learning Spark 1e (O'Reilly,
+                # 2015), and that the 2013 book is the first book written
+                # about Apache Spark. So this asserts the claim rather than
+                # hedging to "one of the first", which is what it said while
+                # the question was open.
+                #
+                # Fast Data Processing comes last at the owner's request -- he
+                # rates it the weakest of his books -- but the first-book fact
+                # is the strongest line on the page, so it stays.
+                "credentials": self.credential(
+                    "From the co-author of ",
+                    self.LEARNING_SPARK,
+                    " and ",
+                    self.HIGH_PERFORMANCE_SPARK,
+                    ", and author of ",
+                    self.FAST_DATA_PROCESSING,
+                    " — the first book written about Apache Spark.",
+                ),
+                "url": None,
+                "cta_label": (
+                    f"Email {self.CONSULTING_EMAIL} with the project you'd "
+                    "like help on."
+                ),
+                "cta_url": self.consulting_mailto("Apache Spark consulting"),
+                "note": None,
+                "consulting": True,
+                "coming_soon": False,
+            },
+            {
+                "name": "AI Consulting",
+                "kind": "Consulting",
+                "description": (
+                    "Help with machine learning and AI systems — training, "
+                    "serving, and the plumbing between them."
+                ),
+                # Two sentences, not one: eliding "co-author of" across the
+                # clause ("and of the Spark books...") is ungrammatical, and
+                # the owner flagged exactly that in an earlier draft.
+                "credentials": self.credential(
+                    "From the co-author of ",
+                    self.KUBEFLOW,
+                    " and ",
+                    self.SCALING_PYTHON_RAY,
+                    ". Much of today's ML tooling still runs on Spark, and "
+                    "those books are ours too.",
+                ),
+                "url": None,
+                "cta_label": (
+                    f"Email {self.CONSULTING_EMAIL} with the project you'd "
+                    "like help on."
+                ),
+                "cta_url": self.consulting_mailto("AI consulting"),
+                "note": None,
+                "consulting": True,
+                "coming_soon": False,
+            },
+            {
+                "name": "Fight Health Insurance",
+                "kind": "Separate company",
+                "description": (
+                    "If your health insurance has denied a claim, Fight "
+                    "Health Insurance helps you put an appeal together."
+                ),
+                "url": "https://www.fighthealthinsurance.com/",
+                "cta_label": "Go to Fight Health Insurance",
+                "cta_url": "https://www.fighthealthinsurance.com/",
+                "credentials": None,
+                # Stated outright rather than left to be inferred: this is
+                # not a Pigs Can Fly Labs service and should not read as one.
+                "note": (
+                    "A separate company that Holden is involved in, not a "
+                    "Pigs Can Fly Labs service."
+                ),
+                "consulting": False,
+                "coming_soon": False,
+            },
+        ]
+
     def get(self, request):
-        products = Product.objects.filter(cat=Product.Categories.SERVICES).exclude(noorder=True)
-        return render(request, 'products.html', context={
+        return render(request, 'services.html', context={
             'title': 'Services',
-            'type': "Services",
-            'products': products})
+            'consulting_scope': self.CONSULTING_SCOPE,
+            'services': self.services()})
 
 
 class SubscribeView(View):
     def get(self, request):
         return render(request, 'subscribe_page.html', context={'title': 'Subscribe for updates'})
+
+
+class BookByIsbnView(View):
+    """/book/<isbn> -> 302 to the canonical /product/<pk>.
+
+    A redirect rather than a second rendering of the product page: one
+    canonical URL keeps the ISBN path from competing with /product/<pk> in
+    search results, and makes the ISBN a stable alias that survives a pk
+    changing -- which is the whole reason this exists. Templates link books by
+    ISBN so no fixture primary key is ever hardcoded in markup.
+    """
+
+    # Matched in order. print_isbn first because a print ISBN is the one on
+    # the back of the book and the one people paste; the legacy `isbn` column
+    # is last because it is the one being migrated away from.
+    ISBN_FIELDS = ("print_isbn", "ebook_isbn", "isbn")
+
+    # An ISBN-13 is 13 digits and an ISBN-10 is 10; the column is 20. This is
+    # generous room for separators on top of that, not a validity check --
+    # anything that is not a real ISBN 404s on the lookup anyway. The point is
+    # only that there is no reason to normalise and then run three queries
+    # against a megabyte of URL.
+    MAX_ISBN_LENGTH = 32
+
+    @staticmethod
+    def normalise(raw: str) -> str:
+        """Strip the separators people paste ISBNs with.
+
+        `978-1-960595-99-7` and `978 1 960595 99 7` are the same book as
+        `9781960595997`. The stored values are bare digits, so anything
+        keeping a hyphen would simply never match.
+        """
+        return re.sub(r"[\s\-‐-―]", "", raw).upper()
+
+    def get(self, request, isbn):
+        # Bounded before normalising, so an over-long URL is rejected without
+        # running a regex substitution over it either.
+        if len(isbn) > self.MAX_ISBN_LENGTH:
+            raise Http404("ISBN too long")
+
+        normalised = self.normalise(isbn)
+        if not normalised:
+            raise Http404("No ISBN given")
+
+        for field in self.ISBN_FIELDS:
+            product = Product.objects.filter(**{field: normalised}).first()
+            if product is not None:
+                # Permanent in meaning but issued as a 302: the mapping from
+                # ISBN to pk is data, and a 301 would be cached by browsers
+                # past our ability to correct it if a row were ever re-keyed.
+                return redirect("product", pk=product.pk)
+
+        # A deliberate 404 rather than a redirect to /products: an unknown
+        # ISBN is a wrong URL, and bouncing it to the catalogue would tell
+        # both the visitor and a crawler that the book exists here.
+        raise Http404(f"No book with ISBN {normalised}")
 
 
 class ProductView(View):
@@ -300,14 +647,30 @@ class CartView(View, BaseCartView):
     def get(self, request):
         cart = self.get_cart(request)
         cart_products = cart.products.select_related("product")
-        total_price = sum(map(lambda x: x.total_price(), cart_products))
+        # A noorder line contributes nothing to the total. Public add-to-cart
+        # refuses these and checkout re-checks, so one is only here because it
+        # was added before the flag was set -- but it still cannot be bought,
+        # and billing for it in the displayed total would be a number the
+        # customer is never charged. pk 107 happens to be priced 0, so this
+        # matters for the general case: an admin flagging an existing priced
+        # product noorder would otherwise leave its price silently in the sum.
+        total_price = sum(cp.total_price() for cp in cart_products
+                          if not cp.product.noorder)
         total_display_price = "{0:.2f}".format(total_price / 100)
-        has_physical = any(cp.product.is_physical_good() for cp in cart_products)
+        has_physical = any(cp.product.is_physical_good() for cp in cart_products
+                           if not cp.product.noorder)
+        # The displayed total is the sum of list prices, which for a
+        # pay-what-you-want line is only a suggestion. Say so rather than
+        # showing a number the buyer is not going to be charged.
+        has_pwyw = any(cp.product.is_pwyw for cp in cart_products)
+        has_unavailable = any(cp.product.noorder for cp in cart_products)
         return render(request, 'cart.html', context={
             'title': 'Cart',
             'products': cart_products,
             'total_price': total_display_price,
             'has_physical': has_physical,
+            'has_pwyw': has_pwyw,
+            'has_unavailable': has_unavailable,
         })
 
 
@@ -479,6 +842,13 @@ class StripeWebhookView(View):
         "checkout.session.async_payment_failed": "the payment failed",
         "checkout.session.expired": "the checkout session expired",
     }
+    # Payment statuses that mean the sale is done and fulfilment should run.
+    # "no_payment_required" is what a zero-total session reports: Stripe
+    # creates no PaymentIntent at all, so it can never become "paid". That is
+    # a real case here rather than a curiosity -- the e-book is
+    # pay-what-you-want with a floor of zero, and the owner's decision is that
+    # a $0 order is still an order and the book still gets delivered.
+    PAID_PAYMENT_STATUSES = frozenset({"paid", "no_payment_required"})
 
     def post(self, request):
         secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
@@ -515,7 +885,7 @@ class StripeWebhookView(View):
         return HttpResponse(status=200)
 
     def handle_paid(self, session) -> None:
-        if session.get("payment_status") != "paid":
+        if session.get("payment_status") not in self.PAID_PAYMENT_STATUSES:
             # e.g. a completed session whose ACH debit has not settled. The
             # matching async_payment_succeeded will arrive later.
             logger.info(
@@ -552,10 +922,15 @@ class StripeWebhookView(View):
 
         order.refresh_from_db()
         # Only the delivery that actually moved the row gets here, so this
-        # runs once per order. Both calls are best-effort by construction --
-        # the payment is already recorded and must not be undone by a
-        # secondary lookup or an SMTP outage.
+        # runs once per order -- which is exactly what keeps a webhook
+        # re-delivery from emailing the customer their book a second time.
+        # All three calls are best-effort by construction: the payment is
+        # already recorded and must not be undone by a secondary lookup, a
+        # missing file or an SMTP outage.
         order.reconcile_line_items()
+        # Before notify_owner, so the owner's email can report whether the
+        # customer actually got their download.
+        order.deliver_digital_goods()
         order.notify_owner()
 
     def handle_cancelled(self, session, reason: str) -> None:
@@ -655,6 +1030,75 @@ class StripeWebhookView(View):
             "shipping_country": shipping_address.get("country") or "",
         })
         return fields
+
+
+class DigitalDownloadView(View):
+    """Serve a purchased book from a signed, expiring link.
+
+    Unauthenticated by design: the buyer typically has no account, so the
+    signature on the token *is* the authorisation. It carries the order and
+    the product, and both are re-checked against the database here -- a token
+    only works for an order that was actually paid, actually contains that
+    product, and whose product is still one we are licensed to hand out.
+
+    Nothing about the path comes from the URL. The token yields two integers;
+    the filename is rebuilt from the product's stem through
+    digital.resolve_asset_path, which is what keeps an admin-typed
+    "../../etc/passwd" from becoming a file read.
+    """
+
+    EXPIRED_MESSAGE = (
+        "This download link has expired.\n\n"
+        "Links are good for {days} days. Write to {email} quoting your order "
+        "number and we will send you a fresh one.\n")
+
+    def get(self, request, token):
+        try:
+            order_pk, product_pk = parse_download_token(token)
+        except SignatureExpired:
+            # Distinguished from a bad signature: this is a real customer with
+            # a real receipt, and telling them "404" would be a lie.
+            return HttpResponse(
+                self.EXPIRED_MESSAGE.format(
+                    days=link_lifetime_days(),
+                    email=settings.DEFAULT_FROM_EMAIL),
+                status=410, content_type="text/plain; charset=utf-8")
+        except BadSignature:
+            logger.warning("Rejected a download token that did not verify.")
+            raise Http404("No such download.")
+
+        order = Order.objects.filter(pk=order_pk).first()
+        if order is None or order.status not in (
+                Order.Status.PAID, Order.Status.FULFILLED):
+            # Includes an order that was never paid for, so a guessed-at
+            # (unforgeable) pairing still gets nothing.
+            raise Http404("No such download.")
+        item = order.items.select_related('product').filter(
+            product_id=product_pk).first()
+        if item is None or item.product is None:
+            raise Http404("No such download.")
+        if not item.product.is_digitally_fulfilled():
+            # The rights interlock, applied at serve time as well as at send
+            # time: if sells_ebook has since been cleared, old links stop
+            # working too.
+            logger.warning(
+                "Refusing to serve product %s for order #%s: it is not a "
+                "product we are licensed to distribute.", product_pk, order_pk)
+            raise Http404("No such download.")
+
+        try:
+            handle = open_asset(item.product.digital_asset_name)
+        except DigitalAssetError as e:
+            # A customer-visible 404, but the reason is only ever logged --
+            # it names server paths.
+            logger.error(
+                "Order #%s: cannot serve the download for %r: %s",
+                order_pk, item.product_name, e)
+            raise Http404("No such download.")
+        return FileResponse(
+            handle, as_attachment=True,
+            filename=f"{item.product.digital_asset_name}.zip",
+            content_type="application/zip")
 
 
 class CheckoutCancelView(View, BaseCartView):

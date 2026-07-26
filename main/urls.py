@@ -11,6 +11,9 @@ urlpatterns = [
     path('products/<str:category>', views.ProductsView.as_view(), name="products"),
     path('subscribe', views.SubscribeView.as_view(), name="subscribe"),
     path('product/<int:pk>', views.ProductView.as_view(), name="product"),
+    # Stable alias for a book, so templates never hardcode a fixture pk.
+    # Redirects to the canonical product/<int:pk>; see BookByIsbnView.
+    path('book/<str:isbn>', views.BookByIsbnView.as_view(), name="book-by-isbn"),
     path('google_products.xml', views.GoogleProductFeed.as_view(), name='googleproducts'),
 
     # Cart
@@ -33,6 +36,12 @@ urlpatterns = [
     path('stripe/webhook', views.StripeWebhookView.as_view(),
          name='stripe-webhook'),
 
+    # Digital fulfilment. The token is a signed, expiring (order, product)
+    # pair; this view is the only way to reach a book archive, which lives
+    # outside every path nginx serves off disk.
+    path('download/<str:token>', views.DigitalDownloadView.as_view(),
+         name='digital-download'),
+
     # Accounts
     path('signup', views.SignupView.as_view(), name='signup'),
     path('login', views.LoginView.as_view(), name='login'),
@@ -43,6 +52,8 @@ urlpatterns = [
     path('about', views.AboutView.as_view(), name="about"),
     path('family', views.FamilyView.as_view(), name="family"),
     path('contact', views.ContactView.as_view(), name="contact"),
+    # Captcha-gated; the invite itself is only ever assembled in the browser.
+    path('discord', views.DiscordJoinView.as_view(), name="discord"),
     path('tos', views.TosView.as_view(), name='tos'),
     path('privacy', views.PrivacyView.as_view(), name='privacy'),
     path('returns', views.ReturnView.as_view(), name='returns'),

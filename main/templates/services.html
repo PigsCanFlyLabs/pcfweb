@@ -1,0 +1,75 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block content %}
+
+<!-- ***** Main Banner Area Start ***** -->
+<div class="page-heading about-page-heading" id="top">
+    <div class="container">
+        <div class="row">
+            <div class="col-lg-12">
+                <div class="inner-content">
+                    <h2>Services</h2>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- ***** Main Banner Area End ***** -->
+
+<!-- ***** Services Area Starts ***** -->
+<section class="our-team">
+    <div class="container">
+        <div class="row">
+            <div class="col-lg-12">
+                <div class="section-heading">
+                    <h2>Services</h2>
+                    <span>Consulting and projects — none of these are bought through the cart. Get in touch and we'll talk.</span>
+                    <span>{{ consulting_scope }}</span>
+                </div>
+            </div>
+            {% for service in services %}
+            <div class="col-lg-6">
+                <div class="team-item">
+                    <div class="down-content">
+                        <h4>
+                            {% if service.url %}
+                            <a href="{{ service.url }}">{{ service.name }}</a>
+                            {% else %}
+                            {{ service.name }}
+                            {% endif %}
+                            {% if service.coming_soon %}
+                            <span class="badge badge-secondary" style="font-size: 0.7rem; vertical-align: middle; background: #aaa; color: #fff; padding: 2px 6px; border-radius: 4px;">Coming Soon</span>
+                            {% endif %}
+                        </h4>
+                        {% if service.kind %}
+                        <span>{{ service.kind }}</span>
+                        {% endif %}
+                        <span>{{ service.description }}</span>
+                        {% if service.credentials %}
+                        {% comment %}
+                            Each book title links through /book/<isbn>, never
+                            /product/<pk>: a fixture primary key in markup
+                            does not fail loudly when the row moves, it keeps
+                            resolving to whatever book later holds it.
+                        {% endcomment %}
+                        <span>{% spaceless %}{% for segment in service.credentials %}{% if segment.isbn %}<a href="{% url 'book-by-isbn' isbn=segment.isbn %}">{{ segment.text }}</a>{% else %}{{ segment.text }}{% endif %}{% endfor %}{% endspaceless %}</span>
+                        {% endif %}
+                        {% if service.note %}
+                        <span><em>{{ service.note }}</em></span>
+                        {% endif %}
+                        {# Enquiries only: no add-to-cart anywhere on this page. #}
+                        <div class="main-border-button">
+                            <a href="{{ service.cta_url }}">{{ service.cta_label }}</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</section>
+<!-- ***** Services Area Ends ***** -->
+
+{% include 'components/subscribe.html' %}
+
+{% endblock content %}

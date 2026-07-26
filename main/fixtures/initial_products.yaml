@@ -18,6 +18,7 @@
       and Scala -- from simple batch jobs to streaming and MLlib.
     price: 3999
     isbn: "9781449358624"
+    print_isbn: "9781449358624"
     amazon_link: "https://www.amazon.com/dp/1449358624"
     # 2015 1st edition has no bookshop.org product page; link to its search.
     bookshop_link: "https://bookshop.org/search?keywords=9781449358624"
@@ -26,6 +27,10 @@
     image_name: "book_covers/learning_spark_1ed.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # On O'Reilly's learning platform, so the Safari trial link is a
+    # true statement for this title. Explicit rather than inferred from
+    # the ISBN -- see Product.on_oreilly_safari.
+    on_oreilly_safari: true
 - model: main.product
   pk: 101
   fields:
@@ -38,6 +43,7 @@
       handle larger data sizes, and use fewer resources.
     price: 4999
     isbn: "9781491943205"
+    print_isbn: "9781491943205"
     amazon_link: "https://www.amazon.com/dp/1491943203"
     bookshop_link: "https://bookshop.org/p/books/high-performance-spark-best-practices-for-scaling-and-optimizing-apache-spark-holden-karau/8133976"
     amazon_in_link: "https://www.amazon.in/dp/1491943203"
@@ -45,6 +51,10 @@
     image_name: "book_covers/high_performance_spark.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # On O'Reilly's learning platform, so the Safari trial link is a
+    # true statement for this title. Explicit rather than inferred from
+    # the ISBN -- see Product.on_oreilly_safari.
+    on_oreilly_safari: true
 - model: main.product
   pk: 102
   fields:
@@ -57,6 +67,7 @@
       Filonenko.
     price: 4999
     isbn: "9781492050124"
+    print_isbn: "9781492050124"
     amazon_link: "https://www.amazon.com/dp/1492050121"
     bookshop_link: "https://bookshop.org/books/kubeflow-for-machine-learning-from-lab-to-production/9781492050124"
     amazon_in_link: "https://www.amazon.in/dp/1492050121"
@@ -64,6 +75,10 @@
     image_name: "book_covers/kubeflow_for_ml.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # On O'Reilly's learning platform, so the Safari trial link is a
+    # true statement for this title. Explicit rather than inferred from
+    # the ISBN -- see Product.on_oreilly_safari.
+    on_oreilly_safari: true
 - model: main.product
   pk: 103
   fields:
@@ -75,6 +90,7 @@
       complexity of traditional distributed systems.
     price: 6599
     isbn: "9781098118808"
+    print_isbn: "9781098118808"
     amazon_link: "https://www.amazon.com/dp/1098118804"
     bookshop_link: "https://bookshop.org/search?keywords=9781098118808"
     amazon_in_link: "https://www.amazon.in/dp/1098118804"
@@ -82,3 +98,172 @@
     image_name: "book_covers/scaling_python_with_ray.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # On O'Reilly's learning platform, so the Safari trial link is a
+    # true statement for this title. Explicit rather than inferred from
+    # the ISBN -- see Product.on_oreilly_safari.
+    on_oreilly_safari: true
+# "Distributed Computing 4 Kids (and Executives)", in three SKUs sharing one
+# cover. Unlike the four O'Reilly titles above, this one is ours to sell and
+# ours to hand out -- which is what sells_ebook records on the e-book.
+#
+# Both print editions' ISBNs are assigned and set below, and they are
+# different from each other -- a distinct ISBN is the entire premise of the
+# Executive Edition, and get_gtin() feeds the Google Merchant feed, where two
+# SKUs sharing one id is a duplicate. Add each real ISBN here as it is
+# assigned; never placehold one with zeros or a copy of a sibling's.
+#
+# The e-book's ISBN lives in `ebook_isbn`, never in `isbn` -- an EPUB gets its
+# own ISBN, and get_display_text() offers "available signed on request"
+# whenever `print_isbn` is set, which for a PDF would mean offering to sign a
+# download.
+#
+# Each row carries exactly the identifier for the format it actually is:
+# print-only SKUs get `print_isbn`, the digital SKU gets `ebook_isbn`, and
+# neither is copied across to the other. get_gtin() resolves
+# `print_isbn or ebook_isbn or upc`, so duplicating one identifier onto a
+# sibling row would give two SKUs the same GTIN in the Google Merchant feed --
+# which the catalogue-wide uniqueness test correctly rejects.
+- model: main.product
+  pk: 104
+  fields:
+    name: "Distributed Computing 4 Kids (and Executives)"
+    description: >-
+      Distributed systems, explained for kids and for the executives who fund
+      them. Follow a cast of friends — and their garden gnomes — as they use
+      data to become influencers, pick up Python along the way, and work out
+      how to give the gnomes a well-earned break. It's the same clear account
+      of how computers collaborate that makes a Spark, Databricks, or Fabric
+      conversation click, minus the jargon. Written and illustrated by Holden
+      Karau.
+    price: 2000
+    # Standard print edition. Self-published, so this ISBN is ours; it is not
+    # an O'Reilly title and on_oreilly_safari stays unset accordingly.
+    isbn: "9781960595997"
+    # Print-only SKU, so the print ISBN and nothing else. `isbn` is the legacy
+    # column; the migration's isbn -> print_isbn backfill runs before this row
+    # exists, so print_isbn has to be set here explicitly or this SKU loses its
+    # <g:gtin> in the Merchant feed and its "signed on request" note.
+    print_isbn: "9781960595997"
+    image_name: "book_covers/distributed_computing_4_kids.jpg"
+    cat: "B"
+    # get_brand() defaults the Books category to O'Reilly, which is right for
+    # the four titles above and wrong for this one.
+    brand: "Pigs Can Fly Labs"
+    tax_code: "txcd_35010000"
+    delivery_type: "PHYSICAL"
+    sells_ebook: false
+- model: main.product
+  pk: 105
+  fields:
+    name: "Distributed Computing 4 Kids (and Executives) — Executive Edition"
+    # The owner's own copy, verbatim -- embedded double quotes, apostrophes,
+    # literal $ and all. A folded block scalar so none of it needs escaping;
+    # test_dc4k pins the loaded string character for character, so reflow the
+    # source lines if you must but do not edit the words.
+    #
+    # The closing sentence carries no dollar figure on purpose: the copy
+    # already says "(roughly) $10.42 more" and `price` below is 3042, so a
+    # second figure in the closer would contradict both on the product page.
+    description: >-
+      This special executive edition is the almost exact same content as
+      regular Distributed Computing 4 Kids and Executives but it costs
+      (roughly) $10.42 more with a different ISBN. You might be saying to
+      yourself, "Holden, why would I want this special executive edition?"
+      the answer is to be even more executive, and support creation of books
+      like these. You're not just reading a book for kids and executives,
+      you're reading the executive edition. The extra also helps keep a
+      developer from turning to a life of enterprise support contracts.
+    price: 3042
+    # Its own ISBN, distinct from pk 104's -- that difference is what this SKU
+    # is. Self-published like the standard edition, so on_oreilly_safari stays
+    # unset: the Safari link tracks the publisher, never the ISBN.
+    isbn: "9781960595003"
+    # Print-only as well -- there is no separate Executive e-book -- so
+    # ebook_isbn stays unset rather than borrowing pk 106's.
+    print_isbn: "9781960595003"
+    image_name: "book_covers/distributed_computing_4_kids.jpg"
+    cat: "B"
+    brand: "Pigs Can Fly Labs"
+    tax_code: "txcd_35010000"
+    delivery_type: "PHYSICAL"
+    sells_ebook: false
+- model: main.product
+  pk: 106
+  fields:
+    name: "Distributed Computing 4 Kids (and Executives) — E-book"
+    description: >-
+      Distributed systems, explained for kids and for the executives who fund
+      them. Follow a cast of friends — and their garden gnomes — as they use
+      data to become influencers, pick up Python along the way, and work out
+      how to give the gnomes a well-earned break. It's the same clear account
+      of how computers collaborate that makes a Spark, Databricks, or Fabric
+      conversation click, minus the jargon. Written and illustrated by Holden
+      Karau. Delivered by email as a DRM-free ZIP containing both the EPUB and
+      the PDF.
+    # Pay what you want: this is the amount Stripe pre-fills as a suggestion,
+    # not a price. The floor is zero, on the owner's explicit instruction.
+    price: 1500
+    is_pwyw: true
+    # Digital and print-less: only ebook_isbn. `isbn` stays unset on purpose --
+    # setting it would put "available signed on request" on a download.
+    ebook_isbn: "9781960595980"
+    image_name: "book_covers/distributed_computing_4_kids.jpg"
+    cat: "B"
+    brand: "Pigs Can Fly Labs"
+    # Digital Books - downloaded - non-subscription - with permanent rights.
+    # Not the physical-books code: a download is taxed differently from a
+    # printed book in a lot of US states.
+    tax_code: "txcd_10302000"
+    delivery_type: "DIGITAL"
+    # This one is ours to distribute, so fulfilment is allowed to send it.
+    sells_ebook: true
+    # <stem>.zip under settings.BOOK_ASSET_ROOT; must match the archive
+    # committed to the pcfweb-book-assets repo.
+    digital_asset_name: "distributed_computing_4_kids"
+# "Fast Data Processing with Spark" (Packt, 2013) -- Holden's first book and
+# the first book written about Apache Spark. Listed for the history, not for
+# sale: noorder makes is_purchasable() false, which suppresses the buy button,
+# and keeps the row out of /products, the homepage highlights and the Google
+# Merchant feed. It keeps a product page, reachable by direct link and by
+# /book/9781782167068, which is what the /services credentials link to.
+#
+# print_asin is deliberately NOT set here even though the ASIN is known
+# (1782167064). ASINs are in seed_products' SEED_PROTECTED_FIELDS, so a
+# fixture carrying one makes the seed command exit 1 -- which under `set -e`
+# in scripts/start-server.sh stops the primary pod from booting. It is also
+# redundant: get_amazon_link() prefers an explicit amazon_link, which is set
+# below, so the ASIN would never be consulted for this row. Set it in the
+# admin if it is ever wanted.
+- model: main.product
+  pk: 107
+  fields:
+    name: "Fast Data Processing with Spark"
+    description: >-
+      My first book, and the first book written about Apache Spark. It covers
+      Spark 0.x, so it is now comprehensively out of date — the API it teaches
+      has been superseded several times over. It's here for the history rather
+      than the instruction. For actually getting work done, High Performance
+      Spark and Learning Spark cover this ground far better, and Kubeflow for
+      Machine Learning and Scaling Python with Ray go deeper on the ML side.
+      Not sold here — available from Amazon.
+    # Not sold through this site, so there is no price to charge. The product
+    # page suppresses the price entirely rather than showing a bare 0.00.
+    price: 0
+    noorder: true
+    isbn: "9781782167068"
+    print_isbn: "9781782167068"
+    amazon_link: "https://www.amazon.com/Fast-Processing-Spark-Holden-Karau/dp/1782167064"
+    # No cover art yet. check-product-images.sh skips empty values, so this
+    # does not fail the build guard; add the file and the name together.
+    image_name: ""
+    cat: "B"
+    # get_brand() defaults the Books category to O'Reilly. This one is Packt,
+    # and saying otherwise on the page that exists to record who published
+    # what would be plainly wrong.
+    brand: "Packt"
+    tax_code: "txcd_35010000"
+    # Packt, not O'Reilly, so the Safari trial link is not a true statement
+    # for this title.
+    on_oreilly_safari: false
+    delivery_type: "PHYSICAL"
+    sells_ebook: false

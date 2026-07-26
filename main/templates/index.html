@@ -18,7 +18,7 @@
     </div>
     <!-- ***** Main Banner Area End ***** -->
 
-    <!-- ***** Space Beaver Area Starts ***** -->
+    <!-- ***** Explore Area Starts ***** -->
     <section class="" id="explore">
 	<div class="container">
 	    <div class="row">
@@ -26,12 +26,12 @@
 		    <div class="left-content">
 			<h2>Welcome to Pigs Can Fly Labs</h2>
 			<span>
-			  Pigs Can Fly Labs is a San Francisco trans-owned company providing value-priced queer and nerdy stuff, including IP transit in FMT2, and soon to launch open-source programmable satellite messaging, technical books, high viz gear, and light controllers to help you be seen, and queer merch.
+			  Pigs Can Fly Labs is a San Francisco trans-owned company providing value-priced queer and nerdy stuff, including technical books, high viz gear, and light controllers to help you be seen, and queer merch.
 			</span>
 			<div class="quote">
 			  <i class="fa fa-quote-left"></i>
 			  <p>
-"nothing has exploded in a firey death" -- Our first IP transit customer
+"nothing has exploded in a firey death" -- One of our first customers.
 			  </p>
 			</div>
 			<div class="main-border-button">
@@ -46,29 +46,28 @@
 		    <div class="right-content">
 			<div class="row">
 			    <div class="col-lg-6">
-				<div class="leather">
-				    <h4>Space Beaver</h4>
-				    <span>Open Source Programmable Satellite Communication</span>
-				</div>
-			    </div>
-			    <div class="col-lg-6">
-				<div class="first-image">
-				    <img src="{% static_thumbnail 'assets/images/spacebeaver-logo.png' 200x200 %}" alt="SpaceBeaver Logo" style="width:200px;height:200px">
-				</div>
-			    </div>
-			    <div class="col-lg-6">
-			      <div class="second-image">
-				<a href="{% url 'services' %}">
-				  <img src="{% static_thumbnail 'assets/images/servers.jpg' 200x200 %}" alt="SpaceBeaver Logo" style="width:200px;height:200px">
-				  </a>
-				</div>
-			    </div>
-			    <div class="col-lg-6">
 			      <div class="types">
-				<a href="{% url 'services' %}">
-				    <h4>IP Transit</h4>
-				    <span>Low-Commit backup transit in FMT2</span>
+				<a href="{{ liberated_bread_url }}">
+				    <h4>Liberated Bread <span class="badge badge-secondary" style="font-size: 0.7rem; vertical-align: middle; background: #aaa; color: #fff; padding: 2px 6px; border-radius: 4px;">Coming Soon</span></h4>
+				    <span>The same company as Pigs Can Fly Labs, with its own site</span>
 				    </a>
+				</div>
+			    </div>
+			    <div class="col-lg-6">
+			      {# Linked through the object the view resolved, never a #}
+			      {# hardcoded pk: a pk that moves keeps resolving, just  #}
+			      {# to the wrong product. No book seeded, no card.       #}
+			      <div class="second-image">
+				{% if featured_book %}
+				<a href="{% url 'product' featured_book.pk %}">
+				  <img src="{{ featured_book.get_thumb }}" alt="{{ featured_book.name }}" style="width:200px;height:200px">
+				  </a>
+				{% else %}
+				<a href="{% url 'products' 'B' %}">
+				    <h4>Distributed Computing 4 Kids (and Executives)</h4>
+				    <span>Our new book</span>
+				  </a>
+				{% endif %}
 				</div>
 			    </div>
 			</div>
@@ -77,7 +76,7 @@
 	    </div>
 	</div>
     </section>
-    <!-- ***** Space Beaver Area Ends ***** -->
+    <!-- ***** Explore Area Ends ***** -->
     {% for cat_label, products in highlights %}
     <section class="" id="books">
 	<div class="container">

@@ -20,6 +20,12 @@ sent_emails/
 # GeoLite2 database downloads (bundled into the image at build time)
 geoip/
 
+# Book archives, staged here by build.sh out of the sibling pcfweb-book-assets
+# checkout and baked into the image. They are large Git LFS objects owned by
+# that repository, so they are not committed here -- but note they are
+# deliberately absent from .dockerignore, or they would never reach the image.
+book-assets/
+
 # Flask stuff:
 instance/
 .webassets-cache

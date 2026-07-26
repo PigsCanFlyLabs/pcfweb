@@ -53,12 +53,40 @@
 	    </div>
 	    <div class="col-lg-4">
 		<div class="right-content">
-		    <h4>{{ product.name }} {{ product.stock_description }}</h4>
+		    <h4>{{ product.name }}{% if not product.noorder %} {{ product.stock_description }}{% endif %}</h4>
+		    {% comment %}
+		       A noorder product is not sold through this site at all, so
+		       its price is meaningless -- and for a title listed only for
+		       the publishing history that price is 0, which rendered as a
+		       bare "0.00" above a page with no buy button. That reads as
+		       broken rather than as "we don't carry this". Everything
+		       implying an order is suppressed together: the stock marker
+		       (which would say the book is temporarily unavailable rather
+		       than never-sold-here), the price, the quantity picker, the
+		       running total and the shipping notice. What stays is where
+		       you can actually get it.
+
+		       A comment block rather than the single-brace form, which
+		       is single-line only -- a multi-line one is served to the
+		       browser verbatim instead of being stripped.
+		    {% endcomment %}
+		    {% if product.noorder %}
+		    <span class="price">Not sold here</span>
+		    {% if product.get_amazon_link %}
+		    <p><a href="{{ product.get_amazon_link }}">Available from Amazon</a></p>
+		    {% endif %}
+		    {% else %}
 		    <span class="price">{{ product.get_display_price }}</span>
+		    {% endif %}
+		    {% if product.is_pwyw %}
+		    <p><strong>Pay what you want.</strong> That price is a
+		      suggestion, not a price &mdash; you set your own amount at
+		      checkout, and nothing at all is a valid amount.</p>
+		    {% endif %}
 		    {# get_display_text returns escaped markup (format_html), so #}
 		    {# this needs no autoescape override. #}
 		    <span>{{ product.get_display_text }}</span>
-		    {% if product.is_physical_good %}
+		    {% if product.is_physical_good and not product.noorder %}
 		    {% include 'components/shipping-notice.html' %}
 		    {% endif %}
 		    {# The quantity input is a real field of this form and the
@@ -68,6 +96,7 @@
 		    <form id="add-to-cart-form" method="POST"
 			  action="{% url 'add-to-cart' product_id=product.pk quantity=1 %}">
 			{% csrf_token %}
+			{% if not product.noorder %}
 			<div class="quantity-content">
 			    <div class="left-content">
 				<h6>No. of Orders</h6>
@@ -81,8 +110,11 @@
 				</div>
 			    </div>
 			</div>
+			{% endif %}
 			<div class="total">
+			    {% if not product.noorder %}
 			    <h4 class="calc-total">Total: </h4>
+			    {% endif %}
 			    {% if product.is_purchasable %}
 			    <div class="main-border-button"><button type="submit" style="margin-top: 0;">
 				{{product.buy_text}}
@@ -124,8 +156,16 @@
     }
 
     function calculateTotal() {
+	// A noorder product renders neither the quantity input nor the total,
+	// so there is nothing to compute and nowhere to put it. Without this
+	// the page-load call below throws on a null querySelector and takes
+	// the rest of this block's handlers down with it.
+	const totalEl = document.querySelector('h4.calc-total');
+	if (!totalEl || quantityInput.length === 0) {
+	    return null;
+	}
 	let total = (quantityInput.val() * parseFloat("{{ product.get_display_price }}")).toFixed(2);
-	document.querySelector('h4.calc-total').innerHTML = `Total: $${total}`;
+	totalEl.innerHTML = `Total: $${total}`;
 	return total;
     }
 

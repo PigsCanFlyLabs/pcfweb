@@ -42,14 +42,25 @@
                                         </div>
                                     </div>
                                 </td>
+                                {% comment %}
+                                    Same rule as the product page: a noorder
+                                    product is not sold here, so it must not
+                                    advertise a price. A line can still be in
+                                    a cart from before the flag was set, and
+                                    checkout refuses it either way -- so a
+                                    price and a line total here would quote a
+                                    number the customer is never charged. It
+                                    is left out of the cart total too; see
+                                    CartView.
+                                {% endcomment %}
                                 <td>
-                                    <h6>${{ product.product.get_display_price }}</h6>
+                                    <h6>{% if product.product.noorder %}Not sold here{% else %}${{ product.product.get_display_price }}{% endif %}</h6>
                                 </td>
                                 <td>
                                     <h6>{{ product.quantity }}</h6>
                                 </td>
                                 <td>
-                                    <h6>{{ product.total_display_price }}</h6>
+                                    <h6>{% if product.product.noorder %}&mdash;{% else %}{{ product.total_display_price }}{% endif %}</h6>
                                 </td>
                                 <td class="main-border-button">
                                     <form method="POST" action="{% url 'remove-from-cart' product.pk %}">
@@ -69,6 +80,30 @@
         <div class="row">
             <div class="col-lg-12">
                 {% include 'components/shipping-notice.html' %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if has_unavailable %}
+        <div class="row">
+            <div class="col-lg-12">
+                <div class="alert alert-warning unavailable-notice" role="alert">
+                    <strong>Heads up:</strong> this cart holds something we do
+                    not sell here. It is not included in the total, and
+                    checkout will not accept it &mdash; remove it to carry on.
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if has_pwyw %}
+        <div class="row">
+            <div class="col-lg-12">
+                <div class="alert alert-info pwyw-notice" role="alert">
+                    <strong>Heads up:</strong> this cart holds a pay-what-you-want
+                    item, so the total below is a suggestion. You choose what you
+                    actually pay for it at checkout.
+                </div>
             </div>
         </div>
         {% endif %}

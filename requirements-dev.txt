@@ -43,3 +43,8 @@ django-stubs-ext==5.2.9
 types-PyYAML==6.0.12.20260724
 # runserver_plus (run_local.sh)
 werkzeug>=3.1,<4
+# Also runserver_plus, for its --cert-file/--key-file TLS mode, which is how
+# run_local.sh starts. Without it the script dies on "Python OpenSSL Library
+# is required to use runserver_plus with ssl support" after doing all its
+# setup work -- werkzeug alone is not enough.
+pyOpenSSL>=24,<27
