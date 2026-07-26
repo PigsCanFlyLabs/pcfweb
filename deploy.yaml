@@ -12,6 +12,18 @@ data:
   DBHOST: "pcfweb-pg-rw"
   DBNAME: "pigscanfly"
   DBUSER: "pigscanfly"
+  # The /discord invite, kept as two halves that are never concatenated
+  # server-side: the page ships both to the browser only after a captcha and
+  # lets JavaScript join them, so a crawler reading the HTML does not walk away
+  # with a working invite. Split them anywhere -- the view only requires that
+  # the halves concatenate to https://discord.gg/<code>.
+  #
+  # This is a ConfigMap, not a Secret: a Discord invite is a link we hand out
+  # in public, so the value is not secret, it just should not be trivially
+  # harvestable. Rotating the invite is an edit here plus a pod restart; unset
+  # both halves and /discord becomes the "e-mail us for an invite" page.
+  DISCORD_INVITE_PART_ONE: "https://discord.gg/aVU2"
+  DISCORD_INVITE_PART_TWO: "2HAmb"
 ---
 apiVersion: apps/v1
 kind: Deployment
