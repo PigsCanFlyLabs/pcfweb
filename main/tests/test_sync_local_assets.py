@@ -493,6 +493,285 @@ class WarnModeContractTest(SyncLocalAssetsTestCase):
         self.assertEqual(before, self.dest_names())
 
 
+class SymlinkedSourceTest(SyncLocalAssetsTestCase):
+    """A symlinked images/ used to walk straight past both guards.
+
+    `cp -a` preserves a symlinked final component instead of copying the tree
+    behind it. `find -type f` then matches nothing and check-image-assets.sh
+    does not read through a symlink, so the size ceiling and the LFS pointer
+    detector both reported success over a directory neither had looked inside:
+    exit 0, "Synced 0 image asset(s)", pointers and oversized masters waved
+    through. A guard that silently does nothing is worse than no guard,
+    because it reports success.
+
+    Fixed by copying through the link (`"$source_images/."` plus -L) rather
+    than by refusing it, so that `images -> /mnt/big-disk/assets` stays a
+    supported layout, with an assertion afterwards that nothing symlinked
+    survived into the tree the guards are about to read.
+    """
+
+    def link_source(self, relative=False):
+        """Turn images/ into a symlink pointing at a sibling directory."""
+        real = self.assets_dir / "real-images"
+        self.source_images.rename(real)
+        self.source_images.symlink_to(real.name if relative else real)
+        self.assertTrue(self.source_images.is_symlink())
+        return real
+
+    def test_a_pointer_behind_a_symlinked_source_is_caught(self):
+        """The reviewer's reproduction. Was exit 0 with no pointer reported."""
+        real = self.link_source()
+        (real / "book_covers" / COVERS[0]).write_text(LFS_POINTER)
+
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_FATAL)
+        self.assertIn("unmaterialised Git LFS pointers", result.stderr)
+        self.assertIn(str(self.dest / "book_covers" / COVERS[0]),
+                      result.stderr)
+
+    def test_an_oversized_file_behind_a_symlinked_source_is_caught(self):
+        real = self.link_source()
+        huge = real / "panorama.jpg"
+        huge.write_bytes(b"\xff\xd8\xff")
+        os.truncate(huge, 6_000_001)
+
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_FATAL)
+        self.assertIn("image assets over 5MB", result.stderr)
+        self.assertIn("panorama.jpg", result.stderr)
+
+    def test_the_destination_is_a_real_directory_not_a_copied_symlink(self):
+        self.link_source()
+
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_OK, result.stderr)
+        self.assertTrue(self.dest.is_dir())
+        self.assertFalse(self.dest.is_symlink())
+
+    def test_the_guards_have_real_files_to_inspect(self):
+        """The invariant, stated directly: after a successful sync there are
+        real files under the destination for the guards to read."""
+        self.link_source()
+
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_OK, result.stderr)
+        real_files = [p for p in self.dest.rglob("*")
+                      if p.is_file() and not p.is_symlink()]
+        self.assertEqual(len(real_files), 6)
+        self.assertNotIn("Synced 0 image asset(s)", result.stdout)
+
+    def test_a_healthy_symlinked_source_still_syncs(self):
+        """Followed, not refused: this is a legitimate layout."""
+        self.link_source()
+
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_OK, result.stderr)
+        for name in COVERS:
+            with self.subTest(cover=name):
+                self.assertTrue((self.dest / "book_covers" / name).is_file())
+
+    def test_a_relative_symlink_target_is_followed_too(self):
+        """The relative case dangles once copied, so it failed differently --
+        and was reported as a fixture content mismatch, which it is not."""
+        self.link_source(relative=True)
+
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_OK, result.stderr)
+        self.assertTrue((self.dest / "book_covers" / COVERS[0]).is_file())
+        self.assertNotIn("genuine content mismatch", result.stderr)
+
+    def test_an_internal_symlink_is_dereferenced(self):
+        """One level down, the hole is identical: a symlinked file inside
+        images/ is skipped by find -type f and by the pointer detector."""
+        outside = self.root / "outside.jpg"
+        outside.write_text(LFS_POINTER)
+        (self.source_images / "linked.jpg").symlink_to(outside)
+
+        result = self.run_sync()
+
+        # It landed as a real file, so the pointer detector could read it.
+        self.assertEqual(result.returncode, EXIT_FATAL)
+        self.assertIn("unmaterialised Git LFS pointers", result.stderr)
+        self.assertIn(str(self.dest / "linked.jpg"), result.stderr)
+
+    def test_a_dangling_internal_symlink_fails_the_copy(self):
+        """Deliberate consequence of -L, and the safer outcome: it used to
+        land as a broken link that every guard skipped and every page 404d."""
+        (self.source_images / "broken.jpg").symlink_to("/nowhere/nothing.jpg")
+
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_FATAL)
+        self.assertIn("copying the image assets failed", result.stderr)
+
+    def test_the_no_symlinks_assertion_is_present(self):
+        """A tripwire, and the one thing here with no behavioural test.
+
+        With the copy flags correct nothing symlinked can reach the staged
+        tree, so the assertion is unreachable -- which is what makes it a
+        tripwire rather than a guard. Its value is in what it does when the
+        flags are wrong: dropping the -L turns a silent fail-open into a loud
+        refusal *because of this block*, which
+        test_an_internal_symlink_is_dereferenced then catches. Pinned here so
+        it cannot be deleted as dead code.
+        """
+        source = (REPO_ROOT / "scripts" / "sync-local-assets.sh").read_text()
+
+        self.assertIn('find "$staging" -type l', source)
+        self.assertIn("cannot be trusted", source)
+        # It has to gate the install, not merely print.
+        self.assertLess(source.index('find "$staging" -type l'),
+                        source.index('mv "$staging" "$dest"'))
+
+    def test_a_dangling_source_symlink_says_it_does_not_resolve(self):
+        """"Missing" reads wrong when ls shows them an images entry."""
+        self.source_images.rename(self.assets_dir / "moved")
+        self.source_images.symlink_to(self.assets_dir / "gone")
+
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_FATAL)
+        self.assertIn("does not resolve", result.stderr)
+        self.assertIn("gone", result.stderr)
+
+
+class SymlinkedDestinationTest(SyncLocalAssetsTestCase):
+    """The mirror case: could `rm -rf "$dest"` reach outside the destination?
+
+    It cannot, because rm never recurses through a symlink -- it unlinks the
+    link. But `rm -rf "$dest"/`, one character different, deletes the target's
+    contents instead. These tests pin the safe behaviour so that character
+    cannot reappear unnoticed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.outside = self.root / "precious"
+        self.outside.mkdir()
+        (self.outside / "important.txt").write_text("must survive\n")
+        self.dest.symlink_to(self.outside)
+
+    def test_the_symlink_target_is_not_touched(self):
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_OK, result.stderr)
+        self.assertTrue(self.outside.is_dir())
+        self.assertEqual((self.outside / "important.txt").read_text(),
+                         "must survive\n")
+
+    def test_the_destination_is_replaced_by_a_real_directory(self):
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_OK, result.stderr)
+        self.assertFalse(self.dest.is_symlink())
+        self.assertTrue((self.dest / "book_covers" / COVERS[0]).is_file())
+
+    def test_nothing_was_written_into_the_symlink_target(self):
+        self.run_sync()
+
+        self.assertEqual(
+            {p.name for p in self.outside.iterdir()}, {"important.txt"})
+
+
+class AtomicStagingTest(SyncLocalAssetsTestCase):
+    """The copy is staged and renamed, so a failure cannot leave a deleted or
+    half-written tree. This PR removed a README instruction that read
+    "build.sh ... leaves your local images deleted -- re-clone to recover";
+    another route to that state would have undone it."""
+
+    def break_the_copy(self):
+        """An unreadable source file makes cp fail partway through."""
+        victim = self.source_images / "book_covers" / COVERS[2]
+        victim.chmod(0)
+        self.addCleanup(victim.chmod, 0o644)
+
+    def test_a_failed_copy_leaves_the_previous_tree_byte_for_byte(self):
+        self.make_stale_dest()
+        before = {name: (self.dest / name).read_bytes()
+                  for name in self.dest_names()}
+        self.break_the_copy()
+
+        result = self.run_sync()
+
+        self.assertNotEqual(result.returncode, EXIT_OK)
+        after = {name: (self.dest / name).read_bytes()
+                 for name in self.dest_names()}
+        self.assertEqual(before, after)
+
+    def test_a_failed_copy_says_nothing_was_installed(self):
+        self.make_stale_dest()
+        self.break_the_copy()
+
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_FATAL)
+        self.assertIn("copying the image assets failed", result.stderr)
+        self.assertIn("exactly as", result.stderr)
+
+    def test_a_failed_copy_with_no_previous_tree_creates_nothing(self):
+        self.break_the_copy()
+
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_FATAL)
+        self.assertFalse(self.dest.exists())
+
+    def test_no_staging_directory_survives_a_success(self):
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_OK, result.stderr)
+        self.assertEqual(list(self.static_assets.glob(".images.staging.*")),
+                         [])
+
+    def test_no_staging_directory_survives_a_failure(self):
+        """The EXIT trap has to fire on problem()'s exit 1 as well."""
+        self.break_the_copy()
+
+        result = self.run_sync()
+
+        self.assertNotEqual(result.returncode, EXIT_OK)
+        self.assertEqual(list(self.static_assets.glob(".images.staging.*")),
+                         [])
+
+    def test_no_staging_directory_survives_a_guard_failure(self):
+        (self.covers_dir / COVERS[0]).write_text(LFS_POINTER)
+
+        result = self.run_sync()
+
+        self.assertEqual(result.returncode, EXIT_FATAL)
+        self.assertEqual(list(self.static_assets.glob(".images.staging.*")),
+                         [])
+
+    def test_the_staging_directory_is_beside_the_destination(self):
+        """It has to share a filesystem with the destination or the rename is
+        a cross-device copy, which is neither atomic nor cheap."""
+        source = (REPO_ROOT / "scripts" / "sync-local-assets.sh").read_text()
+
+        self.assertIn('staging="$STATIC_ASSETS_DIR/.images.staging.$$"',
+                      source)
+        self.assertIn('trap \'rm -rf "$staging"\' EXIT INT TERM', source)
+
+    def test_the_tree_is_renamed_rather_than_copied_into_place(self):
+        source = (REPO_ROOT / "scripts" / "sync-local-assets.sh").read_text()
+
+        self.assertIn('mv "$staging" "$dest"', source)
+        # The old shape: a copy straight onto the live path.
+        self.assertNotIn('cp -af "$source_images" "$STATIC_ASSETS_DIR/"',
+                         source)
+
+    def test_the_staging_leftovers_are_gitignored(self):
+        """A SIGKILL is the one case the trap cannot cover."""
+        ignored = (REPO_ROOT / ".gitignore").read_text()
+
+        self.assertIn("main/static/assets/.images.staging.*", ignored)
+
+
 class CallerContractTest(SimpleTestCase):
     """Both callers use the one script, and only one of them relaxes it."""
 
