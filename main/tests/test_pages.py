@@ -181,7 +181,7 @@ class ServicesPageTest(ServicesPageMixin, TestCase):
             text,
             "From the co-author of Learning Spark (1st edition) and High "
             "Performance Spark (1st and 2nd editions), and author of Fast "
-            "Data Processing with Spark - the first book written about "
+            "Data Processing with Spark — the first book written about "
             "Apache Spark.")
         # The hedge must not creep back in.
         self.assertNotIn("one of the first", text)

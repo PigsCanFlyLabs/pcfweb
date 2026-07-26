@@ -76,6 +76,33 @@ class BookByIsbnRedirectTest(TestCase):
                 self.assertEqual(
                     self.client.get(f"/book/{raw}").status_code, 404)
 
+    def test_an_over_long_isbn_is_rejected_without_querying(self):
+        """No reason to normalise and run three lookups over a huge URL.
+
+        Not a validity check -- anything that is not a real ISBN 404s on the
+        lookup anyway. This just bounds the work an arbitrary URL can cause.
+        """
+        over_long = "9" * (BookByIsbnView.MAX_ISBN_LENGTH + 1)
+
+        with self.assertNumQueries(0):
+            response = self.client.get(f"/book/{over_long}")
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_very_long_url_is_still_rejected(self):
+        response = self.client.get("/book/" + "1" * 5000)
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_the_bound_is_generous_enough_for_a_separated_isbn13(self):
+        """The cap must not reject something a person would plausibly paste."""
+        self.assertGreaterEqual(BookByIsbnView.MAX_ISBN_LENGTH, len("978-1-960595-99-7"))
+
+        response = self.client.get("/book/978 - 1 - 960595 - 99 - 7")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/product/104")
+
     def test_the_redirect_target_actually_renders(self):
         """A 302 to a 404 would be a worse bug than no route at all."""
         for isbn, pk in self.CATALOGUE.items():

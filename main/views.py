@@ -379,7 +379,7 @@ class ServicesView(View):
                     self.HIGH_PERFORMANCE_SPARK,
                     ", and author of ",
                     self.FAST_DATA_PROCESSING,
-                    " - the first book written about Apache Spark.",
+                    " — the first book written about Apache Spark.",
                 ),
                 "url": None,
                 "cta_label": (
@@ -468,6 +468,13 @@ class BookByIsbnView(View):
     # is last because it is the one being migrated away from.
     ISBN_FIELDS = ("print_isbn", "ebook_isbn", "isbn")
 
+    # An ISBN-13 is 13 digits and an ISBN-10 is 10; the column is 20. This is
+    # generous room for separators on top of that, not a validity check --
+    # anything that is not a real ISBN 404s on the lookup anyway. The point is
+    # only that there is no reason to normalise and then run three queries
+    # against a megabyte of URL.
+    MAX_ISBN_LENGTH = 32
+
     @staticmethod
     def normalise(raw: str) -> str:
         """Strip the separators people paste ISBNs with.
@@ -479,6 +486,11 @@ class BookByIsbnView(View):
         return re.sub(r"[\s\-‐-―]", "", raw).upper()
 
     def get(self, request, isbn):
+        # Bounded before normalising, so an over-long URL is rejected without
+        # running a regex substitution over it either.
+        if len(isbn) > self.MAX_ISBN_LENGTH:
+            raise Http404("ISBN too long")
+
         normalised = self.normalise(isbn)
         if not normalised:
             raise Http404("No ISBN given")
