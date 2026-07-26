@@ -30,9 +30,14 @@
   <p>After submitting, the visitor lands on a thank-you page here. To send
     them back to the other site instead, add
     <code>&lt;input type="hidden" name="next" value="https://example.org/thanks"&gt;</code>
-    — that only works for hosts listed in
-    <code>MAILING_LIST_REDIRECT_HOSTS</code>, so an open redirect cannot be
-    built out of it.</p>
+    over https. That is only honoured for sites we have been told about, so
+    an open redirect cannot be built out of it. Already set up{% if redirect_hosts %}
+    (with or without <code>www.</code>){% endif %}:</p>
+  <ul>
+    {% for host in redirect_hosts %}<li><code>{{ host }}</code></li>{% empty %}
+    <li>nothing yet — a <code>next</code> will be ignored and the visitor
+      gets our thank-you page</li>{% endfor %}
+  </ul>
 
   <h3>2. An iframe</h3>
   <p>Keeps the visitor on the other site without any redirect setup.</p>

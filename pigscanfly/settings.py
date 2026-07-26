@@ -31,6 +31,27 @@ def parse_comma_list(raw: str) -> List[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def with_www(*sites: str) -> List[str]:
+    """Each domain in both the spellings a browser might send.
+
+    A form on www.example.com sends a `next` on www.example.com, and the
+    redirect allowlist matches the host exactly, so listing only the apex
+    silently drops half the traffic from our own sites.
+    """
+    return [domain for site in sites for domain in (site, f"www.{site}")]
+
+
+def merge_hosts(defaults: List[str], raw: str) -> List[str]:
+    """The built-in hosts plus any the environment adds, without duplicates.
+
+    Takes `defaults` as an argument rather than reading it from the calling
+    class body: a comprehension has its own scope and cannot see class
+    attributes, which fails at import time rather than anywhere useful.
+    """
+    return defaults + [host for host in parse_comma_list(raw)
+                       if host not in defaults]
+
+
 def parse_shipping_rates(raw: str) -> List[str]:
     """Split a comma-separated STRIPE_SHIPPING_RATES value into ids.
 
@@ -239,11 +260,27 @@ class Base(Configuration):
     MAILING_LIST_BASE_URL = os.getenv(
         "MAILING_LIST_BASE_URL", "https://www.pigscanfly.ca")
 
+    # Our other sites, which host an embedded signup form posting back here.
+    # Both spellings of each: a form on www.example.com sends a `next` on
+    # www.example.com, and the host has to match exactly.
+    MAILING_LIST_SITE_DOMAINS: List[str] = with_www(
+        "liberatedbread.com",
+        "distributedcomputing4kids.com",
+        "distributedcomputing4executives.com",
+        "highperformancespark.com",
+    )
+
     # Hosts a signup form is allowed to bounce the visitor back to via its
     # `next` field, on top of ALLOWED_HOSTS. This is the allowlist that keeps
-    # the CSRF-exempt signup endpoint from being an open redirect, so only add
-    # sites we actually run. Comma-separated, hostnames only.
-    MAILING_LIST_REDIRECT_HOSTS: List[str] = parse_comma_list(
+    # the CSRF-exempt signup endpoint from being an open redirect, so only
+    # sites we actually run belong here.
+    #
+    # The environment variable *adds* to the list above rather than replacing
+    # it: a new site should not be addable only by restating the existing ones,
+    # because getting that wrong silently breaks the forms already deployed on
+    # them. Comma-separated, hostnames only.
+    MAILING_LIST_REDIRECT_HOSTS: List[str] = merge_hosts(
+        MAILING_LIST_SITE_DOMAINS,
         os.getenv("MAILING_LIST_REDIRECT_HOSTS", ""))
 
     # Confirmation emails one address's source may trigger per hour. The

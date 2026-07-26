@@ -6,8 +6,11 @@ does *not* open up -- an open redirect, a way to unsubscribe a stranger, a
 way to be mailed without confirming.
 """
 
+import importlib
 import io
 from unittest import mock
+
+from django.apps import apps as django_apps
 
 from django.contrib.auth.models import User
 from django.core import mail
@@ -265,6 +268,49 @@ class RedirectBackTest(MailingListTestBase):
         self.assertTrue(MailingListSubscription.objects.exists())
 
 
+class SiteDomainsTest(MailingListTestBase):
+    """The other sites that host a signup form, using the real setting."""
+
+    SITES = ["liberatedbread.com", "distributedcomputing4kids.com",
+             "distributedcomputing4executives.com", "highperformancespark.com"]
+
+    def test_each_site_can_send_the_visitor_back_to_itself(self):
+        for index, site in enumerate(self.SITES):
+            for host in (site, f"www.{site}"):
+                with self.subTest(host=host):
+                    response = self.client.post(SUBSCRIBE_URL, {
+                        "email": f"reader{index}@{host}",
+                        "next": f"https://{host}/thanks"})
+
+                    self.assertEqual(response.status_code, 302)
+                    self.assertEqual(response["Location"],
+                                     f"https://{host}/thanks?subscribed=1")
+
+    def test_a_site_we_do_not_run_is_still_refused(self):
+        with self.assertLogs("main.views", level="INFO"):
+            response = self.client.post(SUBSCRIBE_URL, {
+                "email": "reader@example.com",
+                "next": "https://liberatedbread.com.evil.example/landing"})
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_the_environment_adds_to_the_built_in_sites_rather_than_replacing(
+            self):
+        # Adding a site by restating the existing ones is how the forms
+        # already deployed on them quietly stop working.
+        from pigscanfly.settings import merge_hosts
+
+        merged = merge_hosts(["liberatedbread.com"], "example.org")
+
+        self.assertEqual(merged, ["liberatedbread.com", "example.org"])
+
+    def test_the_embed_page_says_which_sites_are_set_up(self):
+        response = self.client.get("/mailing-list/embed")
+
+        for site in self.SITES:
+            self.assertContains(response, site)
+
+
 class ConfirmAndUnsubscribeTest(MailingListTestBase):
     def setUp(self):
         super().setUp()
@@ -357,11 +403,45 @@ class SeededInterestAreasTest(MailingListTestBase):
     they are part of the interface, not just data."""
 
     EXPECTED = ["all", "general", "books", "dc4k", "high-performance-spark",
-                "liberated-bread", "fight-health-insurance"]
+                "liberatedbread", "fight-health-insurance"]
 
     def test_every_group_is_seeded_in_order(self):
         self.assertEqual(
             [area.slug for area in InterestArea.objects.all()], self.EXPECTED)
+
+    def test_the_liberated_bread_slug_matches_its_domain(self):
+        # Whoever pastes the form onto liberatedbread.com will reach for the
+        # name of the site, not a hyphenated version of it.
+        self.assertTrue(
+            InterestArea.objects.filter(slug="liberatedbread").exists())
+        self.assertFalse(
+            InterestArea.objects.filter(slug="liberated-bread").exists())
+
+    def test_the_rename_migration_moves_an_already_seeded_row(self):
+        # Databases that ran the first version of the seed have the old slug;
+        # this is what moves them.
+        migration = importlib.import_module(
+            "main.migrations.0014_liberatedbread_slug")
+        InterestArea.objects.filter(slug="liberatedbread").update(
+            slug="liberated-bread")
+
+        migration.forwards(django_apps, None)
+
+        self.assertTrue(
+            InterestArea.objects.filter(slug="liberatedbread").exists())
+
+    def test_the_rename_migration_leaves_an_existing_target_alone(self):
+        # Renaming onto a slug that is already taken is a unique-constraint
+        # error, so it has to be a no-op instead.
+        migration = importlib.import_module(
+            "main.migrations.0014_liberatedbread_slug")
+        stray = InterestArea.objects.create(
+            slug="liberated-bread", name="Stray")
+
+        migration.forwards(django_apps, None)
+
+        stray.refresh_from_db()
+        self.assertEqual(stray.slug, "liberated-bread")
 
     def test_only_the_all_group_is_a_catch_all(self):
         self.assertEqual(

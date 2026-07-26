@@ -25,7 +25,7 @@ AREAS = [
      "News about the book.", 30, False),
     ("high-performance-spark", "High Performance Spark",
      "News about the book.", 40, False),
-    ("liberated-bread", "Liberated Bread",
+    ("liberatedbread", "Liberated Bread",
      "The bread project — same company, its own site.", 50, False),
     ("fight-health-insurance", "Fight Health Insurance",
      "The separate project that helps people appeal insurance denials.",

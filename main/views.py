@@ -1016,6 +1016,13 @@ class MailingListEmbedCodeView(View):
                 reverse('mailing-list-embed', args=[area.slug])),
             'snippet_url': staticfiles_storage.url(
                 'mailing-list/signup-form.html'),
+            # So whoever is pasting the form can see whether their site is
+            # already set up to have visitors sent back to it, rather than
+            # finding out by watching the `next` be ignored.
+            'redirect_hosts': [
+                host for host in getattr(
+                    settings, "MAILING_LIST_REDIRECT_HOSTS", [])
+                if not host.startswith("www.")],
         })
 
 

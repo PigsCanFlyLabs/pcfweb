@@ -45,7 +45,7 @@ Checks — one script shared by local dev, `build.sh`, and GitHub Actions
 | `GEOIP_PATH` | all | Directory holding `GeoLite2-Country.mmdb`; defaults to `<repo>/geoip` (set to `/opt/app/geoip` in the image). |
 | `MAILING_LIST_FROM_EMAIL` | all | From address for list mail. Falls back to `DEFAULT_FROM_EMAIL`. |
 | `MAILING_LIST_BASE_URL` | all | Used to build confirm/unsubscribe links when there is no request to build them from (CSV import, `send_mailing`). Defaults to `https://www.pigscanfly.ca`. |
-| `MAILING_LIST_REDIRECT_HOSTS` | all | Comma-separated hostnames an embedded signup form may send the visitor back to via its `next` field. Empty by default — this is what stops the CSRF-exempt signup endpoint being an open redirect. |
+| `MAILING_LIST_REDIRECT_HOSTS` | all | Comma-separated extra hostnames an embedded signup form may send the visitor back to via its `next` field. **Adds to** `MAILING_LIST_SITE_DOMAINS` in the settings rather than replacing it, so a new site cannot be added by restating the existing ones and getting one wrong. This allowlist is what stops the CSRF-exempt signup endpoint being an open redirect. |
 | `MAILING_LIST_SIGNUP_RATE_LIMIT` | all | Confirmation emails one client address can trigger per hour (default 20; 0 disables). |
 | `MAILING_LIST_SEND_BATCH_SIZE` | all | Recipients per click of "send" in the admin (default 100). Must fit inside `GUNICORN_TIMEOUT`. |
 
@@ -125,7 +125,7 @@ The groups are seeded by migration `0012_seed_interest_areas`:
 | `books` | Books | |
 | `dc4k` | Distributed Computing 4 Kids and Executives | |
 | `high-performance-spark` | High Performance Spark | |
-| `liberated-bread` | Liberated Bread | |
+| `liberatedbread` | Liberated Bread | |
 | `fight-health-insurance` | Fight Health Insurance | |
 
 That migration only ever adds, so renaming or deactivating a group in the
@@ -182,12 +182,24 @@ with the options commented. Two options:
 
 - **a plain form** posting to `https://www.pigscanfly.ca/mailing-list/subscribe`
   with a hidden `interest` naming the group. Nothing loads from us. Add a
-  hidden `next` to bounce the visitor back to that site — and add that site's
-  host to `MAILING_LIST_REDIRECT_HOSTS`, or the `next` is ignored and they
-  get our thank-you page instead;
+  hidden `next` (https) to bounce the visitor back to that site;
 - **an iframe** of `/mailing-list/embed/<slug>`, which keeps the visitor on
   the other site with no redirect setup. That page is
   `xframe_options_exempt`; nothing else on the site is.
+
+Our own sites are set up for the `next` redirect already, apex and `www.`
+both — `MAILING_LIST_SITE_DOMAINS` in the settings:
+
+| Site | Group to use |
+| --- | --- |
+| `liberatedbread.com` | `liberatedbread` |
+| `distributedcomputing4kids.com` | `dc4k` |
+| `distributedcomputing4executives.com` | `dc4k` |
+| `highperformancespark.com` | `high-performance-spark` |
+
+Anywhere else, a `next` is ignored and the visitor gets our thank-you page
+instead; add the host to `MAILING_LIST_REDIRECT_HOSTS` (or to the settings
+list) to change that. `/mailing-list/embed` shows the current list.
 
 ### Importing and sending
 
