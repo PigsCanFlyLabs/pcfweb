@@ -48,6 +48,9 @@ Checks — one script shared by local dev, `build.sh`, and GitHub Actions
 | `MAILING_LIST_REDIRECT_HOSTS` | all | Comma-separated extra hostnames an embedded signup form may send the visitor back to via its `next` field. **Adds to** `MAILING_LIST_SITE_DOMAINS` in the settings rather than replacing it, so a new site cannot be added by restating the existing ones and getting one wrong. This allowlist is what stops the CSRF-exempt signup endpoint being an open redirect. |
 | `MAILING_LIST_SIGNUP_RATE_LIMIT` | all | Confirmation emails one client address can trigger per hour (default 20; 0 disables). |
 | `MAILING_LIST_SEND_BATCH_SIZE` | all | Recipients per click of "send" in the admin (default 100). Must fit inside `GUNICORN_TIMEOUT`. |
+| `BOOK_ASSET_ROOT` | all | Directory holding the purchased book ZIPs; defaults to `<repo>/book-assets` (`/opt/app/book-assets` in the image). Must **not** be under `STATIC_ROOT` or `MEDIA_ROOT` — see [Digital products](#digital-products). |
+| `SITE_BASE_URL` | all | Absolute base for emailed download links. Defaults to `https://www.pigscanfly.ca`. Wrong value = links that go nowhere. |
+
 
 > **Note:** a Stripe *test* key and a mkcert dev key were committed to this
 > repo's history in the past. Both should be treated as burned — rotate the
@@ -94,7 +97,15 @@ retry for three days:
 - notification email failed → `notification_error` set, `notified_at` null;
 - line items could not be re-read → `reconciliation_error` set, `reconciled_at`
   null, quantities left at the cart's, and the email says loudly that the list
-  is unverified.
+  is unverified;
+- a download could not be sent → `digital_delivery_error` set,
+  `digital_delivery_sent_at` null, and the owner's email says **NOT DELIVERED**
+  so it can be resent by hand.
+
+A **zero-total** order counts as paid. Stripe creates no PaymentIntent for one,
+so the session reports `payment_status: "no_payment_required"` and can never
+report `"paid"`; the webhook accepts both. This is reachable in practice
+because the e-book is pay-what-you-want with a floor of zero.
 
 Note that setting `ADMINS` also switches on Django's built-in error mail, so
 unhandled 500s now go to the same address.
@@ -267,6 +278,60 @@ Stock is re-checked at checkout, not just at add-to-cart: a cart can sit for
 days, so a line that sold out in the meantime bounces the customer back to
 the cart rather than billing for something that cannot be shipped.
 
+### Physical, digital and service products
+
+`Product.delivery_type` (`PHYSICAL` / `DIGITAL` / `SERVICE`) says how a product
+reaches the buyer, and is a separate axis from `Product.mode`, which only says
+how Stripe bills. Checkout asks for a shipping address and offers shipping
+rates when — and only when — the cart holds something `PHYSICAL`. It used to
+infer this from mode and category, which meant a digital-only cart would have
+demanded a mailing address and offered the buyer media mail for a PDF.
+
+`Product.is_pwyw` makes `Product.price` a *suggestion*: the Stripe Price is
+minted with `custom_unit_amount` and the buyer names their own figure,
+including zero. Two constraints come with it, both enforced in code:
+`custom_unit_amount` cannot be combined with `adjustable_quantity` on a line
+item, and it only works in `payment` mode — so a cart mixing a
+pay-what-you-want product with a subscription is refused rather than sent to
+Stripe to be rejected.
+
+### Digital products
+
+`Product.sells_ebook` means **we are licensed to distribute this file
+ourselves**. It defaults to `False` and the four O'Reilly titles keep it that
+way. Fulfilment refuses to send anything unless it is `True`, even when
+`delivery_type` is `DIGITAL`, so one mis-set dropdown in the admin cannot email
+out a book somebody else holds the rights to.
+
+Delivery is a **signed, expiring link**, not an attachment: a paid order emails
+the buyer a `TimestampSigner` token good for 7 days, and `/download/<token>`
+streams the ZIP. The files live at `BOOK_ASSET_ROOT` (`/opt/app/book-assets`),
+which is deliberately outside both nginx aliases in `conf/nginx.default`
+(`/static` and `/media`) — that view is the only way to reach one.
+
+`Product.digital_asset_name` is the filename **stem**; the served file is
+`<stem>.zip`. It is admin-editable and therefore untrusted: it is validated
+against `^[a-z0-9][a-z0-9_]*[a-z0-9]$`, the extension is appended in code, and
+the resolved path is asserted to sit directly in the resolved asset root before
+anything is opened.
+
+**Before running `./build.sh` you need a second sibling checkout**, holding the
+book archives in Git LFS:
+
+```bash
+git clone https://github.com/pigsCanFlyLabs/pcfweb-book-assets.git ../pcfweb-book-assets
+cd ../pcfweb-book-assets && git lfs install && git lfs pull
+```
+
+`scripts/check-book-assets.sh` runs first and fails the build loudly if any
+archive is a Git LFS pointer, is under a megabyte, or lacks ZIP magic bytes.
+Without that check a host that never ran `git lfs pull` — or one whose GitHub
+LFS quota is exhausted, where clones still succeed and just hand back pointers
+— would bake ~130-byte text stubs into the image and email those to customers.
+
+`book-assets/` is in `.gitignore` and **deliberately not** in `.dockerignore`;
+adding it there ships an image with no books in it.
+
 ### Region-specific buy links
 
 Books carry `amazon_link` and `bookshop_link` (shown to everyone) plus
@@ -279,9 +344,10 @@ links only.
 
 ## Deploying
 
-`./build.sh` is the whole pipeline: mypy → migration check → tests →
-template validation → collectstatic (assets are copied in from a sibling
-`pcfweb-assets` checkout) → multi-arch Docker build/push
+`./build.sh` is the whole pipeline: copy in the sibling `pcfweb-assets`
+images → fail on any oversized image asset → validate and stage the sibling
+`pcfweb-book-assets` archives → mypy → migration check → tests → template
+validation → collectstatic → multi-arch Docker build/push
 (`holdenk/pcfweb:<tag>`) → `kubectl apply` → wait for both rollouts.
 
 ### Bump the image tag first
@@ -334,6 +400,9 @@ present one level up:
 ```bash
 git clone https://github.com/pigsCanFlyLabs/pcfweb-assets.git ../pcfweb-assets
 ```
+
+The build also needs the book archives in `../pcfweb-book-assets` — see
+[Digital products](#digital-products).
 
 Note that `build.sh` does `rm -rf main/static/assets/images` *before* it
 copies the new ones in, so running it without `../pcfweb-assets` present

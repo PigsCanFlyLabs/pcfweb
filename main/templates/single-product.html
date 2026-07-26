@@ -55,6 +55,11 @@
 		<div class="right-content">
 		    <h4>{{ product.name }} {{ product.stock_description }}</h4>
 		    <span class="price">{{ product.get_display_price }}</span>
+		    {% if product.is_pwyw %}
+		    <p><strong>Pay what you want.</strong> That price is a
+		      suggestion, not a price &mdash; you set your own amount at
+		      checkout, and nothing at all is a valid amount.</p>
+		    {% endif %}
 		    {# get_display_text returns escaped markup (format_html), so #}
 		    {# this needs no autoescape override. #}
 		    <span>{{ product.get_display_text }}</span>

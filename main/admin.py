@@ -39,8 +39,12 @@ class OrderAdmin(admin.ModelAdmin):
 
     inlines = [OrderItemInline]
     list_display = ("pk", "created_at", "status", "customer_email",
-                    "total_display_price", "shipping_country", "notified_at")
-    list_filter = ("status", "created_at", "notified_at")
+                    "total_display_price", "shipping_country", "notified_at",
+                    "digital_delivery_sent_at")
+    # Filtering on digital_delivery_sent_at puts "paid, includes a download,
+    # never sent one" a click away -- that is the queue of people to resend to.
+    list_filter = ("status", "created_at", "notified_at",
+                   "digital_delivery_sent_at")
     # status is the one field the owner is meant to change.
     list_editable = ("status",)
     search_fields = ("pk", "customer_email", "customer_name",

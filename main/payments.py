@@ -59,8 +59,27 @@ class Payments:
 
     @classmethod
     def create_price(cls, product_id: str, price: int, currency: str = "usd",
-                     interval: Optional[Literal["day", "week", "month", "year"]] = None) -> str:
+                     interval: Optional[Literal["day", "week", "month", "year"]] = None,
+                     pay_what_you_want: bool = False) -> str:
         product_price = None
+        if pay_what_you_want:
+            if interval is not None:
+                # custom_unit_amount is documented as payment-mode only.
+                # Stripe would reject this anyway; refusing here says why.
+                raise ValueError(
+                    "A pay-what-you-want price uses Stripe's "
+                    "custom_unit_amount, which only works for one-off "
+                    "payments, so it cannot be recurring. Set the product's "
+                    "mode to payment or clear is_pwyw.")
+            # No `minimum`: the owner's decision is an explicit floor of zero,
+            # so any amount down to nothing is accepted. `preset` is what the
+            # buyer sees pre-filled, i.e. Product.price as a suggestion. Note
+            # unit_amount must be absent -- the two are mutually exclusive.
+            product_price = stripe.Price.create(
+                currency=currency, product=product_id,
+                custom_unit_amount={"enabled": True, "preset": price},
+            )
+            return product_price['id']
         if interval is None:
             product_price = stripe.Price.create(
                 unit_amount=price, currency=currency, product=product_id
@@ -111,23 +130,51 @@ class Payments:
         webhook has no session cookie and so no way to find the cart.
         """
         from main.models import Product
-        products = cart.products.all()
-        items = [
-            {
-                'price': product.price_id,
-                'quantity': product.quantity,
-                "adjustable_quantity": {"enabled": True},
-            } for product in products
-        ]
-        # Add shipping if only physical products. Stripe checkout does not support
-        # shipping with subscriptions so for now free shipping with any subscription
+        products = list(cart.products.select_related('product'))
+        items = []
+        for cart_product in products:
+            item = {
+                'price': cart_product.price_id,
+                'quantity': cart_product.quantity,
+            }
+            # Stripe rejects adjustable_quantity on a line whose Price carries
+            # a custom_unit_amount -- the two are mutually exclusive at session
+            # creation. Setting it unconditionally, as this used to, means a
+            # pay-what-you-want product cannot be checked out at all.
+            if not cart_product.product.is_pwyw:
+                item["adjustable_quantity"] = {"enabled": True}
+            items.append(item)
         extras = {}
         if coupon is not None:
             extras["discounts"] = [{"coupon": coupon}]
         mode = "subscription"
-        product_modes = list(map(lambda x: x.product.mode, products))
-        if all(map (lambda x: x == Product.Modes.PAYMENT, product_modes)):
-            mode="payment"
+        product_modes = [cart_product.product.mode for cart_product in products]
+        if all(m == Product.Modes.PAYMENT for m in product_modes):
+            mode = "payment"
+
+        if mode == "subscription" and any(
+                cart_product.product.is_pwyw for cart_product in products):
+            # custom_unit_amount is payment-mode only, and the session mode is
+            # a property of the whole cart: one subscription line would drag a
+            # pay-what-you-want line into subscription mode, which Stripe
+            # rejects. Refuse with something diagnosable instead.
+            raise ValueError(
+                "This cart mixes a pay-what-you-want product with a "
+                "subscription, so the whole session would have to be created "
+                "in subscription mode -- which Stripe's custom_unit_amount "
+                "does not support. They have to be bought separately.")
+
+        # Shipping is about whether anything actually has to be posted, not
+        # about how it is billed. Asking the buyer for a mailing address so
+        # they can be offered media mail on a PDF is what the old
+        # payment-mode test did.
+        has_physical = any(
+            cart_product.product.is_physical_good()
+            for cart_product in products)
+        if has_physical and mode == "payment":
+            # Stripe Checkout does not support shipping options with
+            # subscriptions, so a mixed cart gets free shipping for now.
+            #
             # Livemode-scoped ids, so they come from settings rather than
             # being hardcoded here; see STRIPE_SHIPPING_RATES.
             shipping_rates = getattr(settings, "STRIPE_SHIPPING_RATES", [])
@@ -135,7 +182,7 @@ class Payments:
                 extras["shipping_options"] = [
                     {"shipping_rate": rate} for rate in shipping_rates]
 
-        if any(map (lambda x: x == Product.Modes.PAYMENT, product_modes)) or mode == "payment":
+        if has_physical:
             extras["shipping_address_collection"] = {"allowed_countries": ["US", "CA"]}
 
         if order is not None:

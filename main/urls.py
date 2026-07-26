@@ -33,6 +33,12 @@ urlpatterns = [
     path('stripe/webhook', views.StripeWebhookView.as_view(),
          name='stripe-webhook'),
 
+    # Digital fulfilment. The token is a signed, expiring (order, product)
+    # pair; this view is the only way to reach a book archive, which lives
+    # outside every path nginx serves off disk.
+    path('download/<str:token>', views.DigitalDownloadView.as_view(),
+         name='digital-download'),
+
     # Accounts
     path('signup', views.SignupView.as_view(), name='signup'),
     path('login', views.LoginView.as_view(), name='login'),
