@@ -32,6 +32,13 @@ SCRIPT = REPO_ROOT / "run_local.sh"
 # stderr, so their absence from the trace is the evidence.
 DATABASE_COMMANDS = ("manage.py migrate", "manage.py seed_products")
 
+# The script also re-syncs main/static/assets/images from the sibling
+# pcfweb-assets checkout, with an `rm -rf` of the destination. That is a
+# destructive filesystem write, so it belongs on the far side of the refusal
+# too: a script that deletes a developer's asset tree and *then* announces it
+# will not talk to the database has still done something it was told not to.
+DESTRUCTIVE_COMMANDS = ("sync-local-assets.sh", "check-book-assets.sh")
+
 
 class RunLocalProductionGuardTest(SimpleTestCase):
     def run_script(self, **env_overrides):
@@ -63,7 +70,7 @@ class RunLocalProductionGuardTest(SimpleTestCase):
         self.assertIn("env -u", result.stderr)
 
         combined = result.stdout + result.stderr
-        for command in DATABASE_COMMANDS:
+        for command in DATABASE_COMMANDS + DESTRUCTIVE_COMMANDS:
             with self.subTest(command=command):
                 self.assertNotIn(
                     command, combined,

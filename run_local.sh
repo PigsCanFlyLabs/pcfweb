@@ -87,4 +87,53 @@ fi
 # instead. So this works offline and with no keys in the environment.
 python manage.py migrate
 python manage.py seed_products
+
+# ---------------------------------------------------------------------------
+# Re-sync the image assets, on every single run, immediately before the server
+# starts so the report is the last thing on screen.
+#
+# main/static/assets/images is a derived copy of ../pcfweb-assets/images and is
+# gitignored, so `git pull` never touches it and, before this, only build.sh
+# ever refreshed it. A checkout that last ran build.sh before PR #23 moved the
+# book covers into images/book_covers/ therefore has a *full* image directory
+# that is still wrong -- flat cover files, no book_covers/ subdirectory, plus
+# orphans for retired products -- so every book cover 404s while the banners
+# and the logo render fine.
+#
+# That is why this is a plain unconditional call and not an `if [ ! -d ... ]`:
+# the directory exists, so a guarded copy would fix precisely nothing. The
+# script's rm -rf is the part that matters.
+#
+# --warn downgrades each check to a loud report and lets the server start
+# anyway, because someone working on checkout logic should not be blocked by an
+# unrelated missing cover. build.sh calls the same script with no flag, where
+# all of it is fatal. Exit 3 means "reported, not enforced"; anything else
+# non-zero is a real failure of the script itself and should stop us.
+# ---------------------------------------------------------------------------
+asset_status=0
+./scripts/sync-local-assets.sh --warn || asset_status=$?
+if [ "$asset_status" -ne 0 ] && [ "$asset_status" -ne 3 ]; then
+  exit "$asset_status"
+fi
+
+# The digital-download archives, from the sibling pcfweb-book-assets checkout.
+# Warn rather than refuse: that repo is Git LFS with a multi-megabyte ZIP per
+# book, so a machine that never touches fulfilment legitimately does not have
+# it, and the only local consequence is that the e-book download 404s. build.sh
+# keeps this one fatal, where the consequence is a paying customer being
+# emailed a 130-byte pointer stub -- same guard script, two severities, no
+# second copy of the logic.
+if ! ./scripts/check-book-assets.sh \
+      "${BOOK_ASSETS_DIR:-../pcfweb-book-assets}" book-assets; then
+  set +x
+  echo >&2
+  echo "WARNING: no usable book archives (see the error just above)." >&2
+  echo "The site will start; digital e-book downloads will 404 locally." >&2
+  echo "To fix, beside this checkout:" >&2
+  echo "  git clone https://github.com/PigsCanFlyLabs/pcfweb-book-assets.git" >&2
+  echo "  cd pcfweb-book-assets && git lfs install && git lfs pull" >&2
+  echo >&2
+  set -x
+fi
+
 python manage.py runserver_plus --cert-file cert.pem --key-file key.pem
