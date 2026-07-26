@@ -1,0 +1,79 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo; <a href="{% url 'admin-home' %}">Admin pages</a>
+    &rsaquo; <a href="{% url 'admin:main_mailinglistmessage_changelist' %}">Mailings</a>
+    &rsaquo; Send
+  </div>
+{% endblock %}
+
+{% block content %}
+  <h1>{{ message.subject }}</h1>
+
+  <div class="module">
+    <table style="width:100%">
+      <tbody>
+        <tr><th scope="row" style="width:14rem">Going to</th>
+          <td>{{ message.audience_description }}{% if not groups %} — every confirmed subscriber, on every list{% endif %}</td></tr>
+        <tr><th scope="row">Confirmed recipients</th><td>{{ recipient_count }}</td></tr>
+        <tr><th scope="row">Already sent</th><td>{{ sent_count }}{% if failed_count %}, {{ failed_count }} failed{% endif %}</td></tr>
+        <tr><th scope="row">Still to go</th><td>{{ pending_count }}</td></tr>
+        <tr><th scope="row">Status</th><td>{{ message.get_status_display }}{% if message.sent_at %} on {{ message.sent_at }}{% endif %}</td></tr>
+      </tbody>
+    </table>
+    <p>Only confirmed subscribers are counted, everyone gets one copy even if
+      they are on several of the selected lists, and every message carries an
+      unsubscribe link. {% if message.includes_all_list %}Anyone on the <strong>All</strong>
+      list is included too — a mailing to any public list reaches everyone who
+      asked for everything.{% else %}Every list this names is hidden, so the
+      All list is <em>not</em> included: hidden lists are internal, and
+      "everything" means the lists people can actually subscribe to.{% endif %} {% if failed_count %}<a href="{% url 'admin:main_mailinglistmessage_change' message.pk %}">See
+      the failed deliveries</a> on the mailing itself.{% endif %}</p>
+  </div>
+
+  <form method="post">
+    {% csrf_token %}
+    <fieldset class="module aligned">
+      <h2>Send yourself a test first</h2>
+      {{ form.as_div }}
+      <p class="help">Leave blank to send it to {{ request.user.email|default:"your own account's address" }}.
+        A test is not recorded and does not count as delivered — it proves the
+        message renders and the mail goes out, not that batching works. For a
+        full end-to-end check, point a mailing at the
+        <strong>Test (internal only)</strong> list and send it for real: that
+        list is hidden, so it has nobody but you on it <em>and</em> it does not
+        pull in the All list.</p>
+      <div class="submit-row" style="text-align:left">
+        <input type="submit" name="send_test" value="Send test">
+      </div>
+    </fieldset>
+
+    <fieldset class="module aligned">
+      <h2>Send it for real</h2>
+      {% if pending_count %}
+        <p>Sends the next {{ batch_size }} and comes back here. Nobody is
+          mailed twice: a recipient who already has it is skipped, so if this
+          page times out or you reload it, just click send again until
+          "still to go" reaches zero.</p>
+        <div class="submit-row" style="text-align:left">
+          <input type="submit" name="send_batch" class="default"
+                 value="Send to the next {{ batch_size }} of {{ pending_count }}">
+        </div>
+      {% elif recipient_count %}
+        <p>Everyone this mailing is addressed to already has it.</p>
+      {% else %}
+        <p>Nobody has confirmed a subscription to
+          {% if groups %}{% for g in groups %}{{ g.title }}{% if not forloop.last %} or {% endif %}{% endfor %}{% else %}anything{% endif %}
+          yet, so there is nobody to send this to.</p>
+      {% endif %}
+    </fieldset>
+  </form>
+
+  <div class="module">
+    <h2>Body</h2>
+    <pre style="white-space:pre-wrap">{{ message.body }}</pre>
+    <p><a href="{% url 'admin:main_mailinglistmessage_change' message.pk %}">Edit this mailing</a></p>
+  </div>
+{% endblock %}

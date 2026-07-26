@@ -20,15 +20,40 @@ from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def parse_comma_list(raw: str) -> List[str]:
+    """Split a comma-separated environment variable into stripped entries.
+
+    Every entry is stripped, not just tested for being non-blank: a value
+    written as a conventional "a, b" list, or pulled out of a file into a
+    Secret with a trailing newline, otherwise carries whitespace into a
+    comparison that has to be exact.
+    """
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def parse_int(raw: Optional[str], default: int) -> int:
+    """An integer setting from the environment, tolerant of an empty value.
+
+    A Secret created out of a file, or a key set to "", would otherwise raise
+    ValueError at settings import -- on every pod, before anything can log it.
+    The deploy gate reports that as "Schema is behind (or the database is
+    unreachable)" and retries forever, so a blank environment variable presents
+    as a database outage. Falling back to the default is the recoverable
+    direction.
+    """
+    try:
+        return int((raw or "").strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def parse_shipping_rates(raw: str) -> List[str]:
     """Split a comma-separated STRIPE_SHIPPING_RATES value into ids.
 
-    Each id is stripped, not just tested for being non-blank. Stripe matches
-    the id exactly, so " shr_two" from a conventional "a, b" list -- or
-    "shr_two\\n" from a Secret created out of a file -- is not the rate, it is
-    a resource_missing that fails every physical checkout.
+    Stripe matches the id exactly, so " shr_two" is not the rate, it is a
+    resource_missing that fails every physical checkout.
     """
-    return [rate.strip() for rate in raw.split(",") if rate.strip()]
+    return parse_comma_list(raw)
 
 
 def parse_invite_half(raw: str) -> str:
@@ -269,6 +294,41 @@ class Base(Configuration):
     # misconfigured -- the fallback path off /discord.
     DISCORD_SUPPORT_EMAIL = os.getenv(
         "DISCORD_SUPPORT_EMAIL", "support@pigscanfly.ca")
+
+    # MAILING LIST SETTINGS
+
+    # Where confirmations and mailings come from. Falls back to
+    # DEFAULT_FROM_EMAIL; set it when list mail should come from a different
+    # address than order mail (a separate list@ address is easier to filter
+    # on and easier for a mail host to rate-limit separately).
+    MAILING_LIST_FROM_EMAIL = os.getenv("MAILING_LIST_FROM_EMAIL", "")
+
+    # Unsubscribe links built without a request to derive a host from use
+    # SITE_BASE_URL, the same setting the emailed download links use -- one
+    # absolute base for the site, not one per feature.
+
+    # Confirmation emails one address's source may trigger per hour. The
+    # signup endpoint is CSRF exempt and open to the internet, so without a
+    # ceiling it is a way to have us mail whoever somebody points it at. Kept
+    # generous because a school or an office is one address to us. 0 disables.
+    MAILING_LIST_SIGNUP_RATE_LIMIT = parse_int(
+        os.getenv("MAILING_LIST_SIGNUP_RATE_LIMIT"), 20)
+
+    # How many freshly imported addresses the import page will email the
+    # "we've updated our list" notice to. Above this it imports and says to
+    # write a mailing instead: the notice loop runs inside one request, and a
+    # big import would outlive the worker timeout half-sent, whereas the send
+    # page batches and is resumable.
+    MAILING_LIST_IMPORT_NOTICE_MAX = parse_int(
+        os.getenv("MAILING_LIST_IMPORT_NOTICE_MAX"), 500)
+
+    # Recipients per click of "send" in the admin, and per SMTP connection.
+    # The whole batch has to fit inside GUNICORN_TIMEOUT, so this trades
+    # clicks against the risk of a half-finished request -- which is survivable
+    # either way, because each recipient's delivery row is written as its mail
+    # goes out and a resumed send skips it.
+    MAILING_LIST_SEND_BATCH_SIZE = parse_int(
+        os.getenv("MAILING_LIST_SEND_BATCH_SIZE"), 100)
 
     # Who gets told about a paid order so they can ship it. Env-driven so the
     # owner's address is not baked into the repo.

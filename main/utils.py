@@ -1,10 +1,13 @@
+import contextlib
 import functools
+import ipaddress
 import logging
 import secrets
 
 from typing import Optional
 
 from django.contrib.auth.models import User
+from django.core.mail import get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -53,3 +56,58 @@ def get_country_code(request) -> Optional[str]:
     except Exception as e:
         logger.debug(f"No GeoIP country for {ip}: {e}")
         return None
+
+
+def get_storable_client_ip(request) -> Optional[str]:
+    """The client IP, but only when it is actually an IP address.
+
+    X-Forwarded-For is client-supplied text; nginx appends to whatever
+    arrived. Handing that straight to a GenericIPAddressField turns a forged
+    header into a database error on a public endpoint, so anything that is not
+    a literal address is recorded as unknown instead.
+    """
+    ip = get_client_ip(request)
+    if not ip:
+        return None
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        logger.debug("Ignoring an unusable client address %r.", ip)
+        return None
+    return ip
+
+
+def normalize_email(email: str) -> str:
+    """Lower-case and strip, so Foo@Example.com is not a second subscriber.
+
+    The local part is case-sensitive per the RFC and case-insensitive at every
+    mail host anybody actually uses. Treating them as one address is what a
+    subscriber expects, and -- because django-newsletter's own signup page and
+    admin do not normalise -- it is also the only thing keeping one person from
+    being two rows and getting two copies of a mailing.
+
+    Django's BaseUserManager.normalize_email is not a substitute: it
+    lower-cases only the domain.
+    """
+    return (email or "").strip().lower()
+
+
+@contextlib.contextmanager
+def smtp_connection():
+    """One SMTP connection for a run of messages, closed however it ends.
+
+    Not Django's `with get_connection(...)`, which is nearly this: its
+    __exit__ closes unguarded, and the SMTP backend's close() can raise. A
+    failure hanging up on us after the mail went out must not turn into an
+    exception that loses the count of what was sent.
+    """
+    connection = get_connection(fail_silently=False)
+    try:
+        connection.open()
+        yield connection
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            logger.warning("Could not close the SMTP connection.",
+                           exc_info=True)

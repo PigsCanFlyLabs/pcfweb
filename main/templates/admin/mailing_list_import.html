@@ -1,0 +1,46 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo; <a href="{% url 'admin-home' %}">Admin pages</a>
+    &rsaquo; Import addresses
+  </div>
+{% endblock %}
+
+{% block content %}
+  <h1>Import addresses</h1>
+
+  <div class="module">
+    <p>A CSV: a Mailchimp or Google Forms export as it comes, or a bare
+      column of addresses. Any heading with "email" in it is the address
+      column and any with "name" in it are the name; everything else
+      (Mailchimp's ratings, a Google Forms timestamp) is ignored, and a row
+      that makes no sense is skipped rather than failing the upload.
+      Addresses already on the chosen list are left alone, including anyone
+      who unsubscribed from it.</p>
+    <p><strong>Subscriber imports skip the confirmation email</strong> — an
+      import is you saying you already have consent for these addresses. That
+      is why the notice is worth leaving ticked: it tells people where they
+      have ended up and how to leave.</p>
+    <p>Be careful importing onto <strong>All</strong>: that list receives every
+      mailing addressed to any public list, so putting somebody there without
+      them asking is the largest version of this mistake.</p>
+    <p>Every import is checked against the
+      <a href="{% url 'admin:main_suppressedaddress_changelist' %}">suppression
+      list</a> ({{ suppressed_count }} address{{ suppressed_count|pluralize:"es" }}),
+      and nothing on it is ever added. Upload Mailchimp's unsubscribed and
+      cleaned exports in <em>suppress</em> mode to fill it.</p>
+  </div>
+
+  <form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    <fieldset class="module aligned">
+      {{ form.as_div }}
+    </fieldset>
+    <div class="submit-row">
+      <input type="submit" value="Import" class="default">
+      <a href="{% url 'admin:newsletter_subscription_changelist' %}" class="button">Back to subscribers</a>
+    </div>
+  </form>
+{% endblock %}

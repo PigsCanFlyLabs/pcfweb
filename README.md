@@ -44,7 +44,12 @@ Checks — one script shared by local dev, `build.sh`, and GitHub Actions
 | `MAXMIND_LICENSE_KEY` | build.sh (image build) | Bundles the GeoLite2 country DB for region-specific buy links; optional. |
 | `GEOIP_PATH` | all | Directory holding `GeoLite2-Country.mmdb`; defaults to `<repo>/geoip` (set to `/opt/app/geoip` in the image). |
 | `BOOK_ASSET_ROOT` | all | Directory holding the purchased book ZIPs; defaults to `<repo>/book-assets` (`/opt/app/book-assets` in the image). Must **not** be under `STATIC_ROOT` or `MEDIA_ROOT` — see [Digital products](#digital-products). |
-| `SITE_BASE_URL` | all | Absolute base for emailed download links. Defaults to `https://www.pigscanfly.ca`. Wrong value = links that go nowhere. |
+| `SITE_BASE_URL` | all | Absolute base for emailed links — download links, and mailing-list unsubscribe links built without a request. Also the `Site` domain the seed migration creates when there is none. Defaults to `https://www.pigscanfly.ca`. Wrong value = links that go nowhere. |
+| `MAILING_LIST_FROM_EMAIL` | all | From address for list mail. Falls back to `DEFAULT_FROM_EMAIL`. |
+| `MAILING_LIST_SIGNUP_RATE_LIMIT` | all | Confirmation emails one client address can trigger per hour (default 20; 0 disables). |
+| `MAILING_LIST_SEND_BATCH_SIZE` | all | Recipients per click of "send" in the admin (default 100). Must fit inside `GUNICORN_TIMEOUT`. |
+|  |  | *All four `MAILING_LIST_*` integers go through `parse_int`, which falls back to the default on a blank or unparseable value. A `ValueError` at settings import happens on every pod before anything can log it, and the deploy gate reports that as "the database is unreachable".* |
+| `MAILING_LIST_IMPORT_NOTICE_MAX` | all | Most freshly imported addresses the import page will email the "list changed" notice to (default 500). Above it, the import still happens and the notice is declined. |
 
 > **Note:** a Stripe *test* key and a mkcert dev key were committed to this
 > repo's history in the past. Both should be treated as burned — rotate the
@@ -103,6 +108,206 @@ because the e-book is pay-what-you-want with a floor of zero.
 
 Note that setting `ADMINS` also switches on Django's built-in error mail, so
 unhandled 500s now go to the same address.
+
+## Admin
+
+Everything staff-only is under `/timbit/admin/` (Timbit guards the lab — see
+the about page). `/admin/` redirects there, including deep links, so old
+bookmarks keep working.
+
+`/timbit/admin/home` is the landing page: it lists every admin path,
+including the ones the Django admin's own index cannot show because they are
+not model changelists (the CSV import, the send page, the embeddable form).
+
+## Mailing list
+
+**The subscribers are django-newsletter's.** One `Newsletter` is one interest
+area, and its `Subscription` rows are the addresses — along with the double
+opt-in email, the confirm and unsubscribe pages under `/newsletter/`, and the
+CSV/vCard import in its admin. None of that is reimplemented here.
+
+Three things are ours, because that app does not do them:
+
+1. `POST /mailing-list/subscribe` — a **CSRF-exempt** signup endpoint, so a
+   plain `<form>` pasted onto another site can post to it.
+2. `MailingListMessage` — sending one mailing across *several* lists without
+   anybody getting two copies. django-newsletter submits a message to one
+   newsletter at a time and does not dedupe between them.
+3. The import page and `SuppressedAddress`. django-newsletter has an import
+   page, but it cannot check a suppression list, cannot tell the people
+   involved that anything happened, and reads CSV through `unicodecsv` — an
+   sdist-only package last released in 2017, which is not worth adding to the
+   production image to do what the standard library does.
+
+Plus a `pre_save` signal (`main/mailing.py`) that replaces a subscription's
+activation code when it is unsubscribed. django-newsletter reuses one code for
+both actions and does not change it, so the original "confirm your
+subscription" email otherwise keeps a working link — a forwarded copy, or a
+mail scanner reaching it late, could put somebody back on a list they left.
+
+### The lists
+
+Seeded by migration `0010_seed_interest_areas`:
+
+`all` · `general` · `books` · `dc4k` · `high-performance-spark` ·
+`liberatedbread` · `fight-health-insurance`
+
+**Anyone who does not pick one lands on `general`**, which the migration
+creates and `mailing.default_newsletter()` re-creates if it is ever deleted.
+The migration only ever adds, so renaming or hiding a list in the admin
+sticks. **Slugs are interface**, not data: an embedded form on another site
+carries one in its markup, so add a new list rather than renaming one.
+
+`all` is for people who want everything, and it means it: **a mailing
+addressed to any _public_ list also reaches everyone on `all`**, including a
+list added years after they subscribed. Without that, creating a new interest
+would silently stop reaching the people who asked for all of them. Anyone on
+both gets one copy, and `MailingListMessage.audience_description()` — shown on
+the send page and in the admin's mailing list — says "and everyone on All" so
+it is never a surprise.
+
+*Public* is the limit, and it is what makes the internal test list usable: a
+**hidden** list (`visible = False`) is not part of "everything", so a mailing
+addressed only to hidden lists does not pull `all` in. Losing that is what
+would turn the test list below into a trap.
+
+**Signing up for a topic does not put anybody on `all`** — that would
+contradict what the subscribe page promises them — but every signup form
+carries a *ticked-by-default* "send me all updates" checkbox (`all_updates`).
+Ticked, it subscribes them to `all` **instead of** the topic: `all` already
+receives every mailing addressed to any public list, so one row covers both and
+the confirmation email names exactly the list being confirmed.
+
+That last part is load-bearing. An earlier version created a second row
+carrying the first one's activation code, and because the code was copied
+server-side from whatever row already existed, anyone who knew an address could
+post it with the box ticked and have *that person's own* confirmation click put
+them on `all`. A confirmation click can only honestly confirm what the email it
+came from says, so nothing links two rows any more.
+
+To reach every confirmed subscriber, `all` or not, send a mailing with **no
+lists selected**.
+
+Being listed first is *not* what makes a list the default — the signup form
+pre-selects `general` explicitly.
+
+Each list must be attached to a `Site` or django-newsletter's own confirm and
+unsubscribe pages 404 on it; the seed migration does that, creating the
+`Site` row itself if `contrib.sites` has not got round to it yet.
+
+### The signup endpoint is CSRF exempt
+
+That is deliberate: the point is that a form on *another* site can post to it,
+and such a form has no token to send. It is safe because nothing there reads
+the session or acts for a logged-in user — there is no authority for a forged
+request to borrow, and the worst it can do is create an unconfirmed
+subscription that does nothing until that address clicks the link. The
+protections that matter instead:
+
+- double opt-in, so an address cannot be added by whoever posted it;
+- a honeypot field (`website`), answered as a success so bots learn nothing;
+- two ceilings, checked *before* anything is written so a flood cannot fill the
+  table either: `MAILING_LIST_SIGNUP_RATE_LIMIT` per source per hour, and
+  `MailingListSubscribeView.PER_ADDRESS_LIMIT` (3) per **target address**. The
+  second is the one that matters — `X-Forwarded-For` is client-supplied and
+  nginx appends to it, so a limit keyed only on the source is bypassed by
+  varying it, and an unparseable value shares one bucket rather than escaping
+  the count. The target address is the one thing a caller cannot vary while
+  still achieving anything;
+- **the suppression list**, so a bounced or complained-about address is not
+  even sent a confirmation;
+- **one answer for every submission.** New, already subscribed, suppressed,
+  honeypotted, rate-limited: all indistinguishable from outside. Saying which
+  would be a membership oracle on an open, CORS-wildcarded endpoint, and these
+  lists include things people would rather not have confirmed about them;
+- the `name` field is whitespace-collapsed and bounded, because it is rendered
+  into the confirmation email and anyone can post any address here;
+- it never redirects anywhere a submission asked it to, so it cannot be turned
+  into an open redirect;
+- re-posting an already-subscribed address is a no-op, so nobody can knock a
+  subscriber back to unconfirmed.
+
+### Putting the form on another site
+
+`main/static/mailing-list/signup-form.html` is the whole mechanism: a plain
+`<form>` posting to `https://www.pigscanfly.ca/mailing-list/subscribe`, with
+the options commented in the file. Paste it into any page on any site. Nothing
+loads from us, so it cannot slow that page down or break when we redeploy, and
+**nothing is inferred from which site the form is on** — the list is an
+explicit `interest` field, so there is no per-domain configuration to fall out
+of step with somebody else's markup. Set it to one of the slugs above; the
+admin's Interest areas page lists them.
+
+After submitting, the visitor lands on a thank-you page here. There is
+deliberately no redirect-back mechanism: doing that safely needs an allowlist
+of hosts, which is exactly the per-site configuration this avoids.
+
+### Importing and sending
+
+- **Importing** is `/timbit/admin/mailing-list/import`, which does two jobs
+  from one upload because Mailchimp gives you two files:
+
+  - *Subscribers* — pick **which list** they go on (there is deliberately no
+    default; importing into the wrong list is the mistake to be afraid of) and
+    they are added as subscribed, with no confirmation email, because an
+    import is you asserting you already have consent. Leave **"email everyone
+    imported to say the list changed"** ticked and each of them gets a short
+    notice saying which list they are on with an unsubscribe link — that is
+    the escape hatch that makes skipping the confirmation defensible. Above
+    `MAILING_LIST_IMPORT_NOTICE_MAX` addresses it imports but declines to send
+    those, and tells you to write a mailing instead (that path batches; this
+    one is a loop inside one request).
+  - *Addresses to suppress* — Mailchimp's unsubscribed and cleaned exports go
+    here. Every address in the file lands on the **suppression list** and is
+    taken off every list it is currently on.
+
+  A CSV, a Mailchimp export or a Google Forms one, as it comes: any heading
+  containing "email" is the address and any containing "name" is the name,
+  everything else is ignored, and a row that makes no sense is skipped rather
+  than failing the upload. A bare column of addresses works too. Addresses
+  already on the chosen list are left alone — **including anyone who
+  unsubscribed from it**, so a stale export cannot resurrect them.
+
+- **The suppression list** (`SuppressedAddress`, at
+  `/timbit/admin/main/suppressedaddress/`) is the never-email list: bounces,
+  complaints, anyone who asked to be left alone. Every import is checked
+  against it and nothing on it is ever added. It is separate from the
+  unsubscribed flag on a subscription, which only means "not this list" —
+  this means "not at all". Add one address at a time in the admin, or a
+  fileful from the import page.
+
+  It is checked on the public signup too, and at send time. Not just because
+  of who ends up on a list: *mailing* a suppressed address at all is what gets
+  a domain blocked, and the signup endpoint is open to the internet, so
+  otherwise anyone could have us mail a complained-about address on demand.
+  Somebody suppressed who genuinely wants back has to be taken off the list
+  first.
+- **Sending** is `/timbit/admin/mailing-list/send/<id>`, linked from both the
+  mailing list in the admin and each mailing's own change page, and from
+  `/timbit/admin/home`: write a mailing, pick the lists (or none for
+  everyone), send yourself a test, then send.
+
+  For a *real* end-to-end check — real batch, real delivery row, real SMTP —
+  load the test list and send to that:
+
+  ```bash
+  ./manage.py loaddata mailing_list_test_group
+  ```
+
+  That creates a hidden "Test (internal only)" list whose only subscriber is
+  `holden@pigscanfly.ca`, so a mailing pointed at it cannot reach anybody else.
+  `visible: false` is doing two jobs there: keeping the list off the public
+  signup form, **and** keeping `all` out of its audience (see above). Both are
+  tested, the second with a subscriber on `all` present — otherwise that test
+  could never fail. It goes
+  out `MAILING_LIST_SEND_BATCH_SIZE` at a time, claiming a
+  `MailingListDelivery` row *before* each mail, so **nobody is mailed twice**:
+  a reload, a worker timeout, a second click or a concurrent send continues
+  where it stopped. The claim is unique on (message, address), not just on the
+  subscription row, so somebody on two of the selected lists gets one copy
+  even if two senders overlap. The first batch also freezes the audience —
+  somebody who subscribes mid-send is not added to a mailing that predates
+  them, and a finished mailing does not quietly reopen.
 
 ## Products / fixtures
 
@@ -249,6 +454,13 @@ disagree with each other. There are **three** of them — `web-primary`, the
    `checkout.session.async_payment_failed` and `checkout.session.expired`.
 5. After the rollout: set `stock` in the admin for anything that should be
    directly purchasable (see *Stock*).
+6. First rollout with the mailing list: the admin moved to `/timbit/admin/`
+   (old links redirect). The lists are seeded by migration, so check them and
+   hide anything you do not want offered — existing django-newsletter
+   subscribers are already on their own lists and need no migration. Check the
+   `Site` row's domain, since django-newsletter builds its confirmation links
+   from it. Send yourself a test from the send page before sending anything to
+   anybody else.
 
 **Before running `./build.sh`, check out the image assets as a sibling
 directory.** They are deliberately kept out of this repo (`.gitignore`

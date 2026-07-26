@@ -1,0 +1,61 @@
+<!--
+  Pigs Can Fly Labs mailing list signup form.
+
+  Paste this into any page on any site. It is plain HTML: no JavaScript, no
+  stylesheet, nothing to load from us. The endpoint it posts to is CSRF
+  exempt precisely so this works from another origin.
+
+  One value to set, explicit in the form -- nothing is inferred from which
+  site the form is on:
+
+    * "interest" -- the slug of the list people are signing up for. Leave it
+      out entirely and they land on the general list. The slugs are in the
+      admin under Interest areas.
+
+  The "all_updates" checkbox is ticked by default and adds the All list on top
+  of that one. Leave it in: it is what makes "everything" an opt-in the person
+  can see and untick, rather than something we do to them quietly.
+
+  After submitting, the visitor lands on a thank-you page on pigscanfly.ca.
+  To keep them on your own site instead, use the iframe version -- see the
+  page linked above.
+
+  Signing up sends a confirmation email; nobody is added to the list until
+  they click the link in it.
+-->
+<form class="pcf-signup" method="post"
+      action="https://www.pigscanfly.ca/mailing-list/subscribe">
+  <label for="pcf-signup-email">Subscribe to our mailing list</label>
+  <input id="pcf-signup-email" type="email" name="email" required
+         placeholder="you@example.com" autocomplete="email">
+
+  <!-- Which list. Change or remove; removing means the general list. -->
+  <input type="hidden" name="interest" value="general">
+
+  <label class="pcf-signup-all">
+    <input type="checkbox" name="all_updates" value="1" checked>
+    Send me all updates, not just this one
+  </label>
+
+  <!-- Spam trap. Invisible to people, filled in by bots. Keep it. -->
+  <div style="position:absolute;left:-5000px;" aria-hidden="true">
+    <input type="text" name="website" tabindex="-1" autocomplete="off">
+  </div>
+
+  <button type="submit">Subscribe</button>
+</form>
+
+<style>
+/* Optional. Delete this block to inherit your own site's styling. */
+.pcf-signup { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+              font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.pcf-signup label { flex: 0 0 100%; font-weight: 600; }
+.pcf-signup input[type=email] { flex: 1 1 12rem; min-width: 0;
+                                padding: .55rem .7rem; font-size: 1rem;
+                                border: 1px solid #b5b5b5; border-radius: 4px; }
+.pcf-signup .pcf-signup-all { flex: 0 0 100%; font-weight: normal;
+                              font-size: .9rem; }
+.pcf-signup button { padding: .55rem 1.1rem; font-size: 1rem; border: 0;
+                     border-radius: 4px; background: #f33f3f; color: #fff;
+                     cursor: pointer; }
+</style>
