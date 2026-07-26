@@ -31,6 +31,18 @@ def parse_shipping_rates(raw: str) -> List[str]:
     return [rate.strip() for rate in raw.split(",") if rate.strip()]
 
 
+def parse_invite_half(raw: str) -> str:
+    """Clean one half of the Discord invite (see DISCORD_INVITE_PART_ONE).
+
+    Same hazard as the shipping rates above: a ConfigMap value written as a
+    YAML block, or pasted with a trailing newline, arrives with whitespace
+    attached. Here that whitespace lands in the middle of a URL, so the halves
+    would rejoin into something that is not the invite -- and the page would
+    quietly serve the "e-mail us" fallback instead of a link.
+    """
+    return raw.strip()
+
+
 class Base(Configuration):
     COOKIE_CONSENT_ENABLED = True
     COOKIE_CONSENT_LOG_ENABLED = True
@@ -236,6 +248,27 @@ class Base(Configuration):
             "shr_0MJrL4nkDnSOC1s7cPSy15CO",  # media mail
             "shr_0MNOZrnkDnSOC1s7TSLZig6Z",  # faster
         ])))
+
+    # DISCORD INVITE
+    # The invite link for /discord, held as two halves that are only ever
+    # joined in the visitor's browser (see main/templates/discord.html). Discord
+    # invites are unauthenticated URLs: anything that reads one can join, so the
+    # halves are what goes in the manifest and what goes on the wire, and the
+    # page only emits them at all once a captcha has been answered.
+    #
+    # Rotating the invite is a ConfigMap edit (see deploy.yaml), not a rebuild.
+    # Split them wherever you like -- the view only cares that the two halves
+    # concatenate to a https://discord.gg/<code> URL, and renders the
+    # "e-mail us to join" page instead when they don't.
+    DISCORD_INVITE_PART_ONE = parse_invite_half(
+        os.getenv("DISCORD_INVITE_PART_ONE", "https://discord.gg/aVU2"))
+    DISCORD_INVITE_PART_TWO = parse_invite_half(
+        os.getenv("DISCORD_INVITE_PART_TWO", "2HAmb"))
+
+    # Where to write when the invite is broken, expired, or the halves are
+    # misconfigured -- the fallback path off /discord.
+    DISCORD_SUPPORT_EMAIL = os.getenv(
+        "DISCORD_SUPPORT_EMAIL", "support@pigscanfly.ca")
 
     # Who gets told about a paid order so they can ship it. Env-driven so the
     # owner's address is not baked into the repo.

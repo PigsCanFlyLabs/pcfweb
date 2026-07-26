@@ -1,0 +1,182 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block extra_head %}
+    {# An invite URL is a bearer token, so keep this page out of the indexes #}
+    {# that scrapers shop from. It is meant to be shared by us, not found.   #}
+    <meta name="robots" content="noindex, nofollow">
+{% endblock extra_head %}
+
+{% block content %}
+    <!-- ***** Main Banner Area Start ***** -->
+    <div class="page-heading about-page-heading" id="top">
+        <div class="container">
+            <div class="row">
+                <div class="col-lg-12">
+                    <div class="inner-content">
+                        <h2>Join our Discord</h2>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- ***** Main Banner Area End ***** -->
+
+    <!-- ***** Discord Area Starts ***** -->
+    {# our-team, not contact-us: .contact-us pins every form button to a 44px #}
+    {# square, which clips a button with a word on it.                        #}
+    <section class="our-team">
+        <div class="container">
+            <div class="row">
+                <div class="col-lg-8">
+                    <div class="section-heading">
+                        {% if not invite_configured %}
+                        {# No usable invite: the deliberate fallback, and also #}
+                        {# what a bad ConfigMap edit degrades to.              #}
+                        <h2>E-mail us for an invite</h2>
+                        <span>
+                            <p>
+                                Our Discord invite is not being handed out
+                                automatically right now. E-mail
+                                <a href="mailto:{{ support_email }}">{{ support_email }}</a>
+                                and we will send you one.
+                            </p>
+                        </span>
+
+                        {% elif solved %}
+                        <h2>You're in!</h2>
+                        <span>
+                            {# Both of these start hidden and the script shows #}
+                            {# them once it has a real link: a button that     #}
+                            {# still points at "#" is worse than no button. It #}
+                            {# also only promises a new tab it actually opened #}
+                            {# -- a window.open no click asked for is blocked  #}
+                            {# by most browsers.                              #}
+                            <p id="discord-opening" hidden>
+                                The button below opens our Discord in a new
+                                tab.
+                            </p>
+                            <noscript>
+                                <p>
+                                    Putting the invite together needs
+                                    JavaScript, and yours is off. E-mail
+                                    <a href="mailto:{{ support_email }}">{{ support_email }}</a>
+                                    and we will invite you directly.
+                                </p>
+                            </noscript>
+                        </span>
+                        <div class="main-border-button" id="discord-join-button" hidden>
+                            <a id="discord-join-link" href="#" target="_blank"
+                               rel="noopener noreferrer">Open the Discord invite</a>
+                        </div>
+                        <span>
+                            <p id="discord-join-broken" hidden>
+                                Something went wrong building the invite link.
+                                Please e-mail
+                                <a href="mailto:{{ support_email }}">{{ support_email }}</a>
+                                and we will invite you by hand.
+                            </p>
+                            <p>
+                                Invite expired, or the link goes nowhere?
+                                E-mail
+                                <a href="mailto:{{ support_email }}">{{ support_email }}</a>
+                                and we will sort you out.
+                            </p>
+                        </span>
+                        {# The invite is never in the page as a URL. These are #}
+                        {# its two halves, joined by the script below in your  #}
+                        {# browser -- see main/views.py DiscordJoinView.       #}
+                        {{ invite_part_one|json_script:"discord-invite-part-one" }}
+                        {{ invite_part_two|json_script:"discord-invite-part-two" }}
+
+                        {% else %}
+                        <h2>Say hello first</h2>
+                        <span>
+                            <p>
+                                Answer this and we will open the invite for
+                                you. It keeps the bots out — sorry for the
+                                hoop.
+                            </p>
+                        </span>
+                        {% if error %}
+                        <p role="alert" style="color: #c0392b;">{{ error }}</p>
+                        {% endif %}
+                        <form method="post" action="{% url 'discord' %}">
+                            {% csrf_token %}
+                            <p>
+                                <label for="captcha_answer">{{ challenge }}</label>
+                                <input type="text" id="captcha_answer"
+                                       name="captcha_answer" inputmode="numeric"
+                                       autocomplete="off" required
+                                       style="max-width: 8em; margin-left: 0.5em;">
+                            </p>
+                            {# Honeypot: off-screen and skipped by the keyboard, #}
+                            {# so only something filling in every field trips it. #}
+                            <div aria-hidden="true"
+                                 style="position: absolute; left: -9999px; height: 0; overflow: hidden;">
+                                <label for="email_confirm">Leave this field empty</label>
+                                <input type="text" id="email_confirm"
+                                       name="email_confirm" tabindex="-1"
+                                       autocomplete="off">
+                            </div>
+                            <div class="main-border-button">
+                                <button type="submit">Take me to Discord</button>
+                            </div>
+                        </form>
+                        <span>
+                            <p>
+                                Cannot get past this, or the invite is broken?
+                                E-mail
+                                <a href="mailto:{{ support_email }}">{{ support_email }}</a>
+                                and we will invite you directly.
+                            </p>
+                        </span>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+    <!-- ***** Discord Area Ends ***** -->
+{% endblock content %}
+
+{% block custom_js %}
+{% if solved %}
+<script>
+ (function () {
+     var partOne = document.getElementById('discord-invite-part-one');
+     var partTwo = document.getElementById('discord-invite-part-two');
+     var link = document.getElementById('discord-join-link');
+     var button = document.getElementById('discord-join-button');
+     var opening = document.getElementById('discord-opening');
+     var broken = document.getElementById('discord-join-broken');
+     function giveUp() {
+         // The button stays hidden -- it would point at "#" -- and the e-mail
+         // fallback takes its place.
+         if (broken) { broken.hidden = false; }
+     }
+     if (!partOne || !partTwo || !link) { giveUp(); return; }
+     var url = JSON.parse(partOne.textContent) + JSON.parse(partTwo.textContent);
+     // The server checks this too. Re-checking here means a mangled half can
+     // never become the href of a link we ask someone to click.
+     if (!/^https:\/\/discord\.gg\/[A-Za-z0-9-]{2,64}$/.test(url)) {
+         giveUp();
+         return;
+     }
+     link.href = url;
+     if (button) { button.hidden = false; }
+     if (opening) { opening.hidden = false; }
+     // Try to open it straight away as a convenience. No click asked for this
+     // one, so most browsers block it -- window.open returning null says so,
+     // and the page already reads correctly in that case, which is why the
+     // wording only changes when the tab actually opened.
+     var opened = window.open(url, '_blank', 'noopener');
+     if (opened && opening) {
+         opening.textContent =
+             'Discord is opening in a new tab. If you do not see it, use the '
+             + 'button below.';
+     }
+ })();
+</script>
+{% endif %}
+{% endblock custom_js %}
