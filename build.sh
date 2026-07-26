@@ -26,6 +26,7 @@ if [ -n "$oversized" ]; then
   exit 1
 fi
 
+./scripts/check-product-images.sh
 ./scripts/checks.sh
 # deploy.yaml is the single source of truth for the image tag.
 TAG=$(grep -oE 'holdenk/pcfweb:[A-Za-z0-9._-]+' deploy.yaml | head -1)
