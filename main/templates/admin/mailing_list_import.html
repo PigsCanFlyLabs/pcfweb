@@ -1,0 +1,57 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo; <a href="{% url 'admin-home' %}">Admin pages</a>
+    &rsaquo; Import subscribers
+  </div>
+{% endblock %}
+
+{% block content %}
+  <h1>Import mailing list subscribers</h1>
+
+  <div class="module">
+    <p>The file needs a header row naming at least an email column. A
+      <code>name</code>, <code>interest</code>, <code>source</code> or
+      <code>status</code> column is used when present, and a file that is
+      just a column of addresses works too. Exports from Mailchimp and
+      Substack import as they come.</p>
+    <p>Rows are imported as <em>subscribed</em> by default — an import is you
+      saying you already have consent for these addresses, which is why it
+      skips the confirmation email the website signup sends. Anyone who has
+      unsubscribed is left alone and reported as skipped.</p>
+  </div>
+
+  {% if result %}
+    <div class="module">
+      <h2>{% if result.dry_run %}Dry run{% else %}Result{% endif %}</h2>
+      <p>{{ result.summary }}</p>
+      {% if result.errors %}
+        <table style="width:100%">
+          <thead><tr><th>Row</th><th>Skipped because</th></tr></thead>
+          <tbody>
+            {% for row, error in result.errors %}
+              <tr><th scope="row" style="width:5rem">{{ row }}</th><td>{{ error }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+      {% if result.dry_run %}
+        <p><strong>Nothing was written.</strong> Upload the file again with
+          "dry run" unchecked to import it.</p>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  <form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    <fieldset class="module aligned">
+      {{ form.as_div }}
+    </fieldset>
+    <div class="submit-row">
+      <input type="submit" value="Import" class="default">
+      <a href="{% url 'admin:main_mailinglistsubscription_changelist' %}" class="button">Back to subscribers</a>
+    </div>
+  </form>
+{% endblock %}

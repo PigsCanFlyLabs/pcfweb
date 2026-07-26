@@ -1,30 +1,43 @@
+import json
 import logging
 
 from typing import *
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.admin.views.decorators import staff_member_required
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.contrib.staticfiles import finders
 from django.contrib.staticfiles.storage import staticfiles_storage
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import transaction
 from django.db.models import Q
-from django.http import Http404, HttpResponse, HttpResponseBadRequest
+from django.http import (
+    Http404, HttpResponse, HttpResponseBadRequest, JsonResponse)
 from django.shortcuts import get_object_or_404, redirect, render
-from django.urls import reverse
+from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 from django.utils.decorators import method_decorator
+from django.utils.encoding import iri_to_uri
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
+from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.csrf import csrf_exempt
 
 import stripe
 
-from main.models import Cart, CartProduct, Order, Product
+from main.forms import (
+    MailingListImportForm, MailingListSendForm, MailingListSignupForm)
+from main.mailing import CsvImportError, import_csv
+from main.models import (
+    Cart, CartProduct, InterestArea, MailingListDelivery, MailingListMessage,
+    MailingListSubscription, Order, Product)
 from main.payments import Payments
-from main.utils import generate_username, get_country_code
+from main.utils import (
+    generate_username, get_country_code, get_storable_client_ip)
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +172,10 @@ class ServicesView(View):
 
 class SubscribeView(View):
     def get(self, request):
-        return render(request, 'subscribe_page.html', context={'title': 'Subscribe for updates'})
+        return render(request, 'subscribe_page.html', context={
+            'title': 'Subscribe for updates',
+            'areas': list(InterestArea.signup_choices()),
+        })
 
 
 class ProductView(View):
@@ -689,3 +705,501 @@ class LogoutView(View):
     def get(self, request):
         logout(request)
         return redirect('login')
+
+
+class MailingListMixin:
+    """Shared plumbing for the public mailing list endpoints."""
+
+    def submitted(self, request) -> Dict[str, Any]:
+        """The submitted fields, from a form post or a JSON body.
+
+        A JSON body leaves request.POST empty, so without this a fetch()
+        sending JSON -- the obvious thing to write against an endpoint that
+        answers JSON -- would look to us like a submission with no email in
+        it. Cached because a view is instantiated per request and the body
+        can only be read once.
+        """
+        if not hasattr(self, "_submitted"):
+            self._submitted = self._parse_body(request)
+        return self._submitted
+
+    @staticmethod
+    def _parse_body(request) -> Dict[str, Any]:
+        if request.content_type == "application/json":
+            try:
+                data = json.loads(request.body or b"{}")
+            except ValueError:
+                return {}
+            return data if isinstance(data, dict) else {}
+        return request.POST
+
+    def wants_json(self, request) -> bool:
+        return (request.content_type == "application/json"
+                or self.submitted(request).get("format") == "json"
+                or request.GET.get("format") == "json"
+                or "application/json" in request.headers.get("Accept", ""))
+
+    def json_response(self, payload: Dict[str, Any], status: int = 200):
+        response = JsonResponse(payload, status=status)
+        # Read by scripts on other origins. Safe as a wildcard precisely
+        # because this endpoint has no session and no credentials: it does
+        # nothing that depends on who is asking.
+        response["Access-Control-Allow-Origin"] = "*"
+        return response
+
+    def safe_next(self, request) -> Optional[str]:
+        """The `next` the form asked for, if we are willing to send a browser
+        there.
+
+        Embedded forms live on other sites and want the visitor bounced back
+        to their own thank-you page, so this cannot be same-origin only -- but
+        an unchecked `next` on an endpoint anybody can post to is an open
+        redirect, so the host has to be one we were told about.
+        """
+        target = self.submitted(request).get("next") or request.GET.get("next")
+        if not target:
+            return None
+        allowed = set(getattr(settings, "MAILING_LIST_REDIRECT_HOSTS", ()))
+        allowed.update(
+            host for host in settings.ALLOWED_HOSTS if "*" not in host)
+        if url_has_allowed_host_and_scheme(
+                target, allowed_hosts=allowed,
+                require_https=request.is_secure()):
+            return iri_to_uri(target)
+        logger.info("Refusing to redirect a mailing list signup to %r.",
+                    target)
+        return None
+
+    def redirect_back(self, request, outcome: str):
+        target = self.safe_next(request)
+        if target is None:
+            return None
+        separator = "&" if "?" in target else "?"
+        return redirect(f"{target}{separator}subscribed={outcome}")
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class MailingListSubscribeView(MailingListMixin, View):
+    """The signup endpoint. CSRF exempt on purpose.
+
+    The whole point is that a plain <form> pasted onto another site can post
+    here, and such a form has no token to send. Nothing here reads the session
+    or acts on behalf of a logged-in user, so there is no authority for a
+    forged request to borrow: the worst it can do is put an address into
+    PENDING, which does nothing until that address clicks the link.
+    """
+
+    def get(self, request):
+        # Somebody following the action URL by hand, or a form that lost its
+        # method. Send them to the real page rather than 405ing.
+        return redirect('subscribe')
+
+    def options(self, request, *args, **kwargs):
+        # Preflight for a cross-origin fetch() posting JSON. A plain form post
+        # never gets here.
+        response = HttpResponse(status=204)
+        response["Access-Control-Allow-Origin"] = "*"
+        response["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        response["Access-Control-Allow-Headers"] = "Content-Type, Accept"
+        response["Access-Control-Max-Age"] = "86400"
+        return response
+
+    def post(self, request):
+        form = MailingListSignupForm(self.submitted(request))
+        if not form.is_valid():
+            error = "That does not look like an email address."
+            if self.wants_json(request):
+                return self.json_response(
+                    {"ok": False, "error": error,
+                     "errors": form.errors}, status=400)
+            back = self.redirect_back(request, "invalid")
+            if back is not None:
+                return back
+            return render(request, 'mailing_list_result.html', context={
+                'title': 'Subscribe for updates',
+                'ok': False,
+                'message': error,
+            }, status=400)
+
+        if form.is_bot():
+            # Answered exactly like a success, minus the database row: telling
+            # a bot it was caught only teaches whoever wrote it.
+            logger.info("Dropped a honeypotted mailing list signup.")
+            return self.success(request, None, honeypot=True)
+
+        interest = form.interest_area()
+        subscription = MailingListSubscription.subscribe(
+            email=form.cleaned_data["email"],
+            interest=interest,
+            name=form.cleaned_data.get("name", ""),
+            source=(form.cleaned_data.get("source")
+                    or request.headers.get("Referer", "")[:200]),
+            ip=get_storable_client_ip(request))
+        if subscription.status == MailingListSubscription.Status.PENDING:
+            if self.over_rate_limit(request):
+                # The row is kept -- if this is a real person they can sign up
+                # again in an hour -- but no mail goes out. Otherwise an
+                # endpoint anybody can post to is a way to have us send
+                # hundreds of confirmations to an address somebody else
+                # chose, from our domain, at our sending reputation's expense.
+                logger.warning(
+                    "Not sending a mailing list confirmation to %s: the "
+                    "signup rate limit for this address's source was hit.",
+                    subscription.email)
+            else:
+                subscription.send_confirmation_email(request)
+        return self.success(request, subscription)
+
+    def over_rate_limit(self, request) -> bool:
+        """Whether this source has already had its hour's confirmations.
+
+        Deliberately crude: the cache is per worker process, so the real
+        ceiling is this times the worker count. That is fine -- the point is
+        to bound a flood, not to police an exact number -- and it keeps this
+        from needing a shared cache the site does not otherwise run.
+        """
+        limit = getattr(settings, "MAILING_LIST_SIGNUP_RATE_LIMIT", 20)
+        if not limit:
+            return False
+        ip = get_storable_client_ip(request)
+        if ip is None:
+            return False
+        key = f"mailing-list-signups:{ip}"
+        try:
+            count = cache.get_or_set(key, 0, 3600)
+            # incr is atomic where the backend supports it; a missing key
+            # means it expired between the two calls, which is a reset, not
+            # an error.
+            count = cache.incr(key) if count is not None else 1
+        except ValueError:
+            cache.set(key, 1, 3600)
+            return False
+        return count > limit
+
+    def success(self, request, subscription, honeypot: bool = False):
+        pending = (honeypot or subscription is None
+                   or subscription.status
+                   == MailingListSubscription.Status.PENDING)
+        message = (
+            "Almost there — check your email for a link to confirm."
+            if pending else
+            "You are already on that list. Nothing else to do.")
+        if self.wants_json(request):
+            return self.json_response(
+                {"ok": True, "pending": pending, "message": message})
+        back = self.redirect_back(request, "1")
+        if back is not None:
+            return back
+        return render(request, 'mailing_list_result.html', context={
+            'title': 'Subscribe for updates',
+            'ok': True,
+            'message': message,
+        })
+
+
+class MailingListConfirmView(MailingListMixin, View):
+    """Where the link in the confirmation email lands.
+
+    A GET, because that is what clicking a link does. Confirming is the one
+    thing here that a mail scanner following the link on the subscriber's
+    behalf can only get right: it means "yes", and the address it says yes for
+    is the one the mail was sent to.
+    """
+
+    def get(self, request, token):
+        subscription = get_object_or_404(MailingListSubscription, token=token)
+        if subscription.status == MailingListSubscription.Status.UNSUBSCRIBED:
+            # Only PENDING confirms. Unsubscribing does not rotate the token,
+            # so the original confirmation email still carries a working link
+            # -- and a forwarded copy of it, or a link scanner getting to it
+            # late, must not be able to undo somebody leaving the list.
+            # Signing up again is the way back, and that mails a fresh link.
+            logger.info(
+                "Ignoring a confirmation link for %s: they unsubscribed.",
+                subscription.email)
+            return render(request, 'mailing_list_result.html', context={
+                'title': 'Not subscribed',
+                'ok': False,
+                'message': (
+                    f"{subscription.email} unsubscribed from "
+                    f"{subscription.interest}, so that link no longer does "
+                    "anything. You are welcome back any time."),
+            })
+        if subscription.status == MailingListSubscription.Status.PENDING:
+            subscription.mark_subscribed()
+        return render(request, 'mailing_list_result.html', context={
+            'title': 'Subscribed',
+            'ok': True,
+            'message': (f"You are subscribed to {subscription.interest}. "
+                        "Thanks!"),
+            'unsubscribe_url': subscription.unsubscribe_url(request),
+        })
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class MailingListUnsubscribeView(MailingListMixin, View):
+    """Leaving the list.
+
+    CSRF exempt because mail clients implementing one-click unsubscribe
+    (RFC 8058) POST here themselves, from no origin, with no token. That is
+    fine: the token in the URL is the authorisation, and the only thing a
+    forged request can achieve is unsubscribing somebody who already has the
+    link -- which they are entitled to do anyway.
+
+    The GET is a confirmation page rather than the unsubscribe itself, so a
+    link-prefetching mail client cannot silently take somebody off the list.
+    """
+
+    def get(self, request, token):
+        subscription = get_object_or_404(MailingListSubscription, token=token)
+        return render(request, 'mailing_list_unsubscribe.html', context={
+            'title': 'Unsubscribe',
+            'subscription': subscription,
+            'done': subscription.status
+            == MailingListSubscription.Status.UNSUBSCRIBED,
+        })
+
+    def post(self, request, token):
+        subscription = get_object_or_404(MailingListSubscription, token=token)
+        if subscription.status != MailingListSubscription.Status.UNSUBSCRIBED:
+            subscription.unsubscribe()
+        if self.wants_json(request) or "List-Unsubscribe" in self.submitted(request):
+            return self.json_response({"ok": True, "unsubscribed": True})
+        return render(request, 'mailing_list_unsubscribe.html', context={
+            'title': 'Unsubscribed',
+            'subscription': subscription,
+            'done': True,
+        })
+
+
+@method_decorator(xframe_options_exempt, name='dispatch')
+class MailingListEmbedView(View):
+    """A standalone signup form, for iframing into another site.
+
+    Frame-options exempt: it is useless if a site cannot embed it, and there
+    is nothing here to clickjack -- no session, no logged-in state, and the
+    only action is a signup that still has to be confirmed by email.
+    """
+
+    def get(self, request, slug=None):
+        area = None
+        if slug:
+            area = InterestArea.objects.filter(slug=slug, active=True).first()
+            if area is None:
+                raise Http404(f"No such interest area: {slug}")
+        return render(request, 'mailing_list_embed.html', context={
+            'title': 'Subscribe',
+            'area': area or InterestArea.get_default(),
+            'action': request.build_absolute_uri(
+                reverse('mailing-list-subscribe')),
+        })
+
+
+class MailingListEmbedCodeView(View):
+    """The copy-and-paste markup for putting the signup on another site."""
+
+    def get(self, request):
+        areas = list(InterestArea.signup_choices())
+        selected_slug = request.GET.get("interest")
+        # Falls back to the general group rather than to whichever area
+        # happens to sort first, so copying the snippet without choosing
+        # produces a form that agrees with the site's own default.
+        area = (next((a for a in areas if a.slug == selected_slug), None)
+                or InterestArea.get_default())
+        return render(request, 'mailing_list_embed_code.html', context={
+            'title': 'Embeddable signup form',
+            'areas': areas,
+            'area': area,
+            'action': request.build_absolute_uri(
+                reverse('mailing-list-subscribe')),
+            'iframe_src': request.build_absolute_uri(
+                reverse('mailing-list-embed', args=[area.slug])),
+            'snippet_url': staticfiles_storage.url(
+                'mailing-list/signup-form.html'),
+            # So whoever is pasting the form can see whether their site is
+            # already set up to have visitors sent back to it, rather than
+            # finding out by watching the `next` be ignored.
+            'redirect_hosts': [
+                host for host in getattr(
+                    settings, "MAILING_LIST_REDIRECT_HOSTS", [])
+                if not host.startswith("www.")],
+        })
+
+
+@method_decorator(staff_member_required, name='dispatch')
+class AdminHomeView(View):
+    """One page listing where everything in the admin actually lives.
+
+    The Django admin index only lists model changelists, so the things that
+    are not a changelist -- the CSV import, the send page, the embeddable
+    form -- are unfindable unless something like this points at them.
+    """
+
+    def get(self, request):
+        return render(request, 'admin/home.html', context={
+            'title': 'Admin',
+            'sections': self.sections(),
+        })
+
+    @staticmethod
+    def link(url_name, label, description, args=None):
+        try:
+            return {"url": reverse(url_name, args=args or []),
+                    "label": label, "description": description}
+        except NoReverseMatch:
+            # A URL that is not wired up (an app removed, a rename) should
+            # cost one missing row, not the whole page.
+            logger.warning("Admin home: no URL named %s.", url_name)
+            return None
+
+    def sections(self):
+        sections = [
+            ("Mailing list", [
+                self.link('admin:main_mailinglistsubscription_changelist',
+                          "Subscribers",
+                          "Every address, which group it is in, and whether "
+                          "it has confirmed."),
+                self.link('mailing-list-import', "Import subscribers from CSV",
+                          "Bulk upload, with a dry run so you can see what a "
+                          "file would do first."),
+                self.link('admin:main_mailinglistmessage_changelist',
+                          "Mailings",
+                          "Write a mailing and send it to everyone or to "
+                          "particular groups."),
+                self.link('admin:main_interestarea_changelist',
+                          "Interest areas",
+                          "The groups people can subscribe to. Anyone who "
+                          "does not pick one is in the general group."),
+                self.link('mailing-list-embed-code', "Embeddable signup form",
+                          "Markup to paste into another site so it can sign "
+                          "people up here."),
+            ]),
+            ("Store", [
+                self.link('admin:main_order_changelist', "Orders",
+                          "Paid orders to pick, pack and mark fulfilled."),
+                self.link('admin:main_product_changelist', "Products",
+                          "Prices, stock and the links on each product page."),
+            ]),
+            ("Site", [
+                self.link('admin:index', "Django admin",
+                          "Everything else, model by model."),
+                self.link('admin:password_change', "Change your password", ""),
+            ]),
+        ]
+        return [(name, [link for link in links if link])
+                for name, links in sections]
+
+
+@method_decorator(staff_member_required, name='dispatch')
+class MailingListImportView(View):
+    """Upload a CSV of subscribers.
+
+    Staff only and behind the admin's login, because it is the one way into
+    this app to add an address without that address agreeing to it.
+    """
+
+    def get(self, request):
+        return self.render_form(request, MailingListImportForm())
+
+    def post(self, request):
+        form = MailingListImportForm(request.POST, request.FILES)
+        if not form.is_valid():
+            return self.render_form(request, form)
+        upload = form.cleaned_data["csv_file"]
+        try:
+            result = import_csv(
+                upload,
+                interest=form.interest_area(),
+                default_status=form.cleaned_data["status"],
+                source=form.cleaned_data.get("source", "")
+                or f"import:{getattr(upload, 'name', 'csv')}"[:200],
+                dry_run=form.cleaned_data.get("dry_run", False))
+        except CsvImportError as e:
+            form.add_error("csv_file", str(e))
+            return self.render_form(request, form)
+        if not result.dry_run:
+            messages.success(request, result.summary())
+        return self.render_form(request, MailingListImportForm(), result=result)
+
+    def render_form(self, request, form, result=None):
+        return render(request, 'admin/mailing_list_import.html', context={
+            'title': 'Import mailing list subscribers',
+            'form': form,
+            'result': result,
+        })
+
+
+@method_decorator(staff_member_required, name='dispatch')
+class MailingListSendView(View):
+    """Send a mailing, to everyone or to the groups it names.
+
+    Sending is done a batch at a time from here rather than all at once,
+    because this runs inside a request with a worker timeout on it: a list
+    long enough to outlive that timeout would otherwise be half-sent with no
+    record of how far it got. Each batch records a delivery per recipient, so
+    clicking send again continues rather than starting over. `send_mailing`
+    does the same thing from the command line for a list too long to click
+    through.
+    """
+
+    def get(self, request, pk):
+        message = get_object_or_404(MailingListMessage, pk=pk)
+        return self.render_page(request, message, MailingListSendForm())
+
+    def post(self, request, pk):
+        message = get_object_or_404(MailingListMessage, pk=pk)
+        form = MailingListSendForm(request.POST)
+        if not form.is_valid():
+            return self.render_page(request, message, form)
+
+        if "send_test" in request.POST:
+            address = (form.cleaned_data.get("test_address")
+                       or request.user.email)
+            if not address:
+                form.add_error(
+                    "test_address",
+                    "Your account has no email address, so say where the "
+                    "test should go.")
+                return self.render_page(request, message, form)
+            try:
+                message.send_test(address, request)
+            except Exception as e:
+                logger.exception("Test send of message %s failed.", message.pk)
+                messages.error(request, f"Could not send the test: {e}")
+            else:
+                messages.success(request, f"Test sent to {address}.")
+            return redirect('mailing-list-send', pk=message.pk)
+
+        if "send_batch" in request.POST:
+            if not message.pending_recipients().exists():
+                messages.info(
+                    request, "Everyone on that list already has this one.")
+                return redirect('mailing-list-send', pk=message.pk)
+            sent, failed = message.send_batch(request=request)
+            remaining = message.pending_count()
+            note = f"Sent {sent}."
+            if failed:
+                note += (f" {failed} could not be delivered; see the "
+                         "deliveries below.")
+            if remaining:
+                note += f" {remaining} still to go — click send again."
+            messages.success(request, note)
+            return redirect('mailing-list-send', pk=message.pk)
+
+        return self.render_page(request, message, form)
+
+    def render_page(self, request, message, form):
+        return render(request, 'admin/mailing_list_send.html', context={
+            'title': f'Send: {message.subject}',
+            'message': message,
+            'form': form,
+            'groups': list(message.interests.all()),
+            'recipient_count': message.recipient_count(),
+            'pending_count': message.pending_count(),
+            'sent_count': message.sent_count(),
+            'failed_count': message.failed_count(),
+            'batch_size': getattr(
+                settings, "MAILING_LIST_SEND_BATCH_SIZE", 100),
+            'failures': message.deliveries.filter(
+                status=MailingListDelivery.Status.FAILED)[:20],
+        })

@@ -1,4 +1,5 @@
 import functools
+import ipaddress
 import logging
 import secrets
 
@@ -53,3 +54,22 @@ def get_country_code(request) -> Optional[str]:
     except Exception as e:
         logger.debug(f"No GeoIP country for {ip}: {e}")
         return None
+
+
+def get_storable_client_ip(request) -> Optional[str]:
+    """The client IP, but only when it is actually an IP address.
+
+    X-Forwarded-For is client-supplied text; nginx appends to whatever
+    arrived. Handing that straight to a GenericIPAddressField turns a forged
+    header into a database error on a public endpoint, so anything that is not
+    a literal address is recorded as unknown instead.
+    """
+    ip = get_client_ip(request)
+    if not ip:
+        return None
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        logger.debug("Ignoring an unusable client address %r.", ip)
+        return None
+    return ip

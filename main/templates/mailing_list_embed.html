@@ -1,0 +1,47 @@
+{% comment %}
+Standalone signup form, sized to be dropped into an <iframe> on another site.
+
+Deliberately self-contained -- no site chrome, no external CSS, no
+JavaScript -- because it renders inside somebody else's page and has to work
+there without dragging our stylesheet or our analytics along with it.
+{% endcomment %}<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex">
+    <title>{{ area.name }} — subscribe</title>
+    <style>
+      body { margin: 0; padding: 1rem;
+             font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+             font-size: 16px; color: #1c1c1c; background: transparent; }
+      form { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+      label { flex: 0 0 100%; font-weight: 600; }
+      input[type=email], input[type=text] {
+        flex: 1 1 12rem; min-width: 0; padding: .55rem .7rem; font-size: 1rem;
+        border: 1px solid #b5b5b5; border-radius: 4px; }
+      button { padding: .55rem 1.1rem; font-size: 1rem; border: 0;
+               border-radius: 4px; background: #f33f3f; color: #fff;
+               cursor: pointer; }
+      p.note { margin: .75rem 0 0; font-size: .82rem; color: #555; }
+      .hp { position: absolute; left: -5000px; }
+    </style>
+  </head>
+  <body>
+    <form method="post" action="{{ action }}">
+      <label for="email">Subscribe to {{ area.name }}</label>
+      <input type="email" id="email" name="email" required
+             placeholder="you@example.com" autocomplete="email">
+      <input type="hidden" name="interest" value="{{ area.slug }}">
+      <input type="hidden" name="source" value="embed:{{ area.slug }}">
+      <div class="hp" aria-hidden="true">
+        <input type="text" name="website" tabindex="-1" autocomplete="off">
+      </div>
+      <button type="submit">Subscribe</button>
+    </form>
+    <p class="note">
+      {% if area.description %}{{ area.description }} {% endif %}
+      We'll email you a link to confirm. Unsubscribe any time.
+    </p>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+Hi{% if subscription.name %} {{ subscription.name }}{% endif %},
+
+Somebody (hopefully you) asked to subscribe {{ subscription.email }} to
+{{ interest }} at Pigs Can Fly Labs.
+
+Confirm it here and we'll add you to the list:
+
+  {{ confirm_url }}
+
+If that wasn't you, do nothing at all -- we won't send you anything else,
+and the request expires unused.
+
+-- 
+Pigs Can Fly Labs

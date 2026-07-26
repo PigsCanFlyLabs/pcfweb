@@ -15,6 +15,24 @@
     </div>
     <!-- ***** Main Banner Area End ***** -->
 
-    {% include 'components/subscribe.html' %}
+    {% if areas|length > 1 %}
+    <div class="about-us">
+        <div class="container">
+            <div class="row">
+                <div class="col-lg-12">
+                    <p>Pick what you want to hear about — that is all you will
+                        get mail about. Not sure? Leave it on general updates.</p>
+                    <ul>
+                        {% for area in areas %}
+                        <li><strong>{{ area.name }}</strong>{% if area.description %} — {{ area.description }}{% endif %}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% include 'components/subscribe.html' with source='subscribe-page' %}
 
 {% endblock content %}

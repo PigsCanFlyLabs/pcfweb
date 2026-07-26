@@ -43,6 +43,11 @@ Checks — one script shared by local dev, `build.sh`, and GitHub Actions
 | `EMAIL_HOST` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | Prod | SMTP. |
 | `MAXMIND_LICENSE_KEY` | build.sh (image build) | Bundles the GeoLite2 country DB for region-specific buy links; optional. |
 | `GEOIP_PATH` | all | Directory holding `GeoLite2-Country.mmdb`; defaults to `<repo>/geoip` (set to `/opt/app/geoip` in the image). |
+| `MAILING_LIST_FROM_EMAIL` | all | From address for list mail. Falls back to `DEFAULT_FROM_EMAIL`. |
+| `MAILING_LIST_BASE_URL` | all | Used to build confirm/unsubscribe links when there is no request to build them from (CSV import, `send_mailing`). Defaults to `https://www.pigscanfly.ca`. |
+| `MAILING_LIST_REDIRECT_HOSTS` | all | Comma-separated extra hostnames an embedded signup form may send the visitor back to via its `next` field. **Adds to** `MAILING_LIST_SITE_DOMAINS` in the settings rather than replacing it, so a new site cannot be added by restating the existing ones and getting one wrong. This allowlist is what stops the CSRF-exempt signup endpoint being an open redirect. |
+| `MAILING_LIST_SIGNUP_RATE_LIMIT` | all | Confirmation emails one client address can trigger per hour (default 20; 0 disables). |
+| `MAILING_LIST_SEND_BATCH_SIZE` | all | Recipients per click of "send" in the admin (default 100). Must fit inside `GUNICORN_TIMEOUT`. |
 
 > **Note:** a Stripe *test* key and a mkcert dev key were committed to this
 > repo's history in the past. Both should be treated as burned — rotate the
@@ -93,6 +98,133 @@ retry for three days:
 
 Note that setting `ADMINS` also switches on Django's built-in error mail, so
 unhandled 500s now go to the same address.
+
+## Admin
+
+Everything staff-only is under `/timbit/admin/` (Timbit guards the lab — see
+the about page). `/admin/` redirects there, including deep links, so old
+bookmarks keep working.
+
+`/timbit/admin/home` is the landing page: it lists every admin path,
+including the ones the Django admin's own index cannot show because they are
+not model changelists (the CSV import, the send page, the embeddable form).
+
+## Mailing list
+
+Subscribers live in `MailingListSubscription`, one row per address per
+`InterestArea` — the "area of interest" a subscriber picked. **Anyone who
+does not pick one is in the general group**, which a data migration creates
+and `InterestArea.get_default()` re-creates if it is ever deleted.
+
+The groups are seeded by migration `0012_seed_interest_areas`:
+
+| Slug | Group | |
+| --- | --- | --- |
+| `all` | All | **catch-all** — gets every mailing, whichever groups it names |
+| `general` | General updates | the default for anyone who does not choose |
+| `books` | Books | |
+| `dc4k` | Distributed Computing 4 Kids and Executives | |
+| `high-performance-spark` | High Performance Spark | |
+| `liberatedbread` | Liberated Bread | |
+| `fight-health-insurance` | Fight Health Insurance | |
+
+That migration only ever adds, so renaming or deactivating a group in the
+admin sticks. **Slugs are interface**, not data: an embedded form on another
+site carries one in its markup, so add a new group rather than renaming one.
+`sort_order` controls the order they are offered in (editable in the admin);
+being listed first is *not* what makes a group the default — the signup form
+explicitly pre-selects general, so putting "All" at the top cannot quietly
+capture people who did not choose.
+
+`catch_all` is what makes "All" mean all: a mailing addressed to Books
+reaches the Books subscribers *and* everyone in a catch-all group, once
+each. Without it, picking "All" would opt someone into a group named after
+everything and then leave them out of every mailing addressed to a topic.
+
+An address is not on the list until it confirms:
+
+1. `POST /mailing-list/subscribe` records a PENDING row and mails a
+   confirmation link.
+2. `GET /mailing-list/confirm/<token>` marks it SUBSCRIBED. Only SUBSCRIBED
+   rows are ever mailed anything else. Only a PENDING row confirms:
+   unsubscribing does not rotate the token, so an old or forwarded
+   confirmation link cannot undo somebody leaving the list — signing up again
+   is the way back, and that mails a fresh link.
+3. `GET /mailing-list/unsubscribe/<token>` asks, `POST` to the same URL does
+   it. Every mailing carries that link plus a `List-Unsubscribe` header, so
+   mail clients show a real unsubscribe button.
+
+### The signup endpoint is CSRF exempt
+
+That is deliberate: the point is that a plain `<form>` pasted onto *another*
+site can post to it, and such a form has no token to send. It is safe because
+nothing there reads the session or acts for a logged-in user — there is no
+authority for a forged request to borrow, and the worst it can do is create a
+PENDING row that does nothing until that address clicks the link. The
+protections that matter instead:
+
+- double opt-in, so an address cannot be added by whoever posted it;
+- a honeypot field (`website`), answered as a success so bots learn nothing;
+- `MAILING_LIST_SIGNUP_RATE_LIMIT` confirmations per client address per hour;
+- `next=` is only honoured for hosts in `MAILING_LIST_REDIRECT_HOSTS` (plus
+  `ALLOWED_HOSTS`), so it cannot be turned into an open redirect;
+- re-posting an already-subscribed address is a no-op, so nobody can knock a
+  subscriber back to PENDING.
+
+The unsubscribe endpoint is exempt too, because RFC 8058 one-click
+unsubscribe means the mail client posts it directly, from no origin.
+
+### Putting the form on another site
+
+`/mailing-list/embed` shows copy-and-paste markup for each group, and
+`main/static/mailing-list/signup-form.html` is the same form as a static file
+with the options commented. Two options:
+
+- **a plain form** posting to `https://www.pigscanfly.ca/mailing-list/subscribe`
+  with a hidden `interest` naming the group. Nothing loads from us. Add a
+  hidden `next` (https) to bounce the visitor back to that site;
+- **an iframe** of `/mailing-list/embed/<slug>`, which keeps the visitor on
+  the other site with no redirect setup. That page is
+  `xframe_options_exempt`; nothing else on the site is.
+
+Our own sites are set up for the `next` redirect already, apex and `www.`
+both — `MAILING_LIST_SITE_DOMAINS` in the settings:
+
+| Site | Group to use |
+| --- | --- |
+| `liberatedbread.com` | `liberatedbread` |
+| `distributedcomputing4kids.com` | `dc4k` |
+| `distributedcomputing4executives.com` | `dc4k` |
+| `highperformancespark.com` | `high-performance-spark` |
+
+Anywhere else, a `next` is ignored and the visitor gets our thank-you page
+instead; add the host to `MAILING_LIST_REDIRECT_HOSTS` (or to the settings
+list) to change that. `/mailing-list/embed` shows the current list.
+
+### Importing and sending
+
+- `/timbit/admin/mailing-list/import` uploads a CSV. It reads a header row
+  (Mailchimp and Substack exports work as they come) or a bare column of
+  addresses, defaults to importing rows as already-subscribed — an import is
+  you asserting you have consent, so it sends no confirmations — and refuses
+  to re-add anyone who unsubscribed. Do a dry run first; it reports per-row
+  errors without writing anything.
+- `/timbit/admin/mailing-list/send/<id>` sends a mailing to everyone or to
+  the groups it names. Send yourself a test first. Sending goes out
+  `MAILING_LIST_SEND_BATCH_SIZE` at a time, claiming a `MailingListDelivery`
+  row *before* each mail goes out, so **nobody is mailed twice**: a reload, a
+  worker timeout, a second click or a concurrent send continues where it
+  stopped. The claim is unique on (message, address), not just on the
+  subscription row, so someone in two of the selected groups gets one copy
+  even if two senders overlap. The first batch also freezes the audience —
+  somebody who subscribes mid-send is not added to a mailing that predates
+  them, and a finished mailing does not quietly reopen. `./manage.py
+  send_mailing <id> --send` does the same from a shell for a list too long to
+  click through.
+- `./manage.py import_newsletter_subscribers --apply` moves confirmed
+  django-newsletter subscribers over, one interest area per newsletter. The
+  site's own forms no longer post to django-newsletter; run this once so the
+  addresses collected before this feature are not stranded.
 
 ## Products / fixtures
 
@@ -184,6 +316,14 @@ disagree with each other. There are **three** of them — `web-primary`, the
    `checkout.session.async_payment_failed` and `checkout.session.expired`.
 5. After the rollout: set `stock` in the admin for anything that should be
    directly purchasable (see *Stock*).
+6. First rollout with the mailing list: the admin moved to `/timbit/admin/`
+   (old links redirect). The interest groups are seeded by migration, so
+   check the list and deactivate anything you do not want offered, set
+   `MAILING_LIST_REDIRECT_HOSTS` for any site whose embedded form should
+   bounce visitors back to itself, and run
+   `./manage.py import_newsletter_subscribers --apply` once so the addresses
+   collected through django-newsletter are on the new list. Send yourself a
+   test from the send page before sending anything to anybody else.
 
 **Before running `./build.sh`, check out the image assets as a sibling
 directory.** They are deliberately kept out of this repo (`.gitignore`
