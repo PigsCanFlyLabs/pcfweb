@@ -112,10 +112,14 @@
 # SKUs sharing one id is a duplicate. Add each real ISBN here as it is
 # assigned; never placehold one with zeros or a copy of a sibling's.
 #
-# The e-book's ISBN is still unset. It belongs in the separate ebook_isbn
-# field being added elsewhere, not in `isbn` -- an EPUB gets its own ISBN, and
-# get_display_text() offers "available signed on request" whenever `isbn` is
-# set, which for a PDF means offering to sign a download.
+# The e-book's ISBN lives in ebook_isbn, not in `isbn` -- an EPUB gets its own
+# ISBN, and get_display_text() offers "available signed on request" whenever
+# `isbn` is set, which for a PDF means offering to sign a download.
+#
+# Each row carries exactly one identifier, in the field matching its format:
+# print_isbn on the two print SKUs, ebook_isbn on the e-book. get_gtin() reads
+# `print_isbn or ebook_isbn or upc`, so cross-populating would hand two SKUs
+# the same GTIN in the Google Merchant feed.
 - model: main.product
   pk: 104
   fields:
@@ -132,7 +136,14 @@
     # Standard print edition. Self-published, so this ISBN is ours; it is not
     # an O'Reilly title and on_oreilly_safari stays unset accordingly.
     isbn: "9781960595997"
-    image_name: "distributed_computing_4_kids.jpg"
+    # Print-only SKU, so the identifier goes in print_isbn and nowhere else.
+    # get_gtin() is `print_isbn or ebook_isbn or upc`, so a copy in ebook_isbn
+    # here would collide with pk 106's in the Merchant feed. The isbn ->
+    # print_isbn data migration ran before these rows existed, so setting this
+    # explicitly is what keeps the <g:gtin> and the "available signed on
+    # request" note, both of which are keyed to print_isbn.
+    print_isbn: "9781960595997"
+    image_name: "book_covers/distributed_computing_4_kids.jpg"
     cat: "B"
     # get_brand() defaults the Books category to O'Reilly, which is right for
     # the four titles above and wrong for this one.
@@ -166,7 +177,11 @@
     # is. Self-published like the standard edition, so on_oreilly_safari stays
     # unset: the Safari link tracks the publisher, never the ISBN.
     isbn: "9781960595003"
-    image_name: "distributed_computing_4_kids.jpg"
+    # Print-only, same reasoning as pk 104. There is no separate Executive
+    # e-book -- buyers who want it digitally use the PWYW e-book, pk 106 --
+    # so ebook_isbn stays unset rather than repeating pk 106's.
+    print_isbn: "9781960595003"
+    image_name: "book_covers/distributed_computing_4_kids.jpg"
     cat: "B"
     brand: "Pigs Can Fly Labs"
     tax_code: "txcd_35010000"
@@ -189,7 +204,12 @@
     # not a price. The floor is zero, on the owner's explicit instruction.
     price: 1500
     is_pwyw: true
-    image_name: "distributed_computing_4_kids.jpg"
+    # Digital and print-less: the EPUB's own ISBN, in ebook_isbn only. `isbn`
+    # stays unset deliberately -- get_display_text() offers "available signed
+    # on request" whenever `isbn` is set, and offering to sign a download is
+    # nonsense. print_isbn stays unset for the same reason.
+    ebook_isbn: "9781960595980"
+    image_name: "book_covers/distributed_computing_4_kids.jpg"
     cat: "B"
     brand: "Pigs Can Fly Labs"
     # Digital Books - downloaded - non-subscription - with permanent rights.

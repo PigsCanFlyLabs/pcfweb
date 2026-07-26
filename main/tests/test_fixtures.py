@@ -63,6 +63,29 @@ class BookIsbnTest(TestCase):
                 self.assertNotEqual(typo, isbn)
                 self.assertNotEqual(typo[-1], isbn13_check_digit(typo))
 
+    def test_every_book_with_an_isbn_also_carries_a_print_isbn(self):
+        """A row with `isbn` but no `print_isbn` silently loses its GTIN.
+
+        get_gtin() reads `print_isbn or ebook_isbn or upc` -- legacy `isbn` is
+        not consulted -- and the "available signed on request" note is keyed to
+        print_isbn too. The isbn -> print_isbn backfill is a data migration
+        that ran once, before the DC4K rows existed, so any fixture row added
+        afterwards has to set print_isbn itself. Nothing fails loudly when it
+        does not: the product just quietly drops out of the Google Merchant
+        feed's <g:gtin> and stops offering signed copies.
+        """
+        books = self.books_with_isbns()
+        # Guards against the whole test passing because the queryset is empty.
+        self.assertGreaterEqual(len(books), 6)
+        for book in books:
+            with self.subTest(pk=book.pk, isbn=book.isbn):
+                self.assertTrue(
+                    book.print_isbn,
+                    f"pk={book.pk} ({book.name}) sets isbn={book.isbn!r} but "
+                    f"leaves print_isbn empty, so it has no GTIN in the feed",
+                )
+                self.assertEqual(book.get_gtin(), book.print_isbn)
+
     def test_no_two_products_share_a_gtin(self):
         # Two SKUs submitted under one GTIN are a duplicate in the feed. The
         # Executive Edition exists precisely to carry a different number from
