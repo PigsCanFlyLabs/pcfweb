@@ -58,11 +58,15 @@ class AboutView(View):
 
 class FamilyView(View):
     def get(self, request):
-        companies = [
+        # The family is a mix of things, not all of them companies: some are
+        # sibling companies, some are just related projects. The `kind` line
+        # says which each one is so the page does not flatten that distinction.
+        projects = [
             {
                 "name": "Pigs Can Fly Labs",
+                "kind": "Parent company",
                 "description": (
-                    "The parent company behind this site — "
+                    "The company behind this site — "
                     "value-priced queer and nerdy stuff."
                 ),
                 "url": None,
@@ -70,22 +74,28 @@ class FamilyView(View):
             },
             {
                 "name": "Fight Health Insurance",
+                "kind": "Separate company and project",
                 "description": (
-                    "Helps people appeal health insurance denials."
+                    "A separate company and project that helps people "
+                    "appeal health insurance denials."
                 ),
                 "url": "https://www.fighthealthinsurance.com/",
                 "coming_soon": False,
             },
             {
                 "name": "Liberated Bread",
-                "description": "Coming soon.",
+                "kind": "Related project",
+                "description": (
+                    "A related project — not a separate company. "
+                    "Coming soon."
+                ),
                 "url": None,
                 "coming_soon": True,
             },
         ]
         return render(request, "family.html", context={
-            "title": "Our Family of Companies",
-            "companies": companies,
+            "title": "Our Family of Projects",
+            "projects": projects,
         })
 class PrivacyView(View):
     def get(self, request):

@@ -70,45 +70,68 @@ class PageSmokeTest(TestCase):
 
 @override_settings(THUMBNAIL_DEBUG=False)
 class FamilyPageTest(TestCase):
-    """The family page lists the Pigs Can Fly Labs family of companies.
+    """The family page lists the Pigs Can Fly Labs family of projects.
+
+    The family is deliberately *not* framed as a flat list of companies: only
+    some members are their own companies, others are just related projects.
+    Each card carries a `kind` line saying which it is, and these tests pin
+    that distinction -- Liberated Bread is a related project, Fight Health
+    Insurance is a separate company as well as a project.
 
     The "Coming Soon" badge used to be driven by the absence of an outbound
     URL, which badged Pigs Can Fly Labs itself -- it is the parent company and
     this is its own site, so it deliberately links nowhere. Asserting the badge
     appears *somewhere* on the page could not catch that, so these tests pin
-    the badge to a specific company card.
+    the badge to a specific card.
     """
 
     COMING_SOON_BADGE = ">Coming Soon</span>"
-    COMPANY_NAMES = [
+    PROJECT_NAMES = [
         "Pigs Can Fly Labs", "Fight Health Insurance", "Liberated Bread"]
 
-    def get_company_cards(self):
-        """Return {company name: card HTML} for each card on the page."""
+    def get_project_cards(self):
+        """Return {project name: card HTML} for each card on the page."""
         html = self.client.get("/family").content.decode()
         section = re.search(
             r'<section class="our-team">(.*?)</section>', html, re.DOTALL)
-        self.assertIsNotNone(section, "company section missing from /family")
+        self.assertIsNotNone(section, "project section missing from /family")
         assert section is not None  # for mypy
         cards = {}
         for chunk in section.group(1).split('<div class="team-item">')[1:]:
-            for name in self.COMPANY_NAMES:
+            for name in self.PROJECT_NAMES:
                 if name in chunk:
                     cards[name] = chunk
         self.assertEqual(
-            sorted(cards), sorted(self.COMPANY_NAMES),
-            "not every company rendered its own card")
+            sorted(cards), sorted(self.PROJECT_NAMES),
+            "not every project rendered its own card")
         return cards
 
     def test_family_page_returns_200(self):
         response = self.client.get("/family")
         self.assertEqual(response.status_code, 200)
 
-    def test_family_page_lists_each_company_by_name(self):
+    def test_family_page_lists_each_project_by_name(self):
         response = self.client.get("/family")
         self.assertContains(response, "Pigs Can Fly Labs")
         self.assertContains(response, "Fight Health Insurance")
         self.assertContains(response, "Liberated Bread")
+
+    def test_family_page_is_framed_around_projects_not_companies(self):
+        # The whole point of this change: the family is a family of projects,
+        # not a flat "family of companies".
+        response = self.client.get("/family")
+        self.assertContains(response, "Our Family of Projects")
+        self.assertNotContains(response, "Our Family of Companies")
+
+    def test_liberated_bread_is_a_related_project_not_a_company(self):
+        # Liberated Bread is a related project, not a separate company.
+        card = self.get_project_cards()["Liberated Bread"]
+        self.assertIn("Related project", card)
+
+    def test_fight_health_insurance_is_a_separate_company_and_project(self):
+        # Fight Health Insurance is both its own company and a project.
+        card = self.get_project_cards()["Fight Health Insurance"]
+        self.assertIn("Separate company and project", card)
 
     def test_family_page_links_to_fight_health_insurance(self):
         response = self.client.get("/family")
@@ -118,7 +141,7 @@ class FamilyPageTest(TestCase):
 
     def test_family_page_marks_liberated_bread_as_coming_soon(self):
         self.assertIn(
-            self.COMING_SOON_BADGE, self.get_company_cards()["Liberated Bread"])
+            self.COMING_SOON_BADGE, self.get_project_cards()["Liberated Bread"])
 
     def test_family_page_shows_exactly_one_coming_soon_badge(self):
         response = self.client.get("/family")
@@ -130,11 +153,11 @@ class FamilyPageTest(TestCase):
         # old "no URL means coming soon" rule read as not being live yet.
         self.assertNotIn(
             self.COMING_SOON_BADGE,
-            self.get_company_cards()["Pigs Can Fly Labs"])
+            self.get_project_cards()["Pigs Can Fly Labs"])
 
     def test_liberated_bread_does_not_link_anywhere(self):
         # It has no site yet, so no plausible-looking URL may be invented.
-        self.assertNotIn("<a href", self.get_company_cards()["Liberated Bread"])
+        self.assertNotIn("<a href", self.get_project_cards()["Liberated Bread"])
 
     def test_family_page_renders_the_family_template(self):
         response = self.client.get("/family")
