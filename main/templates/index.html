@@ -18,7 +18,7 @@
     </div>
     <!-- ***** Main Banner Area End ***** -->
 
-    <!-- ***** Space Beaver Area Starts ***** -->
+    <!-- ***** Explore Area Starts ***** -->
     <section class="" id="explore">
 	<div class="container">
 	    <div class="row">
@@ -26,7 +26,7 @@
 		    <div class="left-content">
 			<h2>Welcome to Pigs Can Fly Labs</h2>
 			<span>
-			  Pigs Can Fly Labs is a San Francisco trans-owned company providing value-priced queer and nerdy stuff, including IP transit in FMT2, and soon to launch open-source programmable satellite messaging, technical books, high viz gear, and light controllers to help you be seen, and queer merch.
+			  Pigs Can Fly Labs is a San Francisco trans-owned company providing value-priced queer and nerdy stuff, including IP transit in FMT2, technical books, high viz gear, and light controllers to help you be seen, and queer merch.
 			</span>
 			<div class="quote">
 			  <i class="fa fa-quote-left"></i>
@@ -46,29 +46,18 @@
 		    <div class="right-content">
 			<div class="row">
 			    <div class="col-lg-6">
-				<div class="leather">
-				    <h4>Space Beaver</h4>
-				    <span>Open Source Programmable Satellite Communication</span>
-				</div>
-			    </div>
-			    <div class="col-lg-6">
-				<div class="first-image">
-				    <img src="{% static_thumbnail 'assets/images/spacebeaver-logo.png' 200x200 %}" alt="SpaceBeaver Logo" style="width:200px;height:200px">
-				</div>
-			    </div>
-			    <div class="col-lg-6">
-			      <div class="second-image">
-				<a href="{% url 'services' %}">
-				  <img src="{% static_thumbnail 'assets/images/servers.jpg' 200x200 %}" alt="SpaceBeaver Logo" style="width:200px;height:200px">
-				  </a>
-				</div>
-			    </div>
-			    <div class="col-lg-6">
 			      <div class="types">
 				<a href="{% url 'services' %}">
 				    <h4>IP Transit</h4>
 				    <span>Low-Commit backup transit in FMT2</span>
 				    </a>
+				</div>
+			    </div>
+			    <div class="col-lg-6">
+			      <div class="second-image">
+				<a href="{% url 'services' %}">
+				  <img src="{% static_thumbnail 'assets/images/servers.jpg' 200x200 %}" alt="Servers in FMT2" style="width:200px;height:200px">
+				  </a>
 				</div>
 			    </div>
 			</div>
@@ -77,7 +66,7 @@
 	    </div>
 	</div>
     </section>
-    <!-- ***** Space Beaver Area Ends ***** -->
+    <!-- ***** Explore Area Ends ***** -->
     {% for cat_label, products in highlights %}
     <section class="" id="books">
 	<div class="container">
