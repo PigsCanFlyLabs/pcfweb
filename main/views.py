@@ -379,6 +379,50 @@ class SubscribeView(View):
         return render(request, 'subscribe_page.html', context={'title': 'Subscribe for updates'})
 
 
+class BookByIsbnView(View):
+    """/book/<isbn> -> 302 to the canonical /product/<pk>.
+
+    A redirect rather than a second rendering of the product page: one
+    canonical URL keeps the ISBN path from competing with /product/<pk> in
+    search results, and makes the ISBN a stable alias that survives a pk
+    changing -- which is the whole reason this exists. Templates link books by
+    ISBN so no fixture primary key is ever hardcoded in markup.
+    """
+
+    # Matched in order. print_isbn first because a print ISBN is the one on
+    # the back of the book and the one people paste; the legacy `isbn` column
+    # is last because it is the one being migrated away from.
+    ISBN_FIELDS = ("print_isbn", "ebook_isbn", "isbn")
+
+    @staticmethod
+    def normalise(raw: str) -> str:
+        """Strip the separators people paste ISBNs with.
+
+        `978-1-960595-99-7` and `978 1 960595 99 7` are the same book as
+        `9781960595997`. The stored values are bare digits, so anything
+        keeping a hyphen would simply never match.
+        """
+        return re.sub(r"[\s\-‐-―]", "", raw).upper()
+
+    def get(self, request, isbn):
+        normalised = self.normalise(isbn)
+        if not normalised:
+            raise Http404("No ISBN given")
+
+        for field in self.ISBN_FIELDS:
+            product = Product.objects.filter(**{field: normalised}).first()
+            if product is not None:
+                # Permanent in meaning but issued as a 302: the mapping from
+                # ISBN to pk is data, and a 301 would be cached by browsers
+                # past our ability to correct it if a row were ever re-keyed.
+                return redirect("product", pk=product.pk)
+
+        # A deliberate 404 rather than a redirect to /products: an unknown
+        # ISBN is a wrong URL, and bouncing it to the catalogue would tell
+        # both the visitor and a crawler that the book exists here.
+        raise Http404(f"No book with ISBN {normalised}")
+
+
 class ProductView(View):
     def get(self, request, pk):
         product = get_object_or_404(Product, pk=pk)

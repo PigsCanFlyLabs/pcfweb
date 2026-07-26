@@ -11,6 +11,9 @@ urlpatterns = [
     path('products/<str:category>', views.ProductsView.as_view(), name="products"),
     path('subscribe', views.SubscribeView.as_view(), name="subscribe"),
     path('product/<int:pk>', views.ProductView.as_view(), name="product"),
+    # Stable alias for a book, so templates never hardcode a fixture pk.
+    # Redirects to the canonical product/<int:pk>; see BookByIsbnView.
+    path('book/<str:isbn>', views.BookByIsbnView.as_view(), name="book-by-isbn"),
     path('google_products.xml', views.GoogleProductFeed.as_view(), name='googleproducts'),
 
     # Cart
