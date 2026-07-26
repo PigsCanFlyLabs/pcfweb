@@ -5,28 +5,11 @@ from unittest import mock
 
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
-from django.test import Client, TestCase
+from django.test import Client
 
 from main.models import Cart, CartProduct, Product
+from main.tests.base import CartTestBase
 from main.views import AddToCartView
-
-
-class CartTestBase(TestCase):
-    """Cart tests: stubs Stripe out, since every CartProduct save hits it."""
-
-    fixtures = ["initial_products"]
-
-    def setUp(self):
-        patcher = mock.patch("main.models.Payments")
-        payments = patcher.start()
-        self.addCleanup(patcher.stop)
-        payments.create_product.return_value = "prod_test"
-        payments.create_price.return_value = "price_test"
-        Product.objects.filter(cat=Product.Categories.BOOKS).update(stock=99)
-
-    def make_user(self, email="buyer@example.com", username="buyer"):
-        return User.objects.create_user(
-            username=username, email=email, password="hunter2hunter2")
 
 
 class CartOwnershipTest(CartTestBase):

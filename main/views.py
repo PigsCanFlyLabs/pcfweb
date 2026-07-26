@@ -12,7 +12,8 @@ from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import transaction
 from django.db.models import Q
-from django.http import Http404, HttpResponse, HttpResponseBadRequest
+from django.http import (
+    FileResponse, Http404, HttpResponse, HttpResponseBadRequest)
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -22,6 +23,9 @@ from django.views.decorators.csrf import csrf_exempt
 
 import stripe
 
+from main.digital import (
+    BadSignature, DigitalAssetError, SignatureExpired, link_lifetime_days,
+    open_asset, parse_download_token)
 from main.models import Cart, CartProduct, Order, Product
 from main.payments import Payments
 from main.utils import generate_username, get_country_code
@@ -303,11 +307,16 @@ class CartView(View, BaseCartView):
         total_price = sum(map(lambda x: x.total_price(), cart_products))
         total_display_price = "{0:.2f}".format(total_price / 100)
         has_physical = any(cp.product.is_physical_good() for cp in cart_products)
+        # The displayed total is the sum of list prices, which for a
+        # pay-what-you-want line is only a suggestion. Say so rather than
+        # showing a number the buyer is not going to be charged.
+        has_pwyw = any(cp.product.is_pwyw for cp in cart_products)
         return render(request, 'cart.html', context={
             'title': 'Cart',
             'products': cart_products,
             'total_price': total_display_price,
             'has_physical': has_physical,
+            'has_pwyw': has_pwyw,
         })
 
 
@@ -479,6 +488,13 @@ class StripeWebhookView(View):
         "checkout.session.async_payment_failed": "the payment failed",
         "checkout.session.expired": "the checkout session expired",
     }
+    # Payment statuses that mean the sale is done and fulfilment should run.
+    # "no_payment_required" is what a zero-total session reports: Stripe
+    # creates no PaymentIntent at all, so it can never become "paid". That is
+    # a real case here rather than a curiosity -- the e-book is
+    # pay-what-you-want with a floor of zero, and the owner's decision is that
+    # a $0 order is still an order and the book still gets delivered.
+    PAID_PAYMENT_STATUSES = frozenset({"paid", "no_payment_required"})
 
     def post(self, request):
         secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
@@ -515,7 +531,7 @@ class StripeWebhookView(View):
         return HttpResponse(status=200)
 
     def handle_paid(self, session) -> None:
-        if session.get("payment_status") != "paid":
+        if session.get("payment_status") not in self.PAID_PAYMENT_STATUSES:
             # e.g. a completed session whose ACH debit has not settled. The
             # matching async_payment_succeeded will arrive later.
             logger.info(
@@ -552,10 +568,15 @@ class StripeWebhookView(View):
 
         order.refresh_from_db()
         # Only the delivery that actually moved the row gets here, so this
-        # runs once per order. Both calls are best-effort by construction --
-        # the payment is already recorded and must not be undone by a
-        # secondary lookup or an SMTP outage.
+        # runs once per order -- which is exactly what keeps a webhook
+        # re-delivery from emailing the customer their book a second time.
+        # All three calls are best-effort by construction: the payment is
+        # already recorded and must not be undone by a secondary lookup, a
+        # missing file or an SMTP outage.
         order.reconcile_line_items()
+        # Before notify_owner, so the owner's email can report whether the
+        # customer actually got their download.
+        order.deliver_digital_goods()
         order.notify_owner()
 
     def handle_cancelled(self, session, reason: str) -> None:
@@ -655,6 +676,75 @@ class StripeWebhookView(View):
             "shipping_country": shipping_address.get("country") or "",
         })
         return fields
+
+
+class DigitalDownloadView(View):
+    """Serve a purchased book from a signed, expiring link.
+
+    Unauthenticated by design: the buyer typically has no account, so the
+    signature on the token *is* the authorisation. It carries the order and
+    the product, and both are re-checked against the database here -- a token
+    only works for an order that was actually paid, actually contains that
+    product, and whose product is still one we are licensed to hand out.
+
+    Nothing about the path comes from the URL. The token yields two integers;
+    the filename is rebuilt from the product's stem through
+    digital.resolve_asset_path, which is what keeps an admin-typed
+    "../../etc/passwd" from becoming a file read.
+    """
+
+    EXPIRED_MESSAGE = (
+        "This download link has expired.\n\n"
+        "Links are good for {days} days. Write to {email} quoting your order "
+        "number and we will send you a fresh one.\n")
+
+    def get(self, request, token):
+        try:
+            order_pk, product_pk = parse_download_token(token)
+        except SignatureExpired:
+            # Distinguished from a bad signature: this is a real customer with
+            # a real receipt, and telling them "404" would be a lie.
+            return HttpResponse(
+                self.EXPIRED_MESSAGE.format(
+                    days=link_lifetime_days(),
+                    email=settings.DEFAULT_FROM_EMAIL),
+                status=410, content_type="text/plain; charset=utf-8")
+        except BadSignature:
+            logger.warning("Rejected a download token that did not verify.")
+            raise Http404("No such download.")
+
+        order = Order.objects.filter(pk=order_pk).first()
+        if order is None or order.status not in (
+                Order.Status.PAID, Order.Status.FULFILLED):
+            # Includes an order that was never paid for, so a guessed-at
+            # (unforgeable) pairing still gets nothing.
+            raise Http404("No such download.")
+        item = order.items.select_related('product').filter(
+            product_id=product_pk).first()
+        if item is None or item.product is None:
+            raise Http404("No such download.")
+        if not item.product.is_digitally_fulfilled():
+            # The rights interlock, applied at serve time as well as at send
+            # time: if sells_ebook has since been cleared, old links stop
+            # working too.
+            logger.warning(
+                "Refusing to serve product %s for order #%s: it is not a "
+                "product we are licensed to distribute.", product_pk, order_pk)
+            raise Http404("No such download.")
+
+        try:
+            handle = open_asset(item.product.digital_asset_name)
+        except DigitalAssetError as e:
+            # A customer-visible 404, but the reason is only ever logged --
+            # it names server paths.
+            logger.error(
+                "Order #%s: cannot serve the download for %r: %s",
+                order_pk, item.product_name, e)
+            raise Http404("No such download.")
+        return FileResponse(
+            handle, as_attachment=True,
+            filename=f"{item.product.digital_asset_name}.zip",
+            content_type="application/zip")
 
 
 class CheckoutCancelView(View, BaseCartView):

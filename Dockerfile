@@ -58,6 +58,15 @@ COPY --chown=www-data:www-data main /opt/app/main
 COPY --chown=www-data:www-data static /opt/app/static
 COPY --chown=www-data:www-data pigscanfly /opt/app/pigscanfly
 COPY --chown=www-data:www-data templates /opt/app/templates
+
+# Purchased book archives, staged into ./book-assets by build.sh out of the
+# sibling pcfweb-book-assets checkout. This path is deliberately outside both
+# nginx aliases (/static and /media, see conf/nginx.default), so the files are
+# not publicly servable -- DigitalDownloadView and its signed links are the
+# only route to one. Correspondingly book-assets/ must NOT be added to
+# .dockerignore, or the books never reach the image.
+COPY --chown=www-data:www-data book-assets /opt/app/book-assets
+
 COPY --chown=www-data:www-data scripts/start-server.sh /opt/app/
 COPY --chown=www-data:www-data *.py /opt/app/
 WORKDIR /opt/app/

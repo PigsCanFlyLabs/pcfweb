@@ -1,17 +1,25 @@
 """Shared bases, constants and helpers for the ``main`` test package.
 
-``OrderTestBase`` and the webhook constants are used from both
-test_orders and test_webhook, so they live here rather than in
-either one. This module is deliberately not named ``test_*`` so the
-test runner does not try to collect it."""
+Every base class used from more than one test module lives here:
+``OrderTestBase`` (test_orders, test_webhook, test_pwyw, test_digital),
+``CartTestBase`` (test_cart, test_digital) and ``BookAssetRootMixin``
+(test_digital, test_pwyw). This module is deliberately not named
+``test_*`` so the test runner does not try to collect it -- which is the
+whole point for the TestCase subclasses above, since importing one into
+a second test module would otherwise collect its tests a second time."""
 
 import hashlib
 import hmac
 import itertools
 import json
+import shutil
+import tempfile
 import time
+import zipfile
+from pathlib import Path
 from unittest import mock
 
+from django.contrib.auth.models import User
 from django.core import mail
 from django.test import TestCase, override_settings
 
@@ -22,6 +30,14 @@ SHIPPING_NOTICE_TEXT = "shipping times for physical goods are currently long"
 WEBHOOK_SECRET = "whsec_test_secret_value"
 WEBHOOK_URL = "/stripe/webhook"
 OWNER_EMAIL = "owner@example.com"
+
+# The repository root. Resolved from this file rather than the working
+# directory because the packaging tests read Dockerfile/.gitignore/build.sh
+# off disk, and the suite is not always run from the checkout root.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+EBOOK_PK = 106
+EBOOK_STEM = "distributed_computing_4_kids"
 
 
 def stripe_signature(payload: str, secret: str = WEBHOOK_SECRET,
@@ -168,3 +184,47 @@ class OrderTestBase(TestCase):
             "HTTP_STRIPE_SIGNATURE": signature}
         return self.client.post(
             WEBHOOK_URL, data=body, content_type="application/json", **extra)
+
+
+def write_book_archive(directory, stem=EBOOK_STEM) -> Path:
+    """A real (tiny) ZIP holding an EPUB and a PDF, as the contract requires."""
+    path = Path(directory) / f"{stem}.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(f"{stem}.epub", "epub bytes")
+        archive.writestr(f"{stem}.pdf", "%PDF-1.4 pdf bytes")
+    return path
+
+
+class BookAssetRootMixin:
+    """Point BOOK_ASSET_ROOT at a throwaway directory holding one book."""
+
+    stem = EBOOK_STEM
+
+    def setUp(self):
+        super().setUp()
+        # resolve() because resolve_asset_path() compares resolved paths, and
+        # a temp directory is a symlink on some platforms.
+        self.asset_root = Path(tempfile.mkdtemp(prefix="pcfweb-books-")).resolve()
+        self.addCleanup(shutil.rmtree, self.asset_root, True)
+        settings_patch = override_settings(BOOK_ASSET_ROOT=str(self.asset_root))
+        settings_patch.enable()
+        self.addCleanup(settings_patch.disable)
+        self.archive = write_book_archive(self.asset_root, self.stem)
+
+
+class CartTestBase(TestCase):
+    """Cart tests: stubs Stripe out, since every CartProduct save hits it."""
+
+    fixtures = ["initial_products"]
+
+    def setUp(self):
+        patcher = mock.patch("main.models.Payments")
+        payments = patcher.start()
+        self.addCleanup(patcher.stop)
+        payments.create_product.return_value = "prod_test"
+        payments.create_price.return_value = "price_test"
+        Product.objects.filter(cat=Product.Categories.BOOKS).update(stock=99)
+
+    def make_user(self, email="buyer@example.com", username="buyer"):
+        return User.objects.create_user(
+            username=username, email=email, password="hunter2hunter2")
