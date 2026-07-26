@@ -898,6 +898,20 @@ class InterestArea(models.Model):
         default=True,
         help_text="Inactive areas stop appearing on signup forms and stop "
                   "accepting new signups. Existing subscribers are kept.")
+    # What makes the "All" group mean what it says. Without it, picking "All"
+    # would put somebody in a group named after everything and then leave
+    # them out of every mailing addressed to a particular topic -- the exact
+    # opposite of what they asked for.
+    catch_all = models.BooleanField(
+        default=False, db_default=False,
+        help_text="Subscribers here get every mailing, whichever groups it "
+                  "is addressed to.")
+    # Curated rather than alphabetical: the order these appear in on the
+    # signup form is an editorial choice, not a fact about their names.
+    sort_order = models.PositiveSmallIntegerField(
+        default=100, db_default=100,
+        help_text="Lower sorts earlier on the signup form. Ties break by "
+                  "name.")
     created_at = models.DateTimeField(auto_now_add=True)
 
     # The group every signup that does not name one lands in. Created by a
@@ -905,7 +919,7 @@ class InterestArea(models.Model):
     DEFAULT_SLUG = "general"
 
     class Meta:
-        ordering = ["name"]
+        ordering = ["sort_order", "name"]
 
     def __str__(self) -> str:
         return self.name
@@ -926,17 +940,14 @@ class InterestArea(models.Model):
 
     @classmethod
     def signup_choices(cls) -> "models.QuerySet":
-        """The groups to offer on a signup form, general first.
+        """The groups to offer on a signup form, in their curated order.
 
-        First is what a select box shows before anybody touches it, and the
-        rule is that not choosing means the general group -- so an
-        alphabetically earlier group must not be able to take that slot.
+        Which one is *pre-selected* is a separate question and is not this:
+        the form marks the general group selected, because the rule is that
+        not choosing means general, and the group listed first is an
+        editorial decision that must not quietly become the default.
         """
-        return cls.objects.filter(active=True).order_by(
-            models.Case(
-                models.When(slug=cls.DEFAULT_SLUG, then=models.Value(0)),
-                default=models.Value(1)),
-            "name")
+        return cls.objects.filter(active=True)
 
     def subscriber_count(self) -> int:
         return self.subscriptions.filter(
@@ -1152,6 +1163,11 @@ class MailingListMessage(models.Model):
     created_by = models.ForeignKey(
         User, null=True, blank=True, on_delete=models.SET_NULL,
         related_name="mailing_list_messages")
+    # When the first batch went out. This closes the audience: see
+    # recipients(). Without it the list is recomputed per batch, so somebody
+    # subscribing mid-send gets a mailing that predates them -- and a finished
+    # mailing quietly becomes unfinished again every time anybody signs up.
+    send_started_at = models.DateTimeField(null=True, blank=True)
     # When the last batch that finished the list went out.
     sent_at = models.DateTimeField(null=True, blank=True)
 
@@ -1177,19 +1193,44 @@ class MailingListMessage(models.Model):
     def recipients(self) -> "models.QuerySet":
         """Every confirmed subscriber this mailing is addressed to.
 
-        Ordered by pk so batching is stable, and so the address that gets the
-        mail when somebody is in two selected groups is always the same one.
+        Anyone in a catch-all group ("All") is included whatever groups this
+        names -- that is what they signed up for. Ordered by pk so batching
+        is stable, and so the row that gets the mail when somebody is in
+        several selected groups is always the same one.
+
+        Once the first batch has gone out the audience is closed to whoever
+        was already on the list: a mailing is a thing that was sent at a
+        moment, not a standing subscription, and somebody who signed up
+        halfway through it did not sign up for it.
         """
         recipients = MailingListSubscription.objects.filter(
             status=MailingListSubscription.Status.SUBSCRIBED)
         interests = list(self.interests.all()) if self.pk else []
         if interests:
-            recipients = recipients.filter(interest__in=interests)
+            recipients = recipients.filter(
+                models.Q(interest__in=interests)
+                | models.Q(interest__catch_all=True))
+        if self.send_started_at is not None:
+            # confirmed_at is when they joined the list proper. The fallback
+            # covers a row marked subscribed by hand, which has no
+            # confirmation to date from.
+            recipients = recipients.filter(
+                models.Q(confirmed_at__lte=self.send_started_at)
+                | models.Q(confirmed_at__isnull=True,
+                           created_at__lte=self.send_started_at))
         return recipients.select_related("interest").order_by("pk")
 
     def pending_recipients(self) -> "models.QuerySet":
-        already = self.deliveries.values_list("subscription_id", flat=True)
-        return self.recipients().exclude(pk__in=already)
+        """Who is still owed a copy.
+
+        Excluded by *address*, not by subscription row: somebody in two of
+        the selected groups has two rows and is owed one copy, so once either
+        row has been delivered the other is not pending. This is also what
+        makes a duplicate drain out of the count instead of sitting there
+        forever keeping the send from finishing.
+        """
+        delivered = self.deliveries.values_list("email", flat=True)
+        return self.recipients().exclude(email__in=delivered)
 
     def recipient_count(self) -> int:
         return self.recipients().count()
@@ -1258,40 +1299,36 @@ class MailingListMessage(models.Model):
         that already have the mail.
         """
         limit = limit or getattr(settings, "MAILING_LIST_SEND_BATCH_SIZE", 100)
+        if self.status == self.Status.SENT:
+            # Already finished. Reopening it would mail an old message to
+            # whoever has subscribed since.
+            return (0, 0)
         batch = list(self.pending_recipients()[:limit])
         if not batch:
             self._finish()
             return (0, 0)
-        if self.status == self.Status.DRAFT:
-            MailingListMessage.objects.filter(pk=self.pk).update(
-                status=self.Status.SENDING)
+        if self.send_started_at is None:
+            # Written before the first mail goes out, because it is what
+            # closes the audience -- setting it afterwards would leave a
+            # window where a new subscriber joins the send in progress.
+            self.send_started_at = timezone.now()
             self.status = self.Status.SENDING
-
-        # An address in two selected groups has two subscription rows; it gets
-        # the mailing once, and the other rows are recorded as skipped so the
-        # pending count still drains to zero.
-        already = set(self.deliveries.exclude(
-            status=MailingListDelivery.Status.SKIPPED).values_list(
-                "subscription__email", flat=True))
+            MailingListMessage.objects.filter(pk=self.pk).update(
+                status=self.status, send_started_at=self.send_started_at)
         sent = failed = 0
         connection = get_connection(fail_silently=False)
         try:
             connection.open()
             for subscription in batch:
-                if subscription.email in already:
-                    self._claim(subscription,
-                                MailingListDelivery.Status.SKIPPED,
-                                "Already mailed at this address for this "
-                                "message.")
-                    continue
                 # The row is claimed *before* the send, and the unique
-                # constraint on it is what makes the claim exclusive: two
-                # people clicking send at the same moment cannot both take
-                # the same recipient, so nobody gets the mailing twice. The
-                # cost is that a process killed between the claim and the
-                # send leaves a row saying sent for a mail that never went --
-                # which is the right way round for a mailing list, where one
-                # missed copy beats one duplicate.
+                # constraint on (message, email) is what makes the claim
+                # exclusive: two people clicking send at the same moment
+                # cannot both take the same address -- not even via two
+                # different subscription rows for it -- so nobody gets the
+                # mailing twice. The cost is that a process killed between
+                # the claim and the send leaves a row saying sent for a mail
+                # that never went, which is the right way round for a mailing
+                # list, where one missed copy beats one duplicate.
                 delivery = self._claim(
                     subscription, MailingListDelivery.Status.SENT)
                 if delivery is None:
@@ -1311,7 +1348,6 @@ class MailingListMessage(models.Model):
                     delivery.save(update_fields=["status", "error"])
                     failed += 1
                     continue
-                already.add(subscription.email)
                 sent += 1
         finally:
             try:
@@ -1335,8 +1371,8 @@ class MailingListMessage(models.Model):
         try:
             with transaction.atomic():
                 return MailingListDelivery.objects.create(
-                    message=self, subscription=subscription, status=status,
-                    error=error)
+                    message=self, subscription=subscription,
+                    email=subscription.email, status=status, error=error)
         except IntegrityError:
             logger.info(
                 "Message %s was already claimed for %s; not sending again.",
@@ -1373,7 +1409,6 @@ class MailingListDelivery(models.Model):
     class Status(models.TextChoices):
         SENT = 'S', 'sent'
         FAILED = 'F', 'failed'
-        SKIPPED = 'K', 'skipped'
 
     message = models.ForeignKey(
         MailingListMessage, on_delete=models.CASCADE,
@@ -1381,6 +1416,10 @@ class MailingListDelivery(models.Model):
     subscription = models.ForeignKey(
         MailingListSubscription, on_delete=models.CASCADE,
         related_name="deliveries")
+    # The address the copy went to, copied rather than followed through the
+    # subscription: it is what the uniqueness below is enforced on, and it
+    # stays true if the subscription is later moved or edited.
+    email = models.EmailField(max_length=254)
     status = models.CharField(
         max_length=1, choices=Status.choices, default=Status.SENT)
     error = models.TextField(blank=True)
@@ -1389,12 +1428,17 @@ class MailingListDelivery(models.Model):
     class Meta:
         ordering = ["-created_at"]
         constraints = [
-            # The guard against sending twice. Anything that would write a
-            # second row for the same (message, recipient) is a double send.
+            # The guard against sending twice, enforced on the address rather
+            # than only the subscription row: somebody in two of the groups a
+            # mailing names has two rows, and two concurrent senders could
+            # otherwise take one each and both mail them.
+            models.UniqueConstraint(
+                fields=["message", "email"],
+                name="unique_delivery_per_address"),
             models.UniqueConstraint(
                 fields=["message", "subscription"],
                 name="unique_delivery_per_message"),
         ]
 
     def __str__(self) -> str:
-        return f'{self.subscription.email}: {self.get_status_display()}'
+        return f'{self.email}: {self.get_status_display()}'

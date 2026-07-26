@@ -26,7 +26,9 @@
     <p>Only confirmed subscribers are counted: an address that never clicked
       the link in its confirmation email is never mailed. Everyone gets one
       copy even if they are in several of the selected groups, and every
-      message carries an unsubscribe link.</p>
+      message carries an unsubscribe link.{% if groups %} Anyone who
+      subscribed to a catch-all group ("All") is included too — that is what
+      they asked for.{% endif %}</p>
   </div>
 
   <form method="post">
@@ -69,7 +71,7 @@
         <thead><tr><th>Address</th><th>Error</th></tr></thead>
         <tbody>
           {% for delivery in failures %}
-            <tr><th scope="row" style="width:18rem">{{ delivery.subscription.email }}</th><td>{{ delivery.error }}</td></tr>
+            <tr><th scope="row" style="width:18rem">{{ delivery.email }}</th><td>{{ delivery.error }}</td></tr>
           {% endfor %}
         </tbody>
       </table>

@@ -15,8 +15,11 @@
 		  {% if areas|length > 1 %}
 		  <label for="id_interest">I'm interested in:</label>
 		  <select name="interest" id="id_interest">
+		    {# Listed in their curated order, but the general group is what #}
+		    {# is selected: not choosing means general, so whichever group  #}
+		    {# happens to be listed first must not become the default.      #}
 		    {% for area in areas %}
-		    <option value="{{ area.slug }}"{% if area.slug == selected_area %} selected{% endif %}>{{ area.name }}</option>
+		    <option value="{{ area.slug }}"{% if area.slug == selected_area|default:'general' %} selected{% endif %}>{{ area.name }}</option>
 		    {% endfor %}
 		  </select>
 		  {% elif selected_area %}

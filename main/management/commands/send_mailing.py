@@ -61,7 +61,15 @@ class Command(BaseCommand):
 
         limit = options["limit"]
         total_sent = total_failed = 0
+        # Looping on the pending count rather than on what the last batch
+        # returned: a batch can legitimately come back (0, 0) -- every address
+        # in it claimed by a concurrent send, say -- and stopping there would
+        # quietly leave the rest of the list unmailed. The no-progress check
+        # below is what stops this spinning if nothing is actually draining.
         while True:
+            remaining = message.pending_count()
+            if not remaining:
+                break
             batch_size = options["batch_size"]
             if limit is not None:
                 remaining_allowance = limit - (total_sent + total_failed)
@@ -70,10 +78,14 @@ class Command(BaseCommand):
                 batch_size = min(batch_size or remaining_allowance,
                                  remaining_allowance)
             sent, failed = message.send_batch(limit=batch_size)
-            if not sent and not failed:
-                break
             total_sent += sent
             total_failed += failed
+            if message.pending_count() >= remaining:
+                self.stderr.write(
+                    f"Stopping: a batch made no progress and {remaining} "
+                    "recipients are still pending. Something else may be "
+                    "sending this message.")
+                break
             self.stdout.write(
                 f"  sent {total_sent}, failed {total_failed}, "
                 f"{message.pending_count()} to go")

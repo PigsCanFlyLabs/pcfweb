@@ -11,6 +11,7 @@ from unittest import mock
 
 from django.contrib.auth.models import User
 from django.core import mail
+from django.core.management import call_command
 from django.core.exceptions import ValidationError
 from django.core.cache import cache
 from django.test import Client, TestCase, override_settings
@@ -36,10 +37,11 @@ class MailingListTestBase(TestCase):
         # outlives a test case. Without this, tests poison each other in
         # whatever order they happen to run in.
         cache.clear()
+        # The seeded groups (see migration 0012), not invented ones: these
+        # tests should break if a slug an embedded form depends on changes.
         self.general = InterestArea.get_default()
-        self.dc4k = InterestArea.objects.create(
-            slug="dc4k", name="Distributed Computing 4 Kids",
-            description="News about the book.")
+        self.dc4k = InterestArea.objects.get(slug="dc4k")
+        self.everything = InterestArea.objects.get(slug="all")
 
 
 class SignupTest(MailingListTestBase):
@@ -279,6 +281,34 @@ class ConfirmAndUnsubscribeTest(MailingListTestBase):
                          MailingListSubscription.Status.SUBSCRIBED)
         self.assertIsNotNone(self.subscription.confirmed_at)
 
+    def test_confirming_twice_is_harmless(self):
+        url = f"/mailing-list/confirm/{self.subscription.token}"
+        self.client.get(url)
+
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.subscription.refresh_from_db()
+        self.assertEqual(self.subscription.status,
+                         MailingListSubscription.Status.SUBSCRIBED)
+
+    def test_an_old_confirmation_link_cannot_undo_an_unsubscribe(self):
+        # Unsubscribing does not rotate the token, so the original
+        # confirmation email still carries a working link. A forwarded copy
+        # of it -- or a link scanner reaching it late -- must not put
+        # somebody back on a list they left.
+        self.subscription.mark_subscribed()
+        self.subscription.unsubscribe()
+
+        with self.assertLogs("main.views", level="INFO"):
+            response = self.client.get(
+                f"/mailing-list/confirm/{self.subscription.token}")
+
+        self.assertEqual(response.status_code, 200)
+        self.subscription.refresh_from_db()
+        self.assertEqual(self.subscription.status,
+                         MailingListSubscription.Status.UNSUBSCRIBED)
+
     def test_an_unknown_token_is_a_404(self):
         self.assertEqual(
             self.client.get("/mailing-list/confirm/nope").status_code, 404)
@@ -322,15 +352,89 @@ class ConfirmAndUnsubscribeTest(MailingListTestBase):
                          MailingListSubscription.Status.UNSUBSCRIBED)
 
 
-class SubscribePageTest(MailingListTestBase):
-    def test_the_general_group_is_the_preselected_option(self):
-        # The rule is that not choosing means the general group. A select box
-        # shows its first option, so an alphabetically earlier group must not
-        # be able to take that slot -- "Distributed Computing 4 Kids" sorts
-        # before "General updates".
+class SeededInterestAreasTest(MailingListTestBase):
+    """The initial groups. Their slugs end up in markup on other sites, so
+    they are part of the interface, not just data."""
+
+    EXPECTED = ["all", "general", "books", "dc4k", "high-performance-spark",
+                "liberated-bread", "fight-health-insurance"]
+
+    def test_every_group_is_seeded_in_order(self):
         self.assertEqual(
-            [area.slug for area in InterestArea.signup_choices()],
-            ["general", "dc4k"])
+            [area.slug for area in InterestArea.objects.all()], self.EXPECTED)
+
+    def test_only_the_all_group_is_a_catch_all(self):
+        self.assertEqual(
+            [area.slug for area in
+             InterestArea.objects.filter(catch_all=True)], ["all"])
+
+
+class CatchAllGroupTest(MailingListTestBase):
+    """"All" has to mean all, or it is a group named after everything whose
+    members hear about nothing."""
+
+    def setUp(self):
+        super().setUp()
+        self.everyone = MailingListSubscription.subscribe(
+            "everything@example.com", interest=self.everything, confirmed=True)
+        self.kid = MailingListSubscription.subscribe(
+            "kid@example.com", interest=self.dc4k, confirmed=True)
+        self.plain = MailingListSubscription.subscribe(
+            "general@example.com", interest=self.general, confirmed=True)
+        mail.outbox.clear()
+
+    def targeted_message(self, *interests):
+        message = MailingListMessage.objects.create(
+            subject="Book news", body="News.")
+        for interest in interests:
+            message.interests.add(interest)
+        return message
+
+    def test_a_group_mailing_also_reaches_the_all_subscribers(self):
+        self.targeted_message(self.dc4k).send_batch()
+
+        self.assertEqual(sorted(m.to[0] for m in mail.outbox),
+                         ["everything@example.com", "kid@example.com"])
+
+    def test_it_does_not_drag_in_unrelated_groups(self):
+        self.targeted_message(self.dc4k).send_batch()
+
+        self.assertNotIn("general@example.com",
+                         [m.to[0] for m in mail.outbox])
+
+    def test_being_in_all_and_in_the_targeted_group_is_still_one_copy(self):
+        MailingListSubscription.subscribe(
+            "everything@example.com", interest=self.dc4k, confirmed=True)
+        message = self.targeted_message(self.dc4k)
+
+        message.send_batch()
+
+        self.assertEqual(
+            [m.to[0] for m in mail.outbox].count("everything@example.com"), 1)
+        self.assertEqual(message.pending_count(), 0)
+
+    def test_an_all_subscriber_who_unsubscribes_stops_getting_everything(self):
+        self.everyone.unsubscribe()
+
+        self.targeted_message(self.dc4k).send_batch()
+
+        self.assertEqual([m.to[0] for m in mail.outbox], ["kid@example.com"])
+
+
+class SubscribePageTest(MailingListTestBase):
+    def test_the_groups_are_offered_in_their_curated_order(self):
+        self.assertEqual(
+            [area.slug for area in InterestArea.signup_choices()][:3],
+            ["all", "general", "books"])
+
+    def test_the_general_group_is_the_preselected_option(self):
+        # The rule is that not choosing means the general group, and a select
+        # box submits its first option when nobody touches it -- so "All",
+        # which is listed first, must not be able to take that slot.
+        response = self.client.get("/subscribe")
+
+        self.assertContains(response, 'value="general" selected')
+        self.assertNotContains(response, 'value="all" selected')
 
     def test_the_page_offers_every_active_group(self):
         response = self.client.get("/subscribe")
@@ -663,6 +767,69 @@ class SendingTest(MailingListTestBase):
 
         with self.assertRaises(ValidationError):
             message.full_clean()
+
+    def test_two_rows_for_one_address_cannot_both_be_claimed(self):
+        # Two concurrent senders can hold different subscription rows for the
+        # same person, so the claim has to be exclusive on the address.
+        other_row = MailingListSubscription.subscribe(
+            self.confirmed.email, interest=self.dc4k, confirmed=True)
+        message = self.message()
+
+        first = message._claim(
+            self.confirmed, MailingListDelivery.Status.SENT)
+        with self.assertLogs("main.models", level="INFO"):
+            second = message._claim(
+                other_row, MailingListDelivery.Status.SENT)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+
+    def test_somebody_who_subscribes_mid_send_is_not_added_to_it(self):
+        message = self.message()
+        message.send_batch(limit=1)
+
+        MailingListSubscription.subscribe(
+            "late@example.com", interest=self.general, confirmed=True)
+
+        self.assertNotIn(
+            "late@example.com",
+            [s.email for s in message.pending_recipients()])
+
+    def test_a_finished_mailing_does_not_reopen_when_somebody_subscribes(self):
+        message = self.message()
+        message.send_batch()
+        self.assertEqual(message.status, MailingListMessage.Status.SENT)
+        mail.outbox.clear()
+
+        MailingListSubscription.subscribe(
+            "late@example.com", interest=self.general, confirmed=True)
+
+        self.assertEqual(message.pending_count(), 0)
+        self.assertEqual(message.send_batch(), (0, 0))
+        self.assertEqual(mail.outbox, [])
+
+    def test_the_command_finishes_a_list_that_starts_with_a_duplicate(self):
+        # The duplicate row sorts first, so a batch size of one hands the
+        # sender a batch with nothing to send in it. That must not be read as
+        # "the list is done" while later recipients are still waiting.
+        MailingListSubscription.subscribe(
+            self.confirmed.email, interest=self.dc4k, confirmed=True)
+        message = self.message(self.general, self.dc4k)
+        mail.outbox.clear()
+
+        call_command("send_mailing", message.pk, "--send", "--batch-size", "1",
+                     stdout=io.StringIO())
+
+        self.assertEqual(sorted(m.to[0] for m in mail.outbox),
+                         ["in@example.com", "kid@example.com"])
+        self.assertEqual(message.pending_count(), 0)
+
+    def test_the_command_sends_nothing_without_the_send_flag(self):
+        message = self.message()
+
+        call_command("send_mailing", message.pk, stdout=io.StringIO())
+
+        self.assertEqual(mail.outbox, [])
 
     def test_a_test_send_is_not_recorded_as_a_delivery(self):
         message = self.message()

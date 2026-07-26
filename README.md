@@ -116,12 +116,40 @@ Subscribers live in `MailingListSubscription`, one row per address per
 does not pick one is in the general group**, which a data migration creates
 and `InterestArea.get_default()` re-creates if it is ever deleted.
 
+The groups are seeded by migration `0012_seed_interest_areas`:
+
+| Slug | Group | |
+| --- | --- | --- |
+| `all` | All | **catch-all** — gets every mailing, whichever groups it names |
+| `general` | General updates | the default for anyone who does not choose |
+| `books` | Books | |
+| `dc4k` | Distributed Computing 4 Kids and Executives | |
+| `high-performance-spark` | High Performance Spark | |
+| `liberated-bread` | Liberated Bread | |
+| `fight-health-insurance` | Fight Health Insurance | |
+
+That migration only ever adds, so renaming or deactivating a group in the
+admin sticks. **Slugs are interface**, not data: an embedded form on another
+site carries one in its markup, so add a new group rather than renaming one.
+`sort_order` controls the order they are offered in (editable in the admin);
+being listed first is *not* what makes a group the default — the signup form
+explicitly pre-selects general, so putting "All" at the top cannot quietly
+capture people who did not choose.
+
+`catch_all` is what makes "All" mean all: a mailing addressed to Books
+reaches the Books subscribers *and* everyone in a catch-all group, once
+each. Without it, picking "All" would opt someone into a group named after
+everything and then leave them out of every mailing addressed to a topic.
+
 An address is not on the list until it confirms:
 
 1. `POST /mailing-list/subscribe` records a PENDING row and mails a
    confirmation link.
 2. `GET /mailing-list/confirm/<token>` marks it SUBSCRIBED. Only SUBSCRIBED
-   rows are ever mailed anything else.
+   rows are ever mailed anything else. Only a PENDING row confirms:
+   unsubscribing does not rotate the token, so an old or forwarded
+   confirmation link cannot undo somebody leaving the list — signing up again
+   is the way back, and that mails a fresh link.
 3. `GET /mailing-list/unsubscribe/<token>` asks, `POST` to the same URL does
    it. Every mailing carries that link plus a `List-Unsubscribe` header, so
    mail clients show a real unsubscribe button.
@@ -171,11 +199,16 @@ with the options commented. Two options:
   errors without writing anything.
 - `/timbit/admin/mailing-list/send/<id>` sends a mailing to everyone or to
   the groups it names. Send yourself a test first. Sending goes out
-  `MAILING_LIST_SEND_BATCH_SIZE` at a time with a `MailingListDelivery` row
-  per recipient, so **nobody is mailed twice**: a reload, a worker timeout or
-  a second click continues where it stopped. Someone in two selected groups
-  gets one copy. `./manage.py send_mailing <id> --send` does the same from a
-  shell for a list too long to click through.
+  `MAILING_LIST_SEND_BATCH_SIZE` at a time, claiming a `MailingListDelivery`
+  row *before* each mail goes out, so **nobody is mailed twice**: a reload, a
+  worker timeout, a second click or a concurrent send continues where it
+  stopped. The claim is unique on (message, address), not just on the
+  subscription row, so someone in two of the selected groups gets one copy
+  even if two senders overlap. The first batch also freezes the audience —
+  somebody who subscribes mid-send is not added to a mailing that predates
+  them, and a finished mailing does not quietly reopen. `./manage.py
+  send_mailing <id> --send` does the same from a shell for a list too long to
+  click through.
 - `./manage.py import_newsletter_subscribers --apply` moves confirmed
   django-newsletter subscribers over, one interest area per newsletter. The
   site's own forms no longer post to django-newsletter; run this once so the
@@ -272,9 +305,10 @@ disagree with each other. There are **three** of them — `web-primary`, the
 5. After the rollout: set `stock` in the admin for anything that should be
    directly purchasable (see *Stock*).
 6. First rollout with the mailing list: the admin moved to `/timbit/admin/`
-   (old links redirect). Add the interest areas you want people to be able to
-   pick, set `MAILING_LIST_REDIRECT_HOSTS` for any site whose embedded form
-   should bounce visitors back to itself, and run
+   (old links redirect). The interest groups are seeded by migration, so
+   check the list and deactivate anything you do not want offered, set
+   `MAILING_LIST_REDIRECT_HOSTS` for any site whose embedded form should
+   bounce visitors back to itself, and run
    `./manage.py import_newsletter_subscribers --apply` once so the addresses
    collected through django-newsletter are on the new list. Send yourself a
    test from the send page before sending anything to anybody else.

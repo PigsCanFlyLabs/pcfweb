@@ -55,9 +55,10 @@ class OrderAdmin(admin.ModelAdmin):
 class InterestAreaAdmin(admin.ModelAdmin):
     """The groups people can subscribe to."""
 
-    list_display = ("name", "slug", "active", "subscriber_count",
-                    "embed_link")
-    list_filter = ("active",)
+    list_display = ("name", "slug", "sort_order", "catch_all", "active",
+                    "subscriber_count", "embed_link")
+    list_filter = ("active", "catch_all")
+    list_editable = ("sort_order",)
     search_fields = ("name", "slug")
     prepopulated_fields = {"slug": ("name",)}
 
@@ -123,7 +124,7 @@ class MailingListDeliveryInline(admin.TabularInline):
     model = MailingListDelivery
     extra = 0
     can_delete = False
-    fields = ("subscription", "status", "error", "created_at")
+    fields = ("email", "subscription", "status", "error", "created_at")
     readonly_fields = fields
     # A finished mailing has one row per recipient; the whole list would make
     # the change page unusable.

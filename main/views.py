@@ -908,7 +908,24 @@ class MailingListConfirmView(MailingListMixin, View):
 
     def get(self, request, token):
         subscription = get_object_or_404(MailingListSubscription, token=token)
-        if subscription.status != MailingListSubscription.Status.SUBSCRIBED:
+        if subscription.status == MailingListSubscription.Status.UNSUBSCRIBED:
+            # Only PENDING confirms. Unsubscribing does not rotate the token,
+            # so the original confirmation email still carries a working link
+            # -- and a forwarded copy of it, or a link scanner getting to it
+            # late, must not be able to undo somebody leaving the list.
+            # Signing up again is the way back, and that mails a fresh link.
+            logger.info(
+                "Ignoring a confirmation link for %s: they unsubscribed.",
+                subscription.email)
+            return render(request, 'mailing_list_result.html', context={
+                'title': 'Not subscribed',
+                'ok': False,
+                'message': (
+                    f"{subscription.email} unsubscribed from "
+                    f"{subscription.interest}, so that link no longer does "
+                    "anything. You are welcome back any time."),
+            })
+        if subscription.status == MailingListSubscription.Status.PENDING:
             subscription.mark_subscribed()
         return render(request, 'mailing_list_result.html', context={
             'title': 'Subscribed',
@@ -984,8 +1001,11 @@ class MailingListEmbedCodeView(View):
     def get(self, request):
         areas = list(InterestArea.signup_choices())
         selected_slug = request.GET.get("interest")
-        area = next((a for a in areas if a.slug == selected_slug),
-                    None) or (areas[0] if areas else InterestArea.get_default())
+        # Falls back to the general group rather than to whichever area
+        # happens to sort first, so copying the snippet without choosing
+        # produces a form that agrees with the site's own default.
+        area = (next((a for a in areas if a.slug == selected_slug), None)
+                or InterestArea.get_default())
         return render(request, 'mailing_list_embed_code.html', context={
             'title': 'Embeddable signup form',
             'areas': areas,
