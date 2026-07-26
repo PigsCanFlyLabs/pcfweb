@@ -58,11 +58,16 @@ class AboutView(View):
 
 class FamilyView(View):
     def get(self, request):
-        companies = [
+        # The family is a mix of things, not all of them separate companies:
+        # one is a sibling company with its own site, another is the same
+        # company as Pigs Can Fly Labs but with its own site. The `kind` line
+        # says which each one is so the page does not flatten that distinction.
+        projects = [
             {
                 "name": "Pigs Can Fly Labs",
+                "kind": "Parent company",
                 "description": (
-                    "The parent company behind this site — "
+                    "The company behind this site — "
                     "value-priced queer and nerdy stuff."
                 ),
                 "url": None,
@@ -70,22 +75,28 @@ class FamilyView(View):
             },
             {
                 "name": "Fight Health Insurance",
+                "kind": "Separate company and project",
                 "description": (
-                    "Helps people appeal health insurance denials."
+                    "A separate company and project that helps people "
+                    "appeal health insurance denials."
                 ),
                 "url": "https://www.fighthealthinsurance.com/",
                 "coming_soon": False,
             },
             {
                 "name": "Liberated Bread",
-                "description": "Coming soon.",
+                "kind": "Same company, its own site",
+                "description": (
+                    "The same company as Pigs Can Fly Labs, with its own "
+                    "site — not a separate company. Coming soon."
+                ),
                 "url": None,
                 "coming_soon": True,
             },
         ]
         return render(request, "family.html", context={
-            "title": "Our Family of Companies",
-            "companies": companies,
+            "title": "Our Family of Projects",
+            "projects": projects,
         })
 class PrivacyView(View):
     def get(self, request):

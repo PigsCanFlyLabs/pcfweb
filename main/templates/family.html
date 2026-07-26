@@ -8,7 +8,7 @@
         <div class="row">
             <div class="col-lg-12">
                 <div class="inner-content">
-                    <h2>Our Family of Companies</h2>
+                    <h2>Our Family of Projects</h2>
                 </div>
             </div>
         </div>
@@ -16,31 +16,34 @@
 </div>
 <!-- ***** Main Banner Area End ***** -->
 
-<!-- ***** Family Companies Area Starts ***** -->
+<!-- ***** Family Projects Area Starts ***** -->
 <section class="our-team">
     <div class="container">
         <div class="row">
             <div class="col-lg-12">
                 <div class="section-heading">
-                    <h2>Our Family of Companies</h2>
-                    <span>Projects we build and run.</span>
+                    <h2>Our Family of Projects</h2>
+                    <span>Projects we help build and run — some their own companies, some the same company but with their own site.</span>
                 </div>
             </div>
-            {% for company in companies %}
+            {% for project in projects %}
             <div class="col-lg-4">
                 <div class="team-item">
                     <div class="down-content">
                         <h4>
-                            {% if company.url %}
-                            <a href="{{ company.url }}">{{ company.name }}</a>
+                            {% if project.url %}
+                            <a href="{{ project.url }}">{{ project.name }}</a>
                             {% else %}
-                            {{ company.name }}
+                            {{ project.name }}
                             {% endif %}
-                            {% if company.coming_soon %}
+                            {% if project.coming_soon %}
                             <span class="badge badge-secondary" style="font-size: 0.7rem; vertical-align: middle; background: #aaa; color: #fff; padding: 2px 6px; border-radius: 4px;">Coming Soon</span>
                             {% endif %}
                         </h4>
-                        <span>{{ company.description }}</span>
+                        {% if project.kind %}
+                        <span>{{ project.kind }}</span>
+                        {% endif %}
+                        <span>{{ project.description }}</span>
                     </div>
                 </div>
             </div>
@@ -48,7 +51,7 @@
         </div>
     </div>
 </section>
-<!-- ***** Family Companies Area Ends ***** -->
+<!-- ***** Family Projects Area Ends ***** -->
 
 {% include 'components/subscribe.html' %}
 
