@@ -58,8 +58,9 @@ class AboutView(View):
 
 class FamilyView(View):
     def get(self, request):
-        # The family is a mix of things, not all of them companies: some are
-        # sibling companies, some are just related projects. The `kind` line
+        # The family is a mix of things, not all of them separate companies:
+        # one is a sibling company with its own site, another is the same
+        # company as Pigs Can Fly Labs but with its own site. The `kind` line
         # says which each one is so the page does not flatten that distinction.
         projects = [
             {
@@ -84,10 +85,10 @@ class FamilyView(View):
             },
             {
                 "name": "Liberated Bread",
-                "kind": "Related project",
+                "kind": "Same company, its own site",
                 "description": (
-                    "A related project — not a separate company. "
-                    "Coming soon."
+                    "The same company as Pigs Can Fly Labs, with its own "
+                    "site — not a separate company. Coming soon."
                 ),
                 "url": None,
                 "coming_soon": True,

@@ -72,11 +72,12 @@ class PageSmokeTest(TestCase):
 class FamilyPageTest(TestCase):
     """The family page lists the Pigs Can Fly Labs family of projects.
 
-    The family is deliberately *not* framed as a flat list of companies: only
-    some members are their own companies, others are just related projects.
-    Each card carries a `kind` line saying which it is, and these tests pin
-    that distinction -- Liberated Bread is a related project, Fight Health
-    Insurance is a separate company as well as a project.
+    The family is deliberately *not* framed as a flat list of companies: some
+    members are their own companies, others are the same company as Pigs Can
+    Fly Labs but with their own site. Each card carries a `kind` line saying
+    which it is, and these tests pin that distinction -- Liberated Bread is the
+    same company with its own site, Fight Health Insurance is a separate
+    company as well as a project.
 
     The "Coming Soon" badge used to be driven by the absence of an outbound
     URL, which badged Pigs Can Fly Labs itself -- it is the parent company and
@@ -98,8 +99,15 @@ class FamilyPageTest(TestCase):
         assert section is not None  # for mypy
         cards = {}
         for chunk in section.group(1).split('<div class="team-item">')[1:]:
+            # Match the name in the card's heading, not anywhere in the card:
+            # a description can legitimately mention another member by name
+            # (Liberated Bread's says it is the same company as Pigs Can Fly
+            # Labs), and matching on the whole chunk would misfile the card.
+            heading = re.search(r"<h4>(.*?)</h4>", chunk, re.DOTALL)
+            if heading is None:
+                continue
             for name in self.PROJECT_NAMES:
-                if name in chunk:
+                if name in heading.group(1):
                     cards[name] = chunk
         self.assertEqual(
             sorted(cards), sorted(self.PROJECT_NAMES),
@@ -123,10 +131,12 @@ class FamilyPageTest(TestCase):
         self.assertContains(response, "Our Family of Projects")
         self.assertNotContains(response, "Our Family of Companies")
 
-    def test_liberated_bread_is_a_related_project_not_a_company(self):
-        # Liberated Bread is a related project, not a separate company.
+    def test_liberated_bread_is_the_same_company_with_its_own_site(self):
+        # Liberated Bread is not a separate company: it is the same company as
+        # Pigs Can Fly Labs, just with its own site.
         card = self.get_project_cards()["Liberated Bread"]
-        self.assertIn("Related project", card)
+        self.assertIn("Same company", card)
+        self.assertIn("not a separate company", card)
 
     def test_fight_health_insurance_is_a_separate_company_and_project(self):
         # Fight Health Insurance is both its own company and a project.
