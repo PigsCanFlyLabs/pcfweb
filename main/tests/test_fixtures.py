@@ -63,6 +63,37 @@ class BookIsbnTest(TestCase):
                 self.assertNotEqual(typo, isbn)
                 self.assertNotEqual(typo[-1], isbn13_check_digit(typo))
 
+    def test_every_book_with_an_isbn_also_has_a_print_isbn(self):
+        """`isbn` set but `print_isbn` NULL is a silently broken row.
+
+        The isbn -> print_isbn backfill is a one-shot data migration: it ran
+        once, over the rows that existed at migrate time. Any row added to the
+        fixture afterwards -- as the DC4K SKUs were, on a branch that predated
+        the identifier work -- gets no backfill, so setting only the legacy
+        `isbn` leaves print_isbn NULL.
+
+        Nothing raises when that happens. get_gtin() is
+        `print_isbn or ebook_isbn or upc`, so the row just drops out of the
+        Google Merchant feed's <g:gtin>, and get_display_text() quietly stops
+        offering "available signed on request". Both failures are invisible
+        from inside the app, which is why this is asserted on the fixture
+        rather than left to be noticed in production.
+        """
+        books = self.books_with_isbns()
+        # Guards against the whole test passing because the queryset is empty.
+        self.assertGreaterEqual(len(books), 6)
+        for book in books:
+            with self.subTest(pk=book.pk, isbn=book.isbn):
+                self.assertTrue(
+                    book.print_isbn,
+                    f"pk {book.pk} sets isbn={book.isbn!r} but leaves "
+                    f"print_isbn={book.print_isbn!r}; it would lose its "
+                    "<g:gtin> and its signed-copies note.")
+                # The legacy column and the print column must agree, not merely
+                # both be non-empty -- a mismatched pair feeds one number to
+                # the page and a different one to Google.
+                self.assertEqual(book.print_isbn, book.isbn)
+
     def test_no_two_products_share_a_gtin(self):
         # Two SKUs submitted under one GTIN are a duplicate in the feed. The
         # Executive Edition exists precisely to carry a different number from

@@ -89,13 +89,50 @@ class ProductIdentifierTest(SimpleTestCase):
             "https://www.amazon.com/dp/EBOOKASIN",
         )
 
-    def test_safari_alt_link_is_keyed_to_print_isbn(self):
-        print_product = Product(print_isbn="9781449358624")
-        ebook_product = Product(ebook_isbn="9781449358625")
+    def test_safari_alt_link_is_keyed_to_the_oreilly_flag_not_an_isbn(self):
+        """Safari link tracks the publisher, via the flag -- never an ISBN.
 
-        print_labels = [label for label, _ in print_product.get_alt_links()]
-        ebook_labels = [label for label, _ in ebook_product.get_alt_links()]
+        This replaces an earlier `test_safari_alt_link_is_keyed_to_print_isbn`,
+        which asserted the opposite rule. Keying off print_isbn was safe only
+        while every print book in the catalogue was an O'Reilly title. The
+        self-published DC4K print SKUs have real print ISBNs and are *not* on
+        the platform, so the ISBN rule would advertise an O'Reilly free trial
+        for a book that is not there -- a false claim to a customer.
 
-        # Anti-vacuity: the Safari link still appears for the print control.
-        self.assertIn("Read on O'Reilly Safari (free trial)", print_labels)
-        self.assertNotIn("Read on O'Reilly Safari (free trial)", ebook_labels)
+        The flag is also the fail-safe direction: an unflagged new title loses
+        a link, where the ISBN rule invents one.
+        """
+        safari_label = "Read on O'Reilly Safari (free trial)"
+
+        flagged = Product(print_isbn="9781449358624", on_oreilly_safari=True)
+        # The case the ISBN rule got wrong: a real print ISBN, not on Safari.
+        self_published_print = Product(
+            print_isbn="9781960595997", on_oreilly_safari=False)
+        ebook_product = Product(
+            ebook_isbn="9781960595980", on_oreilly_safari=False)
+
+        def labels(product):
+            return [label for label, _ in product.get_alt_links()]
+
+        # Anti-vacuity: the Safari link still appears for the flagged control.
+        self.assertIn(safari_label, labels(flagged))
+        self.assertNotIn(safari_label, labels(self_published_print))
+        self.assertNotIn(safari_label, labels(ebook_product))
+
+    def test_safari_link_ignores_print_isbn_when_the_flag_is_unset(self):
+        """The flag alone decides, so print_isbn cannot resurrect the link."""
+        safari_label = "Read on O'Reilly Safari (free trial)"
+
+        with_isbn = Product(print_isbn="9781960595997", on_oreilly_safari=False)
+        without_isbn = Product(print_isbn=None, on_oreilly_safari=False)
+
+        for product in (with_isbn, without_isbn):
+            labels = [label for label, _ in product.get_alt_links()]
+            self.assertNotIn(safari_label, labels)
+
+        # And conversely: no print ISBN at all still gets the link when the
+        # flag says the title is on the platform.
+        flagged_without_isbn = Product(print_isbn=None, on_oreilly_safari=True)
+        self.assertIn(
+            safari_label,
+            [label for label, _ in flagged_without_isbn.get_alt_links()])
