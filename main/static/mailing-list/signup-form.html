@@ -1,0 +1,52 @@
+<!--
+  Pigs Can Fly Labs mailing list signup form.
+
+  Paste this into any page on any site. It is plain HTML: no JavaScript, no
+  stylesheet, nothing to load from us. The endpoint it posts to is CSRF
+  exempt precisely so this works from another origin.
+
+  Two things to edit:
+
+    * the "interest" value -- the slug of the group people are signing up
+      for. Leave it out entirely and they land in the general group. The
+      slugs are listed at https://www.pigscanfly.ca/mailing-list/embed
+    * the "next" value -- a page on YOUR site to send people back to after
+      signing up. It is only honoured for hosts we have been told about, so
+      email support@pigscanfly.ca to have yours added; until then, leave it
+      out and subscribers see a thank-you page on pigscanfly.ca instead.
+
+  Signing up sends a confirmation email; nobody is added to the list until
+  they click the link in it.
+-->
+<form class="pcf-signup" method="post"
+      action="https://www.pigscanfly.ca/mailing-list/subscribe">
+  <label for="pcf-signup-email">Subscribe to our mailing list</label>
+  <input id="pcf-signup-email" type="email" name="email" required
+         placeholder="you@example.com" autocomplete="email">
+
+  <!-- Which group. Change or remove; removing means the general group. -->
+  <input type="hidden" name="interest" value="general">
+  <!-- Where the signup came from, so we can tell your form from ours. -->
+  <input type="hidden" name="source" value="external-site">
+  <!-- Optional: <input type="hidden" name="next" value="https://example.org/thanks"> -->
+
+  <!-- Spam trap. Invisible to people, filled in by bots. Keep it. -->
+  <div style="position:absolute;left:-5000px;" aria-hidden="true">
+    <input type="text" name="website" tabindex="-1" autocomplete="off">
+  </div>
+
+  <button type="submit">Subscribe</button>
+</form>
+
+<style>
+/* Optional. Delete this block to inherit your own site's styling. */
+.pcf-signup { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+              font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.pcf-signup label { flex: 0 0 100%; font-weight: 600; }
+.pcf-signup input[type=email] { flex: 1 1 12rem; min-width: 0;
+                                padding: .55rem .7rem; font-size: 1rem;
+                                border: 1px solid #b5b5b5; border-radius: 4px; }
+.pcf-signup button { padding: .55rem 1.1rem; font-size: 1rem; border: 0;
+                     border-radius: 4px; background: #f33f3f; color: #fff;
+                     cursor: pointer; }
+</style>

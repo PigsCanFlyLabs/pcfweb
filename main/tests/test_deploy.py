@@ -137,7 +137,7 @@ class DeployManifestTest(TestCase):
         # old image. build.sh enforces this against the live cluster; this
         # keeps the known-stale tag from creeping back in.
         for image in self.all_images():
-            self.assertNotIn(":v0.10.0", image)
+            self.assertNotIn(":v0.11.0", image)
 
     def test_probes_target_the_health_endpoint(self):
         # `/` is answered with a 301 by SecurityMiddleware before any database

@@ -1,0 +1,45 @@
+{% extends 'external-base.html' %}
+{% block content %}
+  <p>Two ways to let another site sign people up for our mailing list. Both
+    send a confirmation email, so nobody is added until they click the link
+    in it.</p>
+
+  {% if areas %}
+    <p><strong>Groups:</strong>
+      {% for a in areas %}
+        {% if a.slug == area.slug %}<strong>{{ a.name }} (<code>{{ a.slug }}</code>)</strong>{% else %}<a href="?interest={{ a.slug }}">{{ a.name }} (<code>{{ a.slug }}</code>)</a>{% endif %}{% if not forloop.last %} · {% endif %}
+      {% endfor %}
+    </p>
+  {% endif %}
+
+  <h3>1. A plain form</h3>
+  <p>Paste this into the other site. Nothing loads from us, so it cannot slow
+    that page down or break when we redeploy. The full version with comments
+    is at <a href="{{ snippet_url }}">{{ snippet_url }}</a>.</p>
+  <pre><code>&lt;form method="post" action="{{ action }}"&gt;
+  &lt;label for="pcf-signup-email"&gt;Subscribe to {{ area.name }}&lt;/label&gt;
+  &lt;input id="pcf-signup-email" type="email" name="email" required
+         placeholder="you@example.com" autocomplete="email"&gt;
+  &lt;input type="hidden" name="interest" value="{{ area.slug }}"&gt;
+  &lt;input type="hidden" name="source" value="external-site"&gt;
+  &lt;div style="position:absolute;left:-5000px;" aria-hidden="true"&gt;
+    &lt;input type="text" name="website" tabindex="-1" autocomplete="off"&gt;
+  &lt;/div&gt;
+  &lt;button type="submit"&gt;Subscribe&lt;/button&gt;
+&lt;/form&gt;</code></pre>
+  <p>After submitting, the visitor lands on a thank-you page here. To send
+    them back to the other site instead, add
+    <code>&lt;input type="hidden" name="next" value="https://example.org/thanks"&gt;</code>
+    — that only works for hosts listed in
+    <code>MAILING_LIST_REDIRECT_HOSTS</code>, so an open redirect cannot be
+    built out of it.</p>
+
+  <h3>2. An iframe</h3>
+  <p>Keeps the visitor on the other site without any redirect setup.</p>
+  <pre><code>&lt;iframe src="{{ iframe_src }}" title="Subscribe to {{ area.name }}"
+        style="width:100%;max-width:32rem;height:11rem;border:0"&gt;&lt;/iframe&gt;</code></pre>
+
+  <h3>Live preview</h3>
+  <iframe src="{{ iframe_src }}" title="Subscribe to {{ area.name }}"
+          style="width:100%;max-width:32rem;height:11rem;border:1px solid #ddd"></iframe>
+{% endblock content %}

@@ -1,0 +1,16 @@
+{% extends 'external-base.html' %}
+{% block content %}
+  {% if done %}
+    <p>{{ subscription.email }} has been removed from
+      {{ subscription.interest }}. We will not mail you about it again.</p>
+    <p><a href="{% url 'subscribe' %}">Signed up by mistake? You can always come back.</a></p>
+  {% else %}
+    <p>Unsubscribe {{ subscription.email }} from
+      {{ subscription.interest }}?</p>
+    {# A POST, so a mail client prefetching the link cannot do this by itself. #}
+    <form method="post">
+      <button type="submit" class="main-dark-button">Yes, unsubscribe me</button>
+    </form>
+    <p><a href="{% url 'home' %}">No, keep me on the list</a></p>
+  {% endif %}
+{% endblock content %}

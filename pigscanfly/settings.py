@@ -20,15 +20,24 @@ from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def parse_comma_list(raw: str) -> List[str]:
+    """Split a comma-separated environment variable into stripped entries.
+
+    Every entry is stripped, not just tested for being non-blank: a value
+    written as a conventional "a, b" list, or pulled out of a file into a
+    Secret with a trailing newline, otherwise carries whitespace into a
+    comparison that has to be exact.
+    """
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 def parse_shipping_rates(raw: str) -> List[str]:
     """Split a comma-separated STRIPE_SHIPPING_RATES value into ids.
 
-    Each id is stripped, not just tested for being non-blank. Stripe matches
-    the id exactly, so " shr_two" from a conventional "a, b" list -- or
-    "shr_two\\n" from a Secret created out of a file -- is not the rate, it is
-    a resource_missing that fails every physical checkout.
+    Stripe matches the id exactly, so " shr_two" is not the rate, it is a
+    resource_missing that fails every physical checkout.
     """
-    return [rate.strip() for rate in raw.split(",") if rate.strip()]
+    return parse_comma_list(raw)
 
 
 class Base(Configuration):
@@ -215,6 +224,42 @@ class Base(Configuration):
             "shr_0MJrL4nkDnSOC1s7cPSy15CO",  # media mail
             "shr_0MNOZrnkDnSOC1s7TSLZig6Z",  # faster
         ])))
+
+    # MAILING LIST SETTINGS
+
+    # Where confirmations and mailings come from. Falls back to
+    # DEFAULT_FROM_EMAIL; set it when list mail should come from a different
+    # address than order mail (a separate list@ address is easier to filter
+    # on and easier for a mail host to rate-limit separately).
+    MAILING_LIST_FROM_EMAIL = os.getenv("MAILING_LIST_FROM_EMAIL", "")
+
+    # Used to build confirm and unsubscribe links when there is no request to
+    # build them from -- the CSV import, `send_mailing`. Getting this wrong
+    # means links in emails that point somewhere useless.
+    MAILING_LIST_BASE_URL = os.getenv(
+        "MAILING_LIST_BASE_URL", "https://www.pigscanfly.ca")
+
+    # Hosts a signup form is allowed to bounce the visitor back to via its
+    # `next` field, on top of ALLOWED_HOSTS. This is the allowlist that keeps
+    # the CSRF-exempt signup endpoint from being an open redirect, so only add
+    # sites we actually run. Comma-separated, hostnames only.
+    MAILING_LIST_REDIRECT_HOSTS: List[str] = parse_comma_list(
+        os.getenv("MAILING_LIST_REDIRECT_HOSTS", ""))
+
+    # Confirmation emails one address's source may trigger per hour. The
+    # signup endpoint is CSRF exempt and open to the internet, so without a
+    # ceiling it is a way to have us mail whoever somebody points it at. Kept
+    # generous because a school or an office is one address to us. 0 disables.
+    MAILING_LIST_SIGNUP_RATE_LIMIT = int(
+        os.getenv("MAILING_LIST_SIGNUP_RATE_LIMIT", "20"))
+
+    # Recipients per click of "send" in the admin, and per SMTP connection.
+    # The whole batch has to fit inside GUNICORN_TIMEOUT, so this trades
+    # clicks against the risk of a half-finished request -- which is survivable
+    # either way, because each recipient's delivery row is written as its mail
+    # goes out and a resumed send skips it.
+    MAILING_LIST_SEND_BATCH_SIZE = int(
+        os.getenv("MAILING_LIST_SEND_BATCH_SIZE", "100"))
 
     # Who gets told about a paid order so they can ship it. Env-driven so the
     # owner's address is not baked into the repo.

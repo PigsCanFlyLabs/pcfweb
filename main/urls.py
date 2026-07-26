@@ -38,6 +38,21 @@ urlpatterns = [
     path('login', views.LoginView.as_view(), name='login'),
     path('logout', views.LogoutView.as_view(), name='logout'),
 
+    # Mailing list. The signup and unsubscribe endpoints are CSRF exempt (see
+    # the views): forms embedded on other sites post to the first, and mail
+    # clients doing one-click unsubscribe post to the second.
+    path('mailing-list/subscribe', views.MailingListSubscribeView.as_view(),
+         name='mailing-list-subscribe'),
+    path('mailing-list/confirm/<str:token>',
+         views.MailingListConfirmView.as_view(), name='mailing-list-confirm'),
+    path('mailing-list/unsubscribe/<str:token>',
+         views.MailingListUnsubscribeView.as_view(),
+         name='mailing-list-unsubscribe'),
+    path('mailing-list/embed', views.MailingListEmbedCodeView.as_view(),
+         name='mailing-list-embed-code'),
+    path('mailing-list/embed/<slug:slug>', views.MailingListEmbedView.as_view(),
+         name='mailing-list-embed'),
+
     # General
     path('', views.HomeView.as_view(), name="home"),
     path('about', views.AboutView.as_view(), name="about"),

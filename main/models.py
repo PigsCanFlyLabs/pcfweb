@@ -1,9 +1,12 @@
 import logging
+import secrets
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.core.mail import send_mail
-from django.db import models, transaction
+from django.core.exceptions import ValidationError
+from django.core.mail import EmailMessage, get_connection, send_mail
+from django.db import IntegrityError, models, transaction
+from django.template.loader import render_to_string
 from django.templatetags.static import static
 from django.urls import reverse
 from django.utils import timezone
@@ -852,3 +855,546 @@ class OrderItem(models.Model):
 
     def __repr__(self) -> str:
         return f'<OrderItem: {self.quantity} x {self.product_name}>'
+
+
+def generate_subscription_token() -> str:
+    """An unguessable id for the confirm and unsubscribe links.
+
+    Those links are the only authentication on their endpoints -- they arrive
+    by email and get followed by somebody who is not logged in -- so the token
+    has to be random enough that nobody can walk it to reach a stranger's
+    subscription. 32 bytes of urlsafe base64 is 43 characters.
+    """
+    return secrets.token_urlsafe(32)
+
+
+class InterestArea(models.Model):
+    """What a subscriber said they wanted to hear about.
+
+    One row per group: general updates, Distributed Computing 4 Kids, a
+    hardware project, whatever. Anyone who does not pick one lands in the
+    general group.
+
+    The slug is what an embedded signup form on another site posts, so it
+    ends up in that site's markup -- renaming one silently breaks every form
+    already pasted somewhere, which is why the help text says to add a new
+    area instead.
+    """
+
+    slug = models.SlugField(
+        max_length=64, unique=True,
+        help_text=(
+            "Used in signup URLs and in signup forms embedded on other "
+            "sites. Changing it breaks every form already using the old "
+            "value; add a new area instead."))
+    name = models.CharField(max_length=120)
+    description = models.CharField(
+        max_length=300, blank=True,
+        help_text="Shown next to the option on the signup form.")
+    # Hidden from the signup form rather than deleted: an area with
+    # subscribers cannot be deleted (see the PROTECT below), and their record
+    # of what they opted into should outlive our interest in the topic.
+    active = models.BooleanField(
+        default=True,
+        help_text="Inactive areas stop appearing on signup forms and stop "
+                  "accepting new signups. Existing subscribers are kept.")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    # The group every signup that does not name one lands in. Created by a
+    # data migration, and re-created by get_default() if it ever goes away.
+    DEFAULT_SLUG = "general"
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+    @classmethod
+    def get_default(cls) -> "InterestArea":
+        """The fallback group, created on demand.
+
+        A signup that names no area is the common case (the footer form), so
+        this has to work even on a database where the data migration's row was
+        renamed or deleted, rather than 500ing the signup endpoint.
+        """
+        area, _created = cls.objects.get_or_create(
+            slug=cls.DEFAULT_SLUG,
+            defaults={"name": "General updates",
+                      "description": "News from Pigs Can Fly Labs."})
+        return area
+
+    @classmethod
+    def signup_choices(cls) -> "models.QuerySet":
+        """The groups to offer on a signup form, general first.
+
+        First is what a select box shows before anybody touches it, and the
+        rule is that not choosing means the general group -- so an
+        alphabetically earlier group must not be able to take that slot.
+        """
+        return cls.objects.filter(active=True).order_by(
+            models.Case(
+                models.When(slug=cls.DEFAULT_SLUG, then=models.Value(0)),
+                default=models.Value(1)),
+            "name")
+
+    def subscriber_count(self) -> int:
+        return self.subscriptions.filter(
+            status=MailingListSubscription.Status.SUBSCRIBED).count()
+
+
+class MailingListSubscription(models.Model):
+    """One address in one interest group.
+
+    Signups arrive at a CSRF-exempt endpoint that anything on the internet can
+    post to -- that is the point, forms on other sites use it -- so an address
+    is not on the list until somebody clicks the link in the confirmation
+    mail. Nothing is sent to a PENDING row but that one confirmation.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = 'P', 'pending confirmation'
+        SUBSCRIBED = 'S', 'subscribed'
+        UNSUBSCRIBED = 'U', 'unsubscribed'
+
+    email = models.EmailField(max_length=254)
+    name = models.CharField(max_length=200, blank=True)
+    # PROTECT: deleting a group would otherwise take every record of who asked
+    # for it -- and of the consent they gave -- with it.
+    interest = models.ForeignKey(
+        InterestArea, on_delete=models.PROTECT, related_name="subscriptions")
+    status = models.CharField(
+        max_length=1, choices=Status.choices, default=Status.PENDING)
+    # Free text, e.g. "site-footer", "dc4k-embed", "import:2026-07-26.csv".
+    # Worth having when a list turns out to be full of addresses nobody
+    # remembers collecting.
+    source = models.CharField(max_length=200, blank=True)
+    token = models.CharField(
+        max_length=64, unique=True, default=generate_subscription_token,
+        editable=False)
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    unsubscribed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            # One row per address per group. Signing up twice updates the row
+            # that is already there rather than making a second one, so an
+            # unsubscribe cannot leave a forgotten duplicate behind that still
+            # gets mail.
+            models.UniqueConstraint(
+                fields=["email", "interest"],
+                name="unique_subscription_per_interest"),
+        ]
+        indexes = [models.Index(fields=["email"])]
+
+    def __str__(self) -> str:
+        return f'{self.email} ({self.interest})'
+
+    @staticmethod
+    def normalize_email(email: str) -> str:
+        """Lower-case and strip, so Foo@Example.com is not a second row.
+
+        The local part is case-sensitive per the RFC and case-insensitive at
+        every mail host anybody actually uses; treating them as one address is
+        what a subscriber expects and is what keeps the unique constraint
+        meaningful.
+        """
+        return (email or "").strip().lower()
+
+    def save(self, *args, **kwargs):
+        self.email = self.normalize_email(self.email)
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def subscribe(cls, email: str, interest: Optional[InterestArea] = None,
+                  name: str = "", source: str = "", ip: Optional[str] = None,
+                  confirmed: bool = False) -> "MailingListSubscription":
+        """Record a signup and return the row it landed in.
+
+        No interest means the general group: that is the default for anyone
+        who did not say otherwise when they signed up.
+
+        `confirmed` is for signups we already have consent for -- a CSV the
+        owner imported, an address moved over from the old newsletter app --
+        and goes straight to SUBSCRIBED. Everything from the web goes to
+        PENDING and waits for the link to be clicked.
+
+        Signing up an address that is already SUBSCRIBED is a no-op rather
+        than a reset to PENDING: otherwise anyone could quietly knock a
+        subscriber off the list by re-posting their address.
+        """
+        interest = interest or InterestArea.get_default()
+        email = cls.normalize_email(email)
+        subscription, created = cls.objects.get_or_create(
+            email=email, interest=interest,
+            defaults={"name": name, "source": source, "ip": ip,
+                      "status": cls.Status.PENDING})
+        if name and not subscription.name:
+            subscription.name = name
+        if confirmed:
+            subscription.mark_subscribed()
+        elif created:
+            if name:
+                subscription.save()
+        elif subscription.status == cls.Status.UNSUBSCRIBED:
+            # Coming back after unsubscribing means confirming again. We do
+            # not resurrect a withdrawn consent on somebody else's say-so, and
+            # the old token stops working so a forwarded mail cannot do it
+            # either.
+            subscription.status = cls.Status.PENDING
+            subscription.token = generate_subscription_token()
+            subscription.save()
+        else:
+            subscription.save()
+        return subscription
+
+    def mark_subscribed(self) -> None:
+        """Consent recorded: from here on a mailing may go to this address."""
+        self.status = self.Status.SUBSCRIBED
+        self.confirmed_at = self.confirmed_at or timezone.now()
+        self.unsubscribed_at = None
+        self.save()
+
+    def unsubscribe(self) -> None:
+        self.status = self.Status.UNSUBSCRIBED
+        self.unsubscribed_at = timezone.now()
+        self.save()
+
+    def confirm_url(self, request=None) -> str:
+        return absolute_site_url(
+            reverse("mailing-list-confirm", args=[self.token]), request)
+
+    def unsubscribe_url(self, request=None) -> str:
+        return absolute_site_url(
+            reverse("mailing-list-unsubscribe", args=[self.token]), request)
+
+    def send_confirmation_email(self, request=None) -> bool:
+        """Ask the address to confirm. Returns whether the mail went out.
+
+        Best effort by design: a dead SMTP server must not turn a signup into
+        a 500 on somebody else's site. The row stays PENDING, so signing up
+        again sends another one.
+        """
+        context = {
+            "subscription": self,
+            "interest": self.interest,
+            "confirm_url": self.confirm_url(request),
+            "unsubscribe_url": self.unsubscribe_url(request),
+        }
+        subject = render_to_string(
+            "email/mailing_list_confirm_subject.txt", context).strip()
+        body = render_to_string("email/mailing_list_confirm.txt", context)
+        try:
+            send_mail(subject, body, mailing_list_from_email(), [self.email],
+                      fail_silently=False)
+        except Exception:
+            logger.exception(
+                "Could not send the mailing list confirmation to %s; the "
+                "signup stays pending.", self.email)
+            return False
+        return True
+
+
+def absolute_site_url(path: str, request=None) -> str:
+    """Absolute URL for a link that gets followed out of an email client.
+
+    A relative path is useless there, and the request is not always around
+    (the CSV import, a management command), hence the configured base URL as
+    the fallback.
+    """
+    if request is not None:
+        return request.build_absolute_uri(path)
+    base = getattr(settings, "MAILING_LIST_BASE_URL",
+                   "https://www.pigscanfly.ca").rstrip("/")
+    return f"{base}{path}"
+
+
+def mailing_list_from_email() -> str:
+    return (getattr(settings, "MAILING_LIST_FROM_EMAIL", None)
+            or settings.DEFAULT_FROM_EMAIL)
+
+
+class MailingListMessage(models.Model):
+    """A mailing, and the record of who it actually reached.
+
+    Sending happens in batches with one Delivery row per recipient, and a
+    recipient with a Delivery row is never picked up again. That is what makes
+    a send resumable: the admin sends a batch per click and a killed worker,
+    a browser reload or a re-run of the management command continues where it
+    stopped instead of mailing the whole list a second time.
+    """
+
+    class Status(models.TextChoices):
+        DRAFT = 'D', 'draft'
+        SENDING = 'G', 'sending'
+        SENT = 'S', 'sent'
+
+    subject = models.CharField(max_length=200)
+    body = models.TextField(
+        help_text=(
+            "Plain text. {{ name }}, {{ email }} and {{ unsubscribe_url }} "
+            "are substituted per recipient; an unsubscribe link is appended "
+            "if you leave it out."))
+    # Empty means everyone. A subscriber in several of the selected groups is
+    # still mailed once -- see recipients().
+    interests = models.ManyToManyField(
+        InterestArea, blank=True, related_name="messages",
+        help_text="Which groups to send to. Leave empty to send to every "
+                  "confirmed subscriber.")
+    status = models.CharField(
+        max_length=1, choices=Status.choices, default=Status.DRAFT)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="mailing_list_messages")
+    # When the last batch that finished the list went out.
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return self.subject
+
+    def clean(self):
+        """Reject a body that will not render before it is a send problem.
+
+        Without this a stray {% or a mistyped tag is only discovered per
+        recipient, at send time, as every single delivery failing.
+        """
+        from django.template import Template, TemplateSyntaxError
+
+        try:
+            Template(self.body)
+        except TemplateSyntaxError as e:
+            raise ValidationError({"body": f"That will not render: {e}"})
+
+    def recipients(self) -> "models.QuerySet":
+        """Every confirmed subscriber this mailing is addressed to.
+
+        Ordered by pk so batching is stable, and so the address that gets the
+        mail when somebody is in two selected groups is always the same one.
+        """
+        recipients = MailingListSubscription.objects.filter(
+            status=MailingListSubscription.Status.SUBSCRIBED)
+        interests = list(self.interests.all()) if self.pk else []
+        if interests:
+            recipients = recipients.filter(interest__in=interests)
+        return recipients.select_related("interest").order_by("pk")
+
+    def pending_recipients(self) -> "models.QuerySet":
+        already = self.deliveries.values_list("subscription_id", flat=True)
+        return self.recipients().exclude(pk__in=already)
+
+    def recipient_count(self) -> int:
+        return self.recipients().count()
+
+    def pending_count(self) -> int:
+        return self.pending_recipients().count()
+
+    def sent_count(self) -> int:
+        return self.deliveries.filter(
+            status=MailingListDelivery.Status.SENT).count()
+
+    def failed_count(self) -> int:
+        return self.deliveries.filter(
+            status=MailingListDelivery.Status.FAILED).count()
+
+    def render_for(self, subscription: "MailingListSubscription",
+                   request=None) -> str:
+        """The body as this one recipient sees it.
+
+        The unsubscribe link is appended when the body does not already place
+        it, because a mailing without one is the kind of thing that gets a
+        domain listed rather than merely complained about.
+        """
+        from django.template import Context, Template
+
+        unsubscribe_url = subscription.unsubscribe_url(request)
+        context = Context({
+            "name": subscription.name,
+            "email": subscription.email,
+            "interest": subscription.interest,
+            "unsubscribe_url": unsubscribe_url,
+        }, autoescape=False)
+        body = str(Template(self.body).render(context))
+        if unsubscribe_url not in body:
+            body = (f"{body.rstrip()}\n\n--\n"
+                    f"You are getting this because you subscribed to "
+                    f"{subscription.interest} at pigscanfly.ca.\n"
+                    f"Unsubscribe: {unsubscribe_url}\n")
+        return body
+
+    def send_test(self, address: str, request=None) -> None:
+        """Send one copy to the author, with no Delivery row and no dedupe.
+
+        Uses an unsaved subscription so the test renders through exactly the
+        same path as the real thing -- including a working unsubscribe link
+        for whatever `address` is actually subscribed to, if anything.
+        """
+        subscription = MailingListSubscription.objects.filter(
+            email=MailingListSubscription.normalize_email(address)).first()
+        if subscription is None:
+            subscription = MailingListSubscription(
+                email=address, interest=InterestArea.get_default(),
+                token=generate_subscription_token())
+        message = self._build_email(subscription, request)
+        message.subject = f"[test] {message.subject}"
+        message.to = [address]
+        message.send(fail_silently=False)
+
+    def send_batch(self, limit: Optional[int] = None, request=None) -> Tuple[int, int]:
+        """Mail the next batch. Returns (sent, failed).
+
+        One SMTP connection for the batch, one Delivery row per recipient
+        written immediately after its send returns. Writing the row per
+        recipient rather than per batch is deliberate: if the process dies
+        halfway through, the rows already written are exactly the addresses
+        that already have the mail.
+        """
+        limit = limit or getattr(settings, "MAILING_LIST_SEND_BATCH_SIZE", 100)
+        batch = list(self.pending_recipients()[:limit])
+        if not batch:
+            self._finish()
+            return (0, 0)
+        if self.status == self.Status.DRAFT:
+            MailingListMessage.objects.filter(pk=self.pk).update(
+                status=self.Status.SENDING)
+            self.status = self.Status.SENDING
+
+        # An address in two selected groups has two subscription rows; it gets
+        # the mailing once, and the other rows are recorded as skipped so the
+        # pending count still drains to zero.
+        already = set(self.deliveries.exclude(
+            status=MailingListDelivery.Status.SKIPPED).values_list(
+                "subscription__email", flat=True))
+        sent = failed = 0
+        connection = get_connection(fail_silently=False)
+        try:
+            connection.open()
+            for subscription in batch:
+                if subscription.email in already:
+                    self._claim(subscription,
+                                MailingListDelivery.Status.SKIPPED,
+                                "Already mailed at this address for this "
+                                "message.")
+                    continue
+                # The row is claimed *before* the send, and the unique
+                # constraint on it is what makes the claim exclusive: two
+                # people clicking send at the same moment cannot both take
+                # the same recipient, so nobody gets the mailing twice. The
+                # cost is that a process killed between the claim and the
+                # send leaves a row saying sent for a mail that never went --
+                # which is the right way round for a mailing list, where one
+                # missed copy beats one duplicate.
+                delivery = self._claim(
+                    subscription, MailingListDelivery.Status.SENT)
+                if delivery is None:
+                    continue
+                try:
+                    email = self._build_email(subscription, request)
+                    email.connection = connection
+                    email.send(fail_silently=False)
+                except Exception as e:
+                    # One bad address does not stop the mailing; it is
+                    # recorded, counted, and not retried by the next batch.
+                    logger.exception(
+                        "Could not send message %s to %s.",
+                        self.pk, subscription.email)
+                    delivery.status = MailingListDelivery.Status.FAILED
+                    delivery.error = str(e)[:500]
+                    delivery.save(update_fields=["status", "error"])
+                    failed += 1
+                    continue
+                already.add(subscription.email)
+                sent += 1
+        finally:
+            try:
+                connection.close()
+            except Exception:
+                logger.warning(
+                    "Could not close the SMTP connection for message %s.",
+                    self.pk, exc_info=True)
+        if not self.pending_recipients().exists():
+            self._finish()
+        return (sent, failed)
+
+    def _claim(self, subscription: "MailingListSubscription", status: str,
+               error: str = "") -> Optional["MailingListDelivery"]:
+        """Take this recipient, or None if somebody else already has them.
+
+        Its own transaction: an IntegrityError marks the surrounding atomic
+        block unusable, and on the admin's send page there is one wrapping
+        the whole request.
+        """
+        try:
+            with transaction.atomic():
+                return MailingListDelivery.objects.create(
+                    message=self, subscription=subscription, status=status,
+                    error=error)
+        except IntegrityError:
+            logger.info(
+                "Message %s was already claimed for %s; not sending again.",
+                self.pk, subscription.email)
+            return None
+
+    def _finish(self) -> None:
+        if self.status == self.Status.SENT:
+            return
+        self.status = self.Status.SENT
+        self.sent_at = timezone.now()
+        MailingListMessage.objects.filter(pk=self.pk).update(
+            status=self.status, sent_at=self.sent_at)
+
+    def _build_email(self, subscription: "MailingListSubscription",
+                     request=None):
+        body = self.render_for(subscription, request)
+        email = EmailMessage(
+            subject=self.subject, body=body,
+            from_email=mailing_list_from_email(), to=[subscription.email])
+        # RFC 8058/2369. Mail clients put a real unsubscribe button on the
+        # message when this is present, which people use instead of the "this
+        # is spam" button.
+        email.extra_headers = {
+            "List-Unsubscribe": f"<{subscription.unsubscribe_url(request)}>",
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        }
+        return email
+
+
+class MailingListDelivery(models.Model):
+    """One recipient's copy of one mailing. Written after the send returns."""
+
+    class Status(models.TextChoices):
+        SENT = 'S', 'sent'
+        FAILED = 'F', 'failed'
+        SKIPPED = 'K', 'skipped'
+
+    message = models.ForeignKey(
+        MailingListMessage, on_delete=models.CASCADE,
+        related_name="deliveries")
+    subscription = models.ForeignKey(
+        MailingListSubscription, on_delete=models.CASCADE,
+        related_name="deliveries")
+    status = models.CharField(
+        max_length=1, choices=Status.choices, default=Status.SENT)
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            # The guard against sending twice. Anything that would write a
+            # second row for the same (message, recipient) is a double send.
+            models.UniqueConstraint(
+                fields=["message", "subscription"],
+                name="unique_delivery_per_message"),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.subscription.email}: {self.get_status_display()}'
