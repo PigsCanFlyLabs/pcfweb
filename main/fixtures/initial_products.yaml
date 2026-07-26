@@ -146,7 +146,7 @@
     # source lines if you must but do not edit the words.
     #
     # The closing sentence carries no dollar figure on purpose: the copy
-    # already says "(roughly) $10.42 more" and `price` below is 4200, so a
+    # already says "(roughly) $10.42 more" and `price` below is 3042, so a
     # second figure in the closer would contradict both on the product page.
     description: >-
       This special executive edition is the almost exact same content as
