@@ -1,5 +1,6 @@
 import logging
 import re
+from urllib.parse import quote
 
 from typing import *
 from django.conf import settings
@@ -292,6 +293,49 @@ class ServicesView(View):
     this page says what they offer, so the copy is different on purpose.
     """
 
+    # Where consulting enquiries go. The owner asked for email with the
+    # project described, rather than the generic contact form.
+    CONSULTING_EMAIL = "holden@pigscanfly.ca"
+
+    # Stated once for the consulting group rather than repeated on each card:
+    # both engagements are the same shape, and the same sentence twice reads
+    # like boilerplate.
+    CONSULTING_SCOPE = (
+        "Both consulting engagements cover architecture review, performance "
+        "tuning, training, and a retainer for periodic consulting."
+    )
+
+    # Titles cited in the credentials, with the ISBN each one links by. Linked
+    # through /book/<isbn> so no fixture primary key ever appears in markup --
+    # a pk that moves keeps resolving, to the wrong book.
+    LEARNING_SPARK = ("Learning Spark (1st edition)", "9781449358624")
+    HIGH_PERFORMANCE_SPARK = (
+        "High Performance Spark (1st and 2nd editions)", "9781491943205")
+    FAST_DATA_PROCESSING = ("Fast Data Processing with Spark", "9781782167068")
+    KUBEFLOW = ("Kubeflow for Machine Learning", "9781492050124")
+    SCALING_PYTHON_RAY = ("Scaling Python with Ray", "9781098118808")
+
+    @staticmethod
+    def credential(*parts):
+        """Build a credential line as linkable and plain segments.
+
+        A string is literal copy; a (title, isbn) pair becomes a link to
+        /book/<isbn>. Keeping the sentence as segments rather than as a blob
+        of HTML means a test can reassemble the plain text and assert the
+        owner's exact wording, which is the point -- these are publishing
+        claims and the page must not drift away from what he approved.
+        """
+        segments = []
+        for part in parts:
+            if isinstance(part, str):
+                segments.append({"text": part, "isbn": None})
+            else:
+                segments.append({"text": part[0], "isbn": part[1]})
+        return segments
+
+    def consulting_mailto(self, subject: str) -> str:
+        return f"mailto:{self.CONSULTING_EMAIL}?subject={quote(subject)}"
+
     def services(self):
         return [
             {
@@ -304,9 +348,10 @@ class ServicesView(View):
                 ),
                 "url": LIBERATED_BREAD_URL,
                 "cta_label": "Visit Liberated Bread",
-                "cta_route": None,
+                "cta_url": LIBERATED_BREAD_URL,
                 "credentials": None,
                 "note": None,
+                "consulting": False,
                 "coming_soon": True,
             },
             {
@@ -317,17 +362,33 @@ class ServicesView(View):
                     "them to run faster, and working out which of those two "
                     "problems you actually have."
                 ),
-                # Deliberately does NOT claim "the first Spark book" -- see
-                # the note in the PR. This wording is true either way.
-                "credentials": (
-                    "From the co-author of Learning Spark (1st edition) and "
-                    "High Performance Spark (1st and 2nd editions), and one "
-                    "of the first books written about Apache Spark."
+                # The owner has confirmed he wrote both Fast Data Processing
+                # with Spark (Packt, 2013) and Learning Spark 1e (O'Reilly,
+                # 2015), and that the 2013 book is the first book written
+                # about Apache Spark. So this asserts the claim rather than
+                # hedging to "one of the first", which is what it said while
+                # the question was open.
+                #
+                # Fast Data Processing comes last at the owner's request -- he
+                # rates it the weakest of his books -- but the first-book fact
+                # is the strongest line on the page, so it stays.
+                "credentials": self.credential(
+                    "From the co-author of ",
+                    self.LEARNING_SPARK,
+                    " and ",
+                    self.HIGH_PERFORMANCE_SPARK,
+                    ", and author of ",
+                    self.FAST_DATA_PROCESSING,
+                    " - the first book written about Apache Spark.",
                 ),
                 "url": None,
-                "cta_label": "Reach out for more info",
-                "cta_route": "contact",
+                "cta_label": (
+                    f"Email {self.CONSULTING_EMAIL} with the project you'd "
+                    "like help on."
+                ),
+                "cta_url": self.consulting_mailto("Apache Spark consulting"),
                 "note": None,
+                "consulting": True,
                 "coming_soon": False,
             },
             {
@@ -337,14 +398,25 @@ class ServicesView(View):
                     "Help with machine learning and AI systems — training, "
                     "serving, and the plumbing between them."
                 ),
-                "credentials": (
-                    "From a co-author of Kubeflow for Machine Learning "
-                    "(O'Reilly)."
+                # Two sentences, not one: eliding "co-author of" across the
+                # clause ("and of the Spark books...") is ungrammatical, and
+                # the owner flagged exactly that in an earlier draft.
+                "credentials": self.credential(
+                    "From the co-author of ",
+                    self.KUBEFLOW,
+                    " and ",
+                    self.SCALING_PYTHON_RAY,
+                    ". Much of today's ML tooling still runs on Spark, and "
+                    "those books are ours too.",
                 ),
                 "url": None,
-                "cta_label": "Reach out for more info",
-                "cta_route": "contact",
+                "cta_label": (
+                    f"Email {self.CONSULTING_EMAIL} with the project you'd "
+                    "like help on."
+                ),
+                "cta_url": self.consulting_mailto("AI consulting"),
                 "note": None,
+                "consulting": True,
                 "coming_soon": False,
             },
             {
@@ -356,7 +428,7 @@ class ServicesView(View):
                 ),
                 "url": "https://www.fighthealthinsurance.com/",
                 "cta_label": "Go to Fight Health Insurance",
-                "cta_route": None,
+                "cta_url": "https://www.fighthealthinsurance.com/",
                 "credentials": None,
                 # Stated outright rather than left to be inferred: this is
                 # not a Pigs Can Fly Labs service and should not read as one.
@@ -364,6 +436,7 @@ class ServicesView(View):
                     "A separate company that Holden is involved in, not a "
                     "Pigs Can Fly Labs service."
                 ),
+                "consulting": False,
                 "coming_soon": False,
             },
         ]
@@ -371,6 +444,7 @@ class ServicesView(View):
     def get(self, request):
         return render(request, 'services.html', context={
             'title': 'Services',
+            'consulting_scope': self.CONSULTING_SCOPE,
             'services': self.services()})
 
 

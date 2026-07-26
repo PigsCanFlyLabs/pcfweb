@@ -1,5 +1,6 @@
 """Tests for the static and mostly-static pages."""
 
+import html as html_module
 import re
 from unittest import mock
 
@@ -20,13 +21,59 @@ class StaticPagesTest(TestCase):
         self.assertTemplateUsed(response, "tos.html")
 
 
+class ServicesPageMixin:
+    """Shared readers for the /services page.
+
+    A mixin rather than a base test case: one of the classes below runs with
+    no fixtures on purpose and the other needs them, so inheriting tests
+    between them would run each class's assertions under the wrong database.
+    """
+
+    def page(self):
+        response = self.client.get("/services")
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def services_section(self):
+        """Just the cards, so footer/nav links cannot satisfy an assertion."""
+        section = re.search(
+            r'<section class="our-team">(.*?)</section>', self.page(),
+            re.DOTALL)
+        self.assertIsNotNone(section, "services section missing")
+        assert section is not None  # for mypy
+        return section.group(1)
+
+    def credential_text(self, service_name):
+        """The credential line for one card, as plain text.
+
+        The line is rendered as a mix of links and literal copy so book
+        titles can point at /book/<isbn>. Reassembling it lets these tests
+        assert the owner's exact approved wording rather than fragments of
+        it -- these are publishing claims, so the whole sentence matters.
+        """
+        section = self.services_section()
+        chunks = section.split('<div class="team-item">')[1:]
+        for chunk in chunks:
+            heading = re.search(r"<h4>(.*?)</h4>", chunk, re.DOTALL)
+            if heading is None or service_name not in heading.group(1):
+                continue
+            spans = re.findall(r"<span>(.*?)</span>", chunk, re.DOTALL)
+            for span in spans:
+                if "co-author" not in span:
+                    continue
+                text = re.sub(r"<[^>]+>", "", span)
+                return html_module.unescape(text).strip()
+        self.fail(f"no credential line found for {service_name}")
+
+
 @override_settings(THUMBNAIL_DEBUG=False)
-class ServicesPageTest(TestCase):
+class ServicesPageTest(ServicesPageMixin, TestCase):
     """The curated /services page that replaced the Product-backed listing.
 
     The old page listed Product rows with cat=SERVICES. Nothing here is a
     Product, so the point of these tests is that the page says what it offers
-    without ever offering to sell it through the cart.
+    without ever offering to sell it through the cart. Deliberately no
+    fixtures: if the page still read Product rows, these would render empty.
     """
 
     EXPECTED = [
@@ -35,11 +82,6 @@ class ServicesPageTest(TestCase):
         "AI Consulting",
         "Fight Health Insurance",
     ]
-
-    def page(self):
-        response = self.client.get("/services")
-        self.assertEqual(response.status_code, 200)
-        return response.content.decode()
 
     def test_services_page_renders_the_services_template(self):
         response = self.client.get("/services")
@@ -90,29 +132,136 @@ class ServicesPageTest(TestCase):
         self.assertNotIn("Add to Cart", html)
         self.assertNotIn("Buy", html)
 
-    def test_both_consulting_entries_point_at_the_contact_page(self):
+    def test_both_consulting_entries_ask_for_email_with_the_project(self):
+        """The owner wants the project described in an email, not a form."""
         html = self.page()
 
-        self.assertEqual(html.count("Reach out for more info"), 2)
-        self.assertIn('href="/contact"', html)
+        self.assertEqual(
+            html.count(
+                "Email holden@pigscanfly.ca with the project you&#x27;d "
+                "like help on."),
+            2)
+        self.assertEqual(html.count("mailto:holden@pigscanfly.ca"), 2)
+        # The generic contact form is no longer the consulting CTA.
+        self.assertNotIn('href="/contact"', self.services_section())
 
-    def test_the_spark_credentials_avoid_the_first_spark_book_claim(self):
-        """Learning Spark 1e (2015) is not provably the first Spark book.
+    def test_the_mailto_subjects_distinguish_the_two_specialisms(self):
+        section = self.services_section()
 
-        Fast Data Processing with Spark (Packt, 2013) predates it, so "the
-        first Spark book" would be a publishing claim this page cannot back.
-        "one of the first" is true either way. This test exists so the
-        stronger phrasing cannot be reintroduced without someone deciding to.
+        self.assertIn("mailto:holden@pigscanfly.ca?subject=Apache%20Spark%20"
+                      "consulting", section)
+        self.assertIn("mailto:holden@pigscanfly.ca?subject=AI%20consulting",
+                      section)
+
+    def test_the_consulting_scope_is_stated_once_not_per_card(self):
+        """Same engagement for both, so the same sentence twice is filler."""
+        html = self.page()
+
+        self.assertEqual(
+            html.count(
+                "Both consulting engagements cover architecture review, "
+                "performance tuning, training, and a retainer for periodic "
+                "consulting."),
+            1)
+
+    def test_the_spark_credentials_claim_the_first_spark_book(self):
+        """The owner has confirmed he wrote the first book about Spark.
+
+        This test is the inverse of the one it replaces. While the question
+        was open the page hedged to "one of the first books", and that test
+        failed if the stronger claim appeared. The owner has since confirmed
+        he wrote both Fast Data Processing with Spark (Packt, 2013) and
+        Learning Spark 1e (O'Reilly, 2015), and that the 2013 book is the
+        first. So the claim is now asserted, and this fails if it is weakened
+        back -- the risk has flipped from overclaiming to underclaiming.
         """
-        html = self.page()
+        text = self.credential_text("Apache Spark Consulting")
 
-        self.assertIn(
+        self.assertEqual(
+            text,
             "From the co-author of Learning Spark (1st edition) and High "
-            "Performance Spark (1st and 2nd editions), and one of the first "
-            "books written about Apache Spark.",
-            html)
-        self.assertNotIn("the first Spark book", html)
-        self.assertNotIn("the first book about Apache Spark", html)
+            "Performance Spark (1st and 2nd editions), and author of Fast "
+            "Data Processing with Spark - the first book written about "
+            "Apache Spark.")
+        # The hedge must not creep back in.
+        self.assertNotIn("one of the first", text)
+
+    def test_the_ai_credentials_cite_both_ml_books_in_two_sentences(self):
+        """Eliding "co-author of" across the clause is ungrammatical.
+
+        The owner rejected "and of the Spark books..." for exactly that. Two
+        sentences is the fix, so this pins the sentence boundary.
+        """
+        text = self.credential_text("AI Consulting")
+
+        self.assertEqual(
+            text,
+            "From the co-author of Kubeflow for Machine Learning and Scaling "
+            "Python with Ray. Much of today's ML tooling still runs on Spark, "
+            "and those books are ours too.")
+        self.assertNotIn("and of the Spark books", text)
+
+    def test_every_cited_book_links_by_isbn_not_by_primary_key(self):
+        """A pk in markup keeps resolving after the row moves; an ISBN does not.
+
+        All five cited titles must be links, and every one must go through
+        /book/<isbn>.
+        """
+        section = self.services_section()
+        expected = {
+            "Learning Spark (1st edition)": "9781449358624",
+            "High Performance Spark (1st and 2nd editions)": "9781491943205",
+            "Fast Data Processing with Spark": "9781782167068",
+            "Kubeflow for Machine Learning": "9781492050124",
+            "Scaling Python with Ray": "9781098118808",
+        }
+
+        for title, isbn in expected.items():
+            with self.subTest(title=title):
+                self.assertIn(f'<a href="/book/{isbn}">{title}</a>', section)
+
+        self.assertNotIn("/product/", section)
+
+
+@override_settings(THUMBNAIL_DEBUG=False)
+class ServicesPageBookLinksTest(ServicesPageMixin, TestCase):
+    """The cited book links, against a seeded catalogue.
+
+    Separate from ServicesPageTest, which deliberately runs with no fixtures
+    to prove the page does not depend on Product rows. That property holds for
+    *rendering* the page; resolving its outbound book links is a different
+    claim and genuinely does need the catalogue, which production seeds via
+    scripts/start-server.sh. Splitting them keeps both honest instead of
+    weakening the independence test to accommodate this one.
+    """
+
+    fixtures = ["initial_products"]
+
+    def test_every_cited_book_link_actually_resolves(self):
+        """A link to a 404 is worse than plain text."""
+        isbns = re.findall(r'href="/book/(\d+)"', self.services_section())
+        self.assertEqual(len(isbns), 5)
+
+        for isbn in isbns:
+            with self.subTest(isbn=isbn):
+                response = self.client.get(f"/book/{isbn}")
+
+                self.assertEqual(response.status_code, 302)
+                self.assertRegex(response["Location"], r"^/product/\d+$")
+
+    def test_each_cited_book_link_reaches_a_page_naming_that_book(self):
+        """Guards a right-shaped link pointing at the wrong book."""
+        section = self.services_section()
+        for isbn, title in re.findall(
+                r'<a href="/book/(\d+)">([^<]+)</a>', section):
+            with self.subTest(isbn=isbn):
+                response = self.client.get(f"/book/{isbn}", follow=True)
+                # The credential titles carry an edition suffix the product
+                # name does not, so compare on the part before the bracket.
+                stem = title.split(" (")[0]
+
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, stem)
 
     def test_fight_health_insurance_is_marked_as_a_separate_company(self):
         html = self.page()

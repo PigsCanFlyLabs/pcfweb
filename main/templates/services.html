@@ -24,6 +24,7 @@
                 <div class="section-heading">
                     <h2>Services</h2>
                     <span>Consulting and projects — none of these are bought through the cart. Get in touch and we'll talk.</span>
+                    <span>{{ consulting_scope }}</span>
                 </div>
             </div>
             {% for service in services %}
@@ -45,18 +46,20 @@
                         {% endif %}
                         <span>{{ service.description }}</span>
                         {% if service.credentials %}
-                        <span>{{ service.credentials }}</span>
+                        {% comment %}
+                            Each book title links through /book/<isbn>, never
+                            /product/<pk>: a fixture primary key in markup
+                            does not fail loudly when the row moves, it keeps
+                            resolving to whatever book later holds it.
+                        {% endcomment %}
+                        <span>{% spaceless %}{% for segment in service.credentials %}{% if segment.isbn %}<a href="{% url 'book-by-isbn' isbn=segment.isbn %}">{{ segment.text }}</a>{% else %}{{ segment.text }}{% endif %}{% endfor %}{% endspaceless %}</span>
                         {% endif %}
                         {% if service.note %}
                         <span><em>{{ service.note }}</em></span>
                         {% endif %}
                         {# Enquiries only: no add-to-cart anywhere on this page. #}
                         <div class="main-border-button">
-                            {% if service.cta_route %}
-                            <a href="{% url service.cta_route %}">{{ service.cta_label }}</a>
-                            {% else %}
-                            <a href="{{ service.url }}">{{ service.cta_label }}</a>
-                            {% endif %}
+                            <a href="{{ service.cta_url }}">{{ service.cta_label }}</a>
                         </div>
                     </div>
                 </div>
