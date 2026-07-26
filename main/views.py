@@ -94,7 +94,7 @@ class FamilyView(View):
                     "The same company as Pigs Can Fly Labs, with its own "
                     "site — not a separate company. Coming soon."
                 ),
-                "url": None,
+                "url": "https://www.liberatedbread.com/",
                 "coming_soon": True,
             },
         ]
