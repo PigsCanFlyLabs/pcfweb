@@ -12,7 +12,7 @@ from django.contrib.staticfiles import finders
 from django.contrib.staticfiles.storage import staticfiles_storage
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import (
     FileResponse, Http404, HttpResponse, HttpResponseBadRequest)
@@ -29,7 +29,9 @@ from main import captcha
 from main.digital import (
     BadSignature, DigitalAssetError, SignatureExpired, link_lifetime_days,
     open_asset, parse_download_token)
-from main.models import Cart, CartProduct, Order, Product
+from main.models import (
+    Cart, CartProduct, EmailIdentity, Order, Product,
+    normalize_email_identity)
 from main.payments import Payments
 from main.utils import generate_username, get_country_code
 
@@ -610,7 +612,7 @@ class SignupView(View):
         # as None and 500 on the AttributeError, and a missing password
         # reached set_password(None), which silently creates an account with
         # an unusable password that can never be logged into.
-        email = (request.POST.get('email') or '').strip()
+        email = normalize_email_identity(request.POST.get('email') or '')
         password = request.POST.get('password') or ''
         if not email or not password:
             return redirect(reverse('signup') + '?invalid=missing')
@@ -621,13 +623,24 @@ class SignupView(View):
 
         # email is not unique on auth.User, so this can legitimately match
         # more than one row; either way the address is taken.
-        if User.objects.filter(email=email).exists():
+        if User.objects.filter(email__iexact=email).exists():
             return redirect(reverse('signup') + '?in_use=true')
 
-        username = generate_username(email)
-        user = User.objects.create(email=email, username=username)
-        user.set_password(password)
-        user.save()
+        try:
+            # Reserve the address first. The functional unique constraint is
+            # the arbiter when concurrent requests both pass the advisory
+            # auth.User check above; the losing transaction creates no User.
+            with transaction.atomic():
+                identity = EmailIdentity.objects.create(
+                    normalized_email=email)
+                username = generate_username(email)
+                user = User.objects.create(email=email, username=username)
+                user.set_password(password)
+                user.save()
+                identity.user = user
+                identity.save(update_fields=["user"])
+        except IntegrityError:
+            return redirect(reverse('signup') + '?in_use=true')
 
         # No cart is created here: get_cart() owns that, and creating one
         # unconditionally on a OneToOneField is an unprotected insert.
@@ -1113,7 +1126,7 @@ class LoginView(View):
         return render(request, 'login.html', context={'title': 'Log In', 'valid': valid})
 
     def post(self, request):
-        email = (request.POST.get('email') or '').strip()
+        email = normalize_email_identity(request.POST.get('email') or '')
         password = request.POST.get('password') or ''
         if not email or not password:
             return redirect(reverse('login') + '?valid=false')
@@ -1121,7 +1134,7 @@ class LoginView(View):
         # email is not unique on auth.User, so .get() here could raise
         # MultipleObjectsReturned and 500 the login page. Try each match
         # instead: only the one whose password checks out authenticates.
-        for candidate in User.objects.filter(email=email):
+        for candidate in User.objects.filter(email__iexact=email):
             user = authenticate(request, email=email,
                                 username=candidate.username, password=password)
             if user is not None:

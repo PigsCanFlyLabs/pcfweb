@@ -5,7 +5,10 @@ the interesting cases are all the ones a browser would normally prevent.
 """
 
 from django.contrib.auth.models import User
+from django.db import IntegrityError, transaction
 from django.test import TestCase, override_settings
+
+from main.models import EmailIdentity
 
 
 # Both classes follow a redirect into the home page, which thumbnails static
@@ -50,6 +53,21 @@ class SignupValidationTest(TestCase):
         user = User.objects.get()
         self.assertEqual(user.email, "a@example.com")
         self.assertTrue(user.check_password("hunter2hunter2"))
+        self.assertEqual(user.email_identity.normalized_email, "a@example.com")
+
+    def test_signup_normalizes_email_case_and_whitespace(self):
+        response = self.client.post(
+            "/signup",
+            {"email": "  Person@Example.COM ", "password": "hunter2hunter2"})
+
+        self.assertRedirects(response, "/")
+        self.assertEqual(User.objects.get().email, "person@example.com")
+
+        response = self.client.post(
+            "/signup",
+            {"email": "PERSON@example.com", "password": "another-password"})
+        self.assertIn("in_use=true", response["Location"])
+        self.assertEqual(User.objects.count(), 1)
 
     def test_signup_with_a_taken_email_says_so(self):
         User.objects.create(username="a", email="a@example.com")
@@ -73,9 +91,30 @@ class SignupValidationTest(TestCase):
         self.assertIn("in_use=true", response["Location"])
         self.assertEqual(User.objects.count(), 2)
 
+    def test_database_rejects_duplicate_normalized_email_identity(self):
+        EmailIdentity.objects.create(normalized_email="person@example.com")
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            # bulk_create deliberately bypasses EmailIdentity.save(), proving
+            # that case-insensitive uniqueness lives in the database too.
+            EmailIdentity.objects.bulk_create([
+                EmailIdentity(normalized_email="PERSON@example.com")])
+
 
 @override_settings(THUMBNAIL_DEBUG=False)
 class LoginValidationTest(TestCase):
+    def test_login_normalizes_email_case_and_whitespace(self):
+        user = User.objects.create(username="person", email="person@example.com")
+        user.set_password("hunter2hunter2")
+        user.save()
+
+        response = self.client.post(
+            "/login",
+            {"email": "  PERSON@Example.COM ", "password": "hunter2hunter2"})
+
+        self.assertRedirects(response, "/")
+        self.assertEqual(int(self.client.session["_auth_user_id"]), user.pk)
+
     def test_a_duplicated_email_does_not_500_the_login_page(self):
         wrong = User.objects.create(username="wrong", email="dup@example.com")
         wrong.set_password("not-the-one")
