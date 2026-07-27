@@ -4,6 +4,7 @@ The three catalogue entries as the fixture defines them, plus the build
 guard and packaging rules that get the e-book archive into the image
 without letting it leak onto the web."""
 
+import html as html_module
 import re
 import shutil
 import subprocess
@@ -54,6 +55,7 @@ P6 = (
     "Grab your helper, pour some tea, and get started!"
 )
 STANDARD_COPY = "\n\n".join((P1, P2, P3, P4, P5, P6))
+STANDARD_PARAGRAPHS = (P1, P2, P3, P4, P5, P6)
 
 # The Executive Edition keeps the new standard copy and appends the row's
 # existing executive-only add-on text verbatim.
@@ -68,6 +70,7 @@ EXECUTIVE_ADD_ON = (
     "developer from turning to a life of enterprise support contracts."
 )
 EXECUTIVE_EDITION_COPY = f"{STANDARD_COPY}\n\n{EXECUTIVE_ADD_ON}"
+EXECUTIVE_PARAGRAPHS = STANDARD_PARAGRAPHS + (EXECUTIVE_ADD_ON,)
 
 
 class BookAssetGuardTest(TestCase):
@@ -205,6 +208,17 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         response = self.client.get(f"/product/{pk}")
         self.assertEqual(response.status_code, 200)
         return response.content.decode()
+
+    def rendered_description_paragraphs(self, pk):
+        html = self.rendered_page(pk)
+        match = re.search(
+            r'<div class="product-description">(.*?)</div>', html, re.DOTALL)
+        self.assertIsNotNone(match)
+        assert match is not None  # for mypy
+        return [
+            html_module.unescape(text.strip())
+            for text in re.findall(r"<p>(.*?)</p>", match.group(1), re.DOTALL)
+        ]
 
     def test_all_three_skus_are_present(self):
         for pk, price in ((104, 2000), (105, 3042), (106, 1500)):
@@ -397,13 +411,13 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         self.assertEqual(executive.description.count('"'), 2)
         self.assertEqual(executive.description.count("'"), 4)
 
-        # And the whole thing reaches the page. get_display_text() escapes the
-        # copy, so the raw words are NOT a substring of it -- escape the
-        # expected side, as test_both_print_editions_offer_a_signature... does
-        # with the note, or the assertion passes while proving nothing.
-        escaped = escape(EXECUTIVE_EDITION_COPY)
-        self.assertNotEqual(escaped, EXECUTIVE_EDITION_COPY)
-        self.assertIn(escaped, executive.get_display_text())
+        rendered = str(executive.get_display_text())
+        self.assertIn("&quot;Holden, why would I want this special executive "
+                      "edition?&quot;", rendered)
+        self.assertIn("You&#x27;re not just reading a book for kids and "
+                      "executives", rendered)
+        self.assertIn("<p>All of Holden&#x27;s books are available signed on "
+                      "request</p>", rendered)
 
     def test_the_executive_premium_is_exactly_what_the_copy_claims(self):
         # The copy makes a factual claim about the two prices -- "(roughly)
@@ -465,6 +479,25 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, html)
+
+    def test_the_standard_and_ebook_pages_render_six_description_paragraphs(self):
+        for pk in (104, EBOOK_PK):
+            with self.subTest(pk=pk):
+                paragraphs = self.rendered_description_paragraphs(pk)
+
+                self.assertEqual(paragraphs[:6], list(STANDARD_PARAGRAPHS))
+                if pk == 104:
+                    self.assertEqual(paragraphs[6], Product.SIGNED_ON_REQUEST_NOTE)
+                    self.assertEqual(len(paragraphs), 7)
+                else:
+                    self.assertEqual(len(paragraphs), 6)
+
+    def test_the_executive_page_renders_the_six_paragraphs_plus_the_add_on(self):
+        paragraphs = self.rendered_description_paragraphs(105)
+
+        self.assertEqual(paragraphs[:7], list(EXECUTIVE_PARAGRAPHS))
+        self.assertEqual(paragraphs[7], Product.SIGNED_ON_REQUEST_NOTE)
+        self.assertEqual(len(paragraphs), 8)
 
     def test_the_ebook_page_says_the_price_is_a_suggestion(self):
         response = self.client.get(f"/product/{EBOOK_PK}")
