@@ -321,6 +321,10 @@ class HomePageCardsTest(TestCase):
         "Distributed Computing 4 Kids and Executives: "
         "Executives may require more help")
 
+    # The rendered form of a Liberated Bread link. One capture group, the
+    # destination, so findall returns the URLs themselves.
+    LIBERATED_BREAD_HREF = r'<a href="(https://[^"]*liberatedbread[^"]*)"'
+
     def homepage(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
@@ -333,10 +337,6 @@ class HomePageCardsTest(TestCase):
         self.assertIsNotNone(section, "explore section missing from homepage")
         assert section is not None  # for mypy
         return section.group(1)
-
-    # The rendered form of a Liberated Bread link. One capture group, the
-    # destination, so findall returns the URLs themselves.
-    LIBERATED_BREAD_HREF = r'<a href="(https://[^"]*liberatedbread[^"]*)"'
 
     def featured_book_card(self):
         """The .second-image block, which is the featured-book card.
