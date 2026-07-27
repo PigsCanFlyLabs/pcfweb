@@ -20,8 +20,12 @@
     isbn: "9781449358624"
     print_isbn: "9781449358624"
     amazon_link: "https://www.amazon.com/dp/1449358624"
-    # 2015 1st edition has no bookshop.org product page; link to its search.
-    bookshop_link: "https://bookshop.org/search?keywords=9781449358624"
+    # No bookshop_link: the 2015 1st edition is absent from Bookshop's
+    # catalogue entirely, and the ISBN search we used to link to returns
+    # "No results found." Deliberately not repointed at the 2nd edition
+    # (ean 9781492050049, Wenig/Damji) -- that is a different book by
+    # different authors, so linking it would misrepresent this product.
+    # No link beats a button that lands on an empty search page.
     amazon_in_link: "https://www.amazon.in/dp/1449358624"
     flipkart_link: "https://www.flipkart.com/search?q=9781449358624"
     image_name: "book_covers/learning_spark_1ed.jpg"
@@ -70,6 +74,11 @@
     print_isbn: "9781492050124"
     amazon_link: "https://www.amazon.com/dp/1492050121"
     bookshop_link: "https://bookshop.org/books/kubeflow-for-machine-learning-from-lab-to-production/9781492050124"
+    # The ?ean= is load-bearing: the same slug+id serves the paperback by
+    # default, and this ean selects the "Ebook (DRM-free)" listing. Do not
+    # strip or reorder it. Verified 2026-07-26: page lists Ebook (DRM-free)
+    # $42.99 at EAN 9781492050070 alongside the paperback at 9781492050124.
+    bookshop_ebook_link: "https://bookshop.org/p/books/kubeflow-for-machine-learning-boris-lublinsky/6feb89c16760d5f7?ean=9781492050070"
     amazon_in_link: "https://www.amazon.in/dp/1492050121"
     flipkart_link: "https://www.flipkart.com/search?q=9781492050124"
     image_name: "book_covers/kubeflow_for_ml.jpg"
@@ -93,6 +102,10 @@
     print_isbn: "9781098118808"
     amazon_link: "https://www.amazon.com/dp/1098118804"
     bookshop_link: "https://bookshop.org/search?keywords=9781098118808"
+    # As on pk 102, the ?ean= selects the "Ebook (DRM-free)" listing on a page
+    # that otherwise serves the paperback. Verified 2026-07-26: Ebook
+    # (DRM-free) $56.99 at EAN 9781098118761, paperback at 9781098118808.
+    bookshop_ebook_link: "https://bookshop.org/p/books/scaling-python-with-ray-adventures-in-cloud-and-serverless-patterns-boris-lublinsky/4dc16509c22353e3?ean=9781098118761"
     amazon_in_link: "https://www.amazon.in/dp/1098118804"
     flipkart_link: "https://www.flipkart.com/search?q=9781098118808"
     image_name: "book_covers/scaling_python_with_ray.jpg"

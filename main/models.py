@@ -51,6 +51,13 @@ class Product(models.Model):
     print_asin = models.CharField(max_length=20, blank=True, null=True)
     ebook_asin = models.CharField(max_length=20, blank=True, null=True)
     bookshop_link = models.CharField(max_length=250, blank=True, null=True)
+    # A sibling field rather than a reuse of bookshop_link: the print link's
+    # label is format-neutral, and letting one field mean "print" on some rows
+    # and "e-book" on others would make the button lie on half the catalogue.
+    # Only two of the eight titles have a Bookshop e-book listing -- coverage
+    # is publisher-gated, so this is set per-row from a verified URL and never
+    # derived from an ISBN.
+    bookshop_ebook_link = models.CharField(max_length=250, blank=True, null=True)
     # Shown to visitors detected as being in India.
     amazon_in_link = models.CharField(max_length=250, blank=True, null=True)
     flipkart_link = models.CharField(max_length=250, blank=True, null=True)
@@ -254,6 +261,8 @@ class Product(models.Model):
             ("Buy on Amazon (print)", self.get_amazon_link()),
             ("Buy on Bookshop.org (support local bookstores)",
              self.bookshop_link),
+            ("Buy the e-book on Bookshop.org (DRM-free)",
+             self.bookshop_ebook_link),
             ("Read on O'Reilly Safari (free trial)",
              # Explicit flag, not an ISBN inference. The DC4K SKUs are
              # self-published and carry real print ISBNs, so keying this off
