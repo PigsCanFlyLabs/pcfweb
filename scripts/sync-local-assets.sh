@@ -134,11 +134,21 @@ if [ ! -d "$source_images" ]; then
   # realpath -m rather than "$(pwd)/$source_images": it normalises a path that
   # does not exist yet, and does not glue the working directory onto a value
   # that was already absolute.
+  # A dangling symlink is not "missing" in the way a developer will read that
+  # word -- ls shows them an images entry -- so say which it is.
+  if [ -L "$source_images" ]; then
+    dangling_note="
+That path IS a symlink, but it does not resolve: it points at
+$(readlink "$source_images"), which does not exist.
+"
+  else
+    dangling_note=""
+  fi
   problem "the pcfweb-assets checkout is missing" <<EOF
 Expected an images/ directory at:
 
   $(realpath -m "$source_images")
-
+$dangling_note
 That repository is not vendored into this one; clone it beside this checkout:
 
   $CLONE_HINT $ASSETS_DIR
@@ -153,10 +163,100 @@ EOF
 fi
 
 # --- 2. the sync itself ----------------------------------------------------
+#
+# Staged, then renamed into place. The copy is the slow, failure-prone step --
+# disk full, an unreadable source, a ^C -- and doing it off to the side means
+# none of those can leave a deleted or half-written image tree behind. This PR
+# removed a README instruction that read "build.sh ... leaves your local images
+# deleted -- re-clone to recover"; leaving a different route to the same state
+# would undo that.
+#
+# Honest about the limit: replacing a non-empty directory cannot be a single
+# rename (rename(2) gives ENOTEMPTY), so the swap is rm-then-mv and there is a
+# two-syscall window where $dest is absent. What is gone is the window that was
+# as long as the copy itself.
 if [ "$synced" = yes ]; then
-  rm -rf "$dest"
   mkdir -p "$STATIC_ASSETS_DIR"
-  cp -af "$source_images" "$STATIC_ASSETS_DIR/"
+
+  # Alongside the destination, so the rename is within one filesystem and
+  # therefore atomic. Cleaned up on every exit path including the `exit 1`
+  # inside problem(), so a failure cannot leave staging directories piling up.
+  staging="$STATIC_ASSETS_DIR/.images.staging.$$"
+  trap 'rm -rf "$staging"' EXIT INT TERM
+  rm -rf "$staging"
+  mkdir -p "$staging"
+
+  install=yes
+
+  # Two things earn the flags here.
+  #
+  # "$source_images/." rather than "$source_images": if the images component is
+  # itself a symlink -- a checkout with images -> /mnt/big-disk/assets -- then
+  # plain `cp -a` copies the *link*, and every guard below silently passes,
+  # because `find -type f` and check-image-assets.sh do not descend through a
+  # symlink. Exit 0, "Synced 0 image asset(s)", LFS pointers and oversized
+  # masters waved straight through. The trailing /. makes cp traverse the
+  # resolved directory, so that layout is supported rather than refused.
+  #
+  # -L for the same reason one level down: a symlink *inside* images/ would
+  # land as a symlink and be skipped by both guards identically. Dereferencing
+  # turns it into a real file the guards can actually read. pcfweb-assets has
+  # no symlinks today, so this changes nothing in practice -- it closes the
+  # hole rather than waiting for someone to open it.
+  if ! cp -a -L "$source_images/." "$staging/"; then
+    problem "copying the image assets failed" <<EOF
+cp reported the error above. Nothing has been installed: $dest is exactly as
+it was before this run, because the copy went to a staging directory and only
+a complete one is ever renamed into place.
+EOF
+    install=no
+  fi
+
+  # The invariant the guards below depend on: everything staged is a real file
+  # or a real directory. The flags above are what make that true; this asserts
+  # that it IS true, because the failure is silent -- when it does not hold,
+  # the size ceiling and the pointer detector do not fail, they pass.
+  #
+  # Unreachable while those flags are right, and deliberately kept anyway: it
+  # is what converts a future edit to them from a silent fail-open into a loud
+  # refusal. Verified that way rather than directly -- removing the -L is
+  # caught *by this block*, and removing both together is caught by
+  # SymlinkedSourceTest. Don't go looking for a test that reaches it with the
+  # flags intact; there isn't one, and that is the point.
+  if [ "$install" = yes ]; then
+    strays=$(find "$staging" -type l -printf '  %p\n' | sort || true)
+    if [ -n "$strays" ]; then
+      problem "symlinks survived the copy, so the guards below cannot be trusted" <<EOF
+$strays
+
+find -type f does not match a symlink and check-image-assets.sh does not read
+through one, so an oversized master or an unmaterialised LFS pointer behind any
+of these would be reported as fine. Refusing to install a tree that cannot be
+verified; $dest is untouched.
+
+If you are here after editing the cp flags in this script: the /. and the -L
+are load-bearing, not decoration.
+EOF
+      install=no
+    fi
+  fi
+
+  if [ "$install" = yes ]; then
+    # No trailing slash. `rm -rf "$dest"` unlinks a symlinked destination and
+    # leaves its target alone, which is what we want. `rm -rf "$dest"/` would
+    # recurse *through* the link and delete the target's contents instead.
+    # One character apart; there is a test pinning this.
+    rm -rf "$dest"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      problem "could not clear $dest before installing the new tree" <<EOF
+Something still exists at that path after rm -rf. Refusing to rename over it:
+mv would move the staged tree *inside* it and leave you with a nested copy.
+EOF
+      install=no
+    else
+      mv "$staging" "$dest"
+    fi
+  fi
 fi
 
 # --- 3. guards over what actually landed -----------------------------------

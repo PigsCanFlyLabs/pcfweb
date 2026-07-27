@@ -134,7 +134,10 @@ class ImageAssetGuardTest(SimpleTestCase):
         sync_script = (REPO_ROOT / "scripts"
                        / "sync-local-assets.sh").read_text()
 
-        copy_call = 'cp -af "$source_images"'
+        # The copy dereferences: a symlinked images/ component, or a symlink
+        # inside it, would otherwise land as a symlink that neither the size
+        # ceiling nor the pointer detector descends through.
+        copy_call = 'cp -a -L "$source_images/." "$staging/"'
         oversized_block = "if [ -n \"$oversized\" ]; then"
         source_guard_call = (
             './scripts/check-image-assets.sh "$dest" "source image assets"'

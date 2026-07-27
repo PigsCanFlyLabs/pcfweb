@@ -1335,6 +1335,41 @@ Social
     font-weight: 500;
 }
 
+/* The Liberated Bread logo card. Same 255px box, same #f8f8f8 as .types, so
+   the mark and its wording read as one unit rather than two unrelated tiles;
+   flex-centred instead of .types' padding-top:90px, which is tuned for a
+   heading and not for an image. */
+#explore .liberated-bread {
+    min-height: 255px;
+    background-color: #f8f8f8;
+    text-align: center;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Both axes are pinned, so object-fit is not optional: without it the used
+   value is `fill`, which stretches the source to the box -- the squish this
+   codebase has already had to fix once. The source is 512x512 and the box is
+   square, so cover and contain are the same picture here; cover is the
+   house style and stays correct if either ever stops being square.
+   The width overrides #explore img's width:100% above. */
+#explore .liberated-bread img {
+    width: 200px;
+    height: 200px;
+    object-fit: cover;
+}
+
+/* Three col-lg-6 cards in a col-lg-6 column, so the row wraps: the two
+   Liberated Bread cards on the first line, the featured book beneath. The
+   wrapping cards need the gap that .first-image already carries for exactly
+   this reason, or the two lines butt together. */
+#explore .liberated-bread,
+#explore .types {
+    margin-bottom: 30px;
+}
+
 
 /* 
 ---------------------------------------------
