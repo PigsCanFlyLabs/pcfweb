@@ -38,43 +38,95 @@ BOOKSHOP_EBOOK_URLS = {
 }
 BOOKSHOP_EBOOK_ABSENT_PKS = [100, 101, 104, 105, 106, 107]
 
+# Every column whose contents can reach <g:gtin>. get_gtin() is
+# `print_isbn or ebook_isbn or upc`, so both of those carry a GTIN on their
+# own; `isbn` is the legacy column print_isbn is copied from, and a typo there
+# propagates to print_isbn on the next row that is written by hand. All three
+# are therefore feed-visible and all three need checking.
+ISBN_FIELDS = ("isbn", "print_isbn", "ebook_isbn")
+
 
 class BookIsbnTest(TestCase):
     """Every shipped ISBN has to be a real one.
 
-    get_gtin() hands `isbn` straight to the Google Merchant feed as the
+    get_gtin() hands an ISBN straight to the Google Merchant feed as the
     product's GTIN, and Google disapproves a product submitted with an
     incorrect one. A single mistyped digit is therefore a silent feed
     failure: nothing here breaks, the listing just stops being accepted.
     Checking the check digit is the cheapest possible defence, and it covers
     every book added later rather than only the ones in the fixture today.
+
+    The check has to run over `ebook_isbn` and `print_isbn` and not just the
+    legacy `isbn` column. A digital-only row -- pk 106 is the one in the
+    fixture today -- sets `ebook_isbn` alone and leaves `isbn` unset, so a
+    check that selects rows by `isbn` being truthy skips such a row
+    completely, even though `ebook_isbn` is the only thing standing between
+    that row and a wrong <g:gtin>.
     """
 
     fixtures = ["initial_products"]
 
+    def books(self):
+        return Product.objects.filter(cat=Product.Categories.BOOKS)
+
     def books_with_isbns(self):
-        return [book for book
-                in Product.objects.filter(cat=Product.Categories.BOOKS)
-                if book.isbn]
+        return [book for book in self.books() if book.isbn]
+
+    def populated_isbns(self):
+        """Every (book, field, value) whose ISBN column is actually set.
+
+        Blank and NULL are skipped rather than failed: a print-only SKU has no
+        `ebook_isbn` and a digital one has no `print_isbn`, so an unset column
+        is the normal case and only a populated one makes a claim worth
+        checking.
+        """
+        return [(book, field, str(value))
+                for book in self.books()
+                for field, value in ((f, getattr(book, f))
+                                     for f in ISBN_FIELDS)
+                if value]
 
     def test_every_book_isbn_is_a_valid_isbn13(self):
-        books = self.books_with_isbns()
+        populated = self.populated_isbns()
         # Guards against the whole test passing because the queryset is empty.
-        self.assertGreaterEqual(len(books), 6)
-        for book in books:
-            with self.subTest(pk=book.pk, isbn=book.isbn):
-                isbn = str(book.isbn)
-                self.assertRegex(isbn, r"^\d{13}$")
-                self.assertEqual(isbn[-1], isbn13_check_digit(isbn))
+        self.assertGreaterEqual(len(populated), 9)
+        # And against it passing because a whole column stopped being read --
+        # the ebook_isbn coverage in particular is the point of checking more
+        # than the legacy column, and it rests on a single fixture row.
+        for field in ISBN_FIELDS:
+            self.assertTrue(
+                any(f == field for _, f, _ in populated),
+                f"no fixture book has {field} set, so this test no longer "
+                f"covers {field} at all.")
+
+        for book, field, isbn in populated:
+            with self.subTest(pk=book.pk, field=field, isbn=isbn):
+                # Separators and an ISBN-10 both break the feed as surely as a
+                # bad check digit does, so each is reported as itself rather
+                # than as a bare assertion failure.
+                compact = isbn.replace("-", "").replace(" ", "")
+                self.assertRegex(
+                    compact, r"^\d{13}$",
+                    f"pk {book.pk} {field}={isbn!r} is not 13 digits; an "
+                    "ISBN-10 or a stray character is not a valid GTIN.")
+                self.assertEqual(
+                    isbn, compact,
+                    f"pk {book.pk} {field}={isbn!r} carries hyphens or "
+                    "spaces; get_gtin() emits the stored string verbatim, so "
+                    "store it unpunctuated.")
+                self.assertEqual(
+                    compact[-1], isbn13_check_digit(compact),
+                    f"pk {book.pk} {field}={isbn!r} has a bad ISBN-13 check "
+                    f"digit: expected {isbn13_check_digit(compact)}, found "
+                    f"{compact[-1]}. One of the first 12 digits is mistyped.")
 
     def test_the_check_digit_rule_rejects_a_typo(self):
         # Without this, a bug in isbn13_check_digit() that made it agree with
         # anything would leave the test above passing and useless. Every real
         # ISBN in the fixture, with its last digit bumped, must be rejected.
-        for book in self.books_with_isbns():
-            isbn = str(book.isbn)
+        for book, field, isbn in self.populated_isbns():
             typo = isbn[:12] + str((int(isbn[-1]) + 1) % 10)
-            with self.subTest(pk=book.pk, typo=typo):
+            with self.subTest(pk=book.pk, field=field, typo=typo):
                 self.assertNotEqual(typo, isbn)
                 self.assertNotEqual(typo[-1], isbn13_check_digit(typo))
 
