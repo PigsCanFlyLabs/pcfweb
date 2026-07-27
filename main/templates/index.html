@@ -71,13 +71,19 @@
 			      {# hardcoded pk: a pk that moves keeps resolving, just  #}
 			      {# to the wrong product. No book seeded, no card.       #}
 			      <div class="second-image">
+				{# The box is square, the cover is 2:3. With both axes pinned  #}
+				{# and no object-fit the browser uses `fill`, which scales the #}
+				{# two axes by different factors and visibly squishes the      #}
+				{# book. `cover` crops to the box instead.                     #}
 				{% if featured_book %}
 				<a href="{% url 'product' featured_book.pk %}">
-				  <img src="{{ featured_book.get_thumb }}" alt="{{ featured_book.name }}" style="width:200px;height:200px">
+				  <img src="{{ featured_book.get_thumb }}" alt="{{ featured_book.name }}" style="width:200px;height:200px;object-fit:cover">
+				    <h4>Distributed Computing 4 Kids and Executives: Executives may require more help</h4>
+				    <span>Our new book</span>
 				  </a>
 				{% else %}
 				<a href="{% url 'products' 'B' %}">
-				    <h4>Distributed Computing 4 Kids (and Executives)</h4>
+				    <h4>Distributed Computing 4 Kids and Executives: Executives may require more help</h4>
 				    <span>Our new book</span>
 				  </a>
 				{% endif %}

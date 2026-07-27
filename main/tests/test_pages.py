@@ -309,6 +309,18 @@ class HomePageCardsTest(TestCase):
 
     DC4K_TITLE = "Distributed Computing 4 Kids (and Executives)"
 
+    # The featured-book card's copy, exactly as the owner wrote it -- one
+    # sentence, one colon, no parenthesis around "and Executives". Spelled
+    # out here as an independent statement of the words, the same way
+    # test_dc4k.EXECUTIVE_EDITION_COPY is: a reworded template has to fail.
+    # It is a single string on purpose. Splitting it across an <h4> and a
+    # <span> would put markup in the middle of the sentence, and this
+    # assertion -- which is a substring test against rendered HTML -- would
+    # stop being able to see it.
+    FEATURED_CARD_COPY = (
+        "Distributed Computing 4 Kids and Executives: "
+        "Executives may require more help")
+
     def homepage(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
@@ -321,6 +333,20 @@ class HomePageCardsTest(TestCase):
         self.assertIsNotNone(section, "explore section missing from homepage")
         assert section is not None  # for mypy
         return section.group(1)
+
+    def featured_book_card(self):
+        """The .second-image block, which is the featured-book card.
+
+        Matched non-greedily to the first </div>, which is correct only
+        because the card holds no nested div -- if one is ever added this
+        helper has to grow a real parser rather than silently returning a
+        fragment.
+        """
+        card = re.search(r'<div class="second-image">(.*?)</div>',
+                         self.explore_section(), re.DOTALL)
+        self.assertIsNotNone(card, "featured-book card missing from #explore")
+        assert card is not None  # for mypy
+        return card.group(1)
 
     def test_the_homepage_no_longer_advertises_fmt2_network_services(self):
         # The offering is discontinued. History belongs on /about, not on a
@@ -476,6 +502,43 @@ class HomePageCardsTest(TestCase):
         self.assertNotIn("'product' 106", template)
         self.assertRegex(template, r"\{% url 'product' featured_book\.pk %\}")
 
+    def test_the_featured_cover_is_cropped_rather_than_squished(self):
+        """A 2:3 book cover in a square box must not be stretched.
+
+        The card pins both axes at 200px. CSS `object-fit` defaults to
+        `fill`, which scales width and height by *different* factors to
+        make the image meet both -- a 2:3 cover comes out visibly squished.
+        `cover` scales uniformly and crops the overflow instead, which is
+        the behaviour the owner asked for.
+
+        Asserted as "both axes pinned implies an object-fit that preserves
+        the aspect ratio", not as a literal style string, so that unpinning
+        an axis is also an acceptable way to pass -- the bug is the
+        combination, not the declaration.
+        """
+        tag = re.search(r'<img\b[^>]*>', self.featured_book_card())
+        self.assertIsNotNone(tag, "featured-book card renders no <img>")
+        assert tag is not None  # for mypy
+
+        style = re.search(r'style="([^"]*)"', tag.group(0))
+        declared = {}
+        if style is not None:
+            for part in style.group(1).split(";"):
+                if ":" in part:
+                    prop, _, value = part.partition(":")
+                    declared[prop.strip().lower()] = value.strip().lower()
+
+        if "width" in declared and "height" in declared:
+            self.assertEqual(
+                declared.get("object-fit"), "cover",
+                "both axes are pinned, so without object-fit:cover the "
+                f"browser falls back to `fill` and squishes the cover: {tag.group(0)}")
+
+    def test_the_featured_card_carries_the_owners_copy(self):
+        # Substring of the rendered page, so it fails both on a reworded
+        # string and on markup inserted into the middle of the sentence.
+        self.assertIn(self.FEATURED_CARD_COPY, self.featured_book_card())
+
 
 @override_settings(THUMBNAIL_DEBUG=False)
 class HomePageWithoutSeedDataTest(TestCase):
@@ -497,6 +560,9 @@ class HomePageWithoutSeedDataTest(TestCase):
 
         self.assertIn("Distributed Computing 4 Kids", html)
         self.assertIn('href="/products/B"', html)
+        # The same words as the seeded card, so the two branches of the
+        # {% if featured_book %} cannot drift apart.
+        self.assertIn(HomePageCardsTest.FEATURED_CARD_COPY, html)
 
 
 @override_settings(THUMBNAIL_DEBUG=False)
