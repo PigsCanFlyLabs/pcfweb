@@ -261,7 +261,17 @@ class Product(models.Model):
              # that is not on the platform. The flag also fails safe: a new
              # title added without it loses a link rather than inventing one.
              self.OREILLY_SAFARI_URL if self.on_oreilly_safari else None),
-            ("Buy on Kindle (e-book)", self.get_kindle_link()),
+            # Amazon's e-book store is Kindle, so this is one button, not two:
+            # a second "Buy on Amazon (ebook)" alongside a "Buy on Kindle" one
+            # would be two labels pointing at the identical /dp/<ebook_asin>
+            # URL. Named for the storefront the customer recognises rather than
+            # for the file format they get.
+            #
+            # Gated on data, not on on_oreilly_safari above: the ASIN itself is
+            # the per-title claim that the book is on Amazon, so an absent one
+            # is already the fail-safe. Adding a publisher flag on top would
+            # discard a correct owner-entered URL -- see AmazonEbookLinkTest.
+            ("Buy on Amazon (ebook)", self.get_kindle_link()),
             ("Follow along on Kickstarter", self.kickstarter),
         ]
         return [(label, url) for label, url in candidates if url]
