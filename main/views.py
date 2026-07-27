@@ -1310,11 +1310,16 @@ class MailingListSubscribeView(View):
             return ""
         return self.allowed_next(form.cleaned_data.get("next", ""))
 
-    # http is honoured only for these, and only with DEBUG on: somebody
-    # running the other site on their laptop has no certificate to serve. In
-    # production this is unreachable -- Prod sets DEBUG False -- which is the
-    # point. There is no configuration that turns plaintext redirects on for a
-    # real host.
+    # Hostnames for which http is honoured in place of https, so somebody
+    # running the other site on their laptop -- where there is no certificate
+    # to serve -- can still test the round trip.
+    #
+    # Exactly three things have to hold for a plaintext target to be followed:
+    # DEBUG is on, its hostname is in this set, and its netloc is on
+    # MAILING_LIST_ALLOWED_NEXT_HOSTS anyway (with the port, so "localhost:8000"
+    # has to be listed as that). Prod sets DEBUG False, so nothing we deploy
+    # reaches it -- but it is DEBUG doing that work, not this set: with DEBUG
+    # on, http to a listed localhost is honoured, which is the whole intent.
     LOCAL_NEXT_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
     def allowed_next(self, target: str) -> str:

@@ -427,9 +427,43 @@ class NextRedirectTest(MailingListTestBase):
                 "https://evil.example\\@liberatedbread.com/thanks/",
                 # A port we were not told about is a different entry.
                 "https://liberatedbread.com:8443/thanks/",
-                # urlsplit() drops the newline before parsing, so this would
-                # otherwise pass the check as one host and redirect as another.
+                # urlsplit() drops tabs and newlines before parsing, so these
+                # would otherwise pass the check as one host and go into the
+                # Location header as another.
                 "https://liberated\nbread.com/thanks/",
+                "https://liberated\rbread.com/thanks/",
+                "https://liberated\tbread.com/thanks/",
+                "https://liberatedbread.com\r\n/thanks/",
+                # Bad schemes in the spellings a browser accepts -- it reads
+                # the scheme case-insensitively. What actually stops these is
+                # that none of them has a netloc to match the allowlist, which
+                # is the sturdier reason; they are pinned in both cases anyway
+                # so that a scheme check added later cannot be case-sensitive
+                # and still look like it passes.
+                "JAVASCRIPT:alert(document.domain)",
+                "JaVaScRiPt:alert(document.domain)",
+                "VBSCRIPT:msgbox(1)",
+                "DATA:text/html,<script>alert(1)</script>",
+                # Whitespace *inside* rather than around it. Padding is
+                # stripped and the URL then honoured (see the next test); this
+                # is part of the netloc, and makes it a host we never heard of.
+                "https://liberatedbread.com /thanks/",
+                # Percent-encoded separators. Nothing here decodes them, which
+                # is the point: decoding would move where the host ends.
+                "%2f%2fevil.example/landing",
+                "https://liberatedbread.com%2f@evil.example/thanks/",
+                "https://liberatedbread.com%00.evil.example/thanks/",
+                # Confusables, and again nothing normalises. A fullwidth "l"
+                # and an ideographic full stop are not the ASCII characters
+                # they look like, so neither matches the list -- note the
+                # second is the dangerous direction, since a browser's IDNA
+                # mapping *would* resolve it to a host under evil.example.
+                "https://ｌiberatedbread.com/thanks/",
+                "https://liberatedbread.com。evil.example/thanks/",
+                # Longer than django.utils.http.MAX_URL_LENGTH (2048), which
+                # that module refuses outright rather than parse -- allowlisted
+                # host or not, so this falls back like everything else here.
+                "https://liberatedbread.com/thanks/?x=" + "a" * 2048,
                 "not a url at all",
         ]):
             with self.subTest(next=target):
@@ -444,6 +478,81 @@ class NextRedirectTest(MailingListTestBase):
                 self.assertTemplateUsed(response, "mailing_list_result.html")
                 self.assertTrue(
                     Subscription.objects.filter(email_field=email).exists())
+
+    def test_the_spellings_of_an_allowlisted_target_we_do_accept(self):
+        # The same URL written differently. A browser reads the scheme
+        # case-insensitively and ignores padding, so refusing these would be
+        # surprising rather than safe -- the host is still matched exactly, and
+        # that is what the allowlist is for.
+        for index, target in enumerate([
+                GOOD_NEXT,
+                "HTTPS://liberatedbread.com/thanks/",
+                "HtTpS://liberatedbread.com/thanks/",
+                "   " + GOOD_NEXT + "   ",
+                "\t" + GOOD_NEXT + "\n",
+        ]):
+            with self.subTest(next=target):
+                response = self.signup(f"ok{index}@example.com", next=target)
+
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response["Location"], target.strip())
+
+    def test_a_repeated_next_goes_exactly_where_it_was_validated(self):
+        """A duplicated field must not be checked as one value and followed as
+        another.
+
+        This passes by construction today: the form cleans `next` once and
+        respond() reads that same cleaned value, so there is only ever one
+        value in play. It is pinned anyway because the failure it guards
+        against is a real bypass and one refactor away. A QueryDict hands back
+        its *last* value from .get() and the whole list from .getlist(), so
+        code that validated one end and redirected on the other would let
+        anybody put an allowlisted host first and their own second and be
+        followed to the second. Both orders are here, so this fails whichever
+        end a future change starts reading from.
+        """
+        evil = "https://evil.example/landing"
+
+        # The last value wins, and here it is allowlisted -- so it is honoured.
+        allowed_last = self.signup("dup1@example.com", next=[evil, GOOD_NEXT])
+        # The last value wins here too, and it is not allowlisted. The
+        # allowlisted one sitting in front of it must not be used instead.
+        allowed_first = self.signup("dup2@example.com", next=[GOOD_NEXT, evil])
+
+        self.assertEqual(allowed_last.status_code, 302)
+        self.assertEqual(allowed_last["Location"], GOOD_NEXT)
+        self.assertEqual(allowed_first.status_code, 200)
+        self.assertTemplateUsed(allowed_first, "mailing_list_result.html")
+
+    def test_a_json_next_that_is_not_a_string_is_dropped(self):
+        # A caller serialising a form generically can put anything in here.
+        # CharField stringifies whatever it gets, so what actually protects us
+        # is that the stringified form has no allowlisted netloc in it --
+        # "['https://liberatedbread.com/thanks/']" is not a URL. None of these
+        # may come back as a target the caller would then navigate to.
+        for index, shape in enumerate([[GOOD_NEXT], {"url": GOOD_NEXT}, 5,
+                                       True, None, [], {}]):
+            with self.subTest(next=shape):
+                response = self.client.post(
+                    SUBSCRIBE_URL,
+                    data=json.dumps({"email": f"shape{index}@example.com",
+                                     "next": shape}),
+                    content_type="application/json")
+
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn("next", response.json())
+
+    def test_a_raw_null_byte_never_reaches_a_location_header(self):
+        # Unlike everything else in these tests this is a 400, and it is not
+        # ours: Django refuses a post containing a null byte before the view is
+        # reached at all. Pinned for the outcome rather than the status -- no
+        # redirect, and nothing carrying a null byte into a header.
+        response = self.signup(
+            "nul@example.com",
+            next="https://liberatedbread.com\x00.evil.example/thanks/")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("Location", response.headers)
 
     @override_settings(MAILING_LIST_ALLOWED_NEXT_HOSTS=[])
     def test_an_empty_allowlist_turns_the_feature_off(self):
@@ -534,50 +643,101 @@ class NextRedirectSaysNothingTest(MailingListTestBase):
     """
 
     def outcomes(self):
-        """One response per thing that can happen to a valid submission."""
+        """One response per thing that can happen to a valid submission.
+
+        Records what each one did on its way through, in self.evidence, so the
+        test below can show they really did take different branches rather
+        than assume it.
+        """
         self.subscriber("member@example.com", self.general)
         SuppressedAddress.objects.create(email="gone@example.com")
+        member = Subscription.objects.get(email_field="member@example.com")
+        member_before = (member.subscribed, member.activation_code)
 
-        # Every branch of post() below logs somewhere under main.*, and
-        # assertLogs is what keeps that noise out of the test output.
-        with self.assertLogs("main", level="INFO"):
-            responses = {
-                "a new address": self.signup("new@example.com",
-                                             next=GOOD_NEXT),
-                "one already subscribed": self.signup("member@example.com",
-                                                      next=GOOD_NEXT),
-                "a suppressed one": self.signup("gone@example.com",
-                                                next=GOOD_NEXT),
-                "a honeypotted one": self.signup(
-                    "bot@example.com", next=GOOD_NEXT,
-                    website="http://spam.example"),
-            }
-            # The source counter has four posts on it by now, so any ceiling
-            # below that refuses the next one. Asserted rather than assumed:
-            # without the warning this branch was never taken and the case
-            # this class exists for went untested.
-            with self.settings(MAILING_LIST_SIGNUP_RATE_LIMIT=2):
-                with self.assertLogs("main.views", level="WARNING"):
-                    responses["a rate-limited one"] = self.signup(
-                        "flood@example.com", next=GOOD_NEXT)
+        # Every branch of post() logs somewhere under main.*, and assertLogs
+        # both keeps that noise out of the test output and hands back the
+        # records, which are how each branch is identified below. The spy wraps
+        # mailing.subscribe rather than replacing it, so the branches that do
+        # reach it still behave normally -- what it adds is the record of which
+        # ones got that far at all.
+        with self.assertLogs("main", level="INFO") as logs:
+            with mock.patch("main.mailing.subscribe",
+                            wraps=mailing.subscribe) as subscribe:
+                responses = {
+                    "a new address": self.signup("new@example.com",
+                                                 next=GOOD_NEXT),
+                    "one already subscribed": self.signup(
+                        "member@example.com", next=GOOD_NEXT),
+                    "a suppressed one": self.signup("gone@example.com",
+                                                    next=GOOD_NEXT),
+                    "a honeypotted one": self.signup(
+                        "bot@example.com", next=GOOD_NEXT,
+                        website="http://spam.example"),
+                }
+                # The source counter has four posts on it by now, so any
+                # ceiling below that refuses the next one. Asserted rather
+                # than assumed: without the warning this branch was never
+                # taken and the case this class exists for went untested.
+                # Its own assertLogs, because the inner one takes the record
+                # out of the outer one's hands.
+                with self.settings(MAILING_LIST_SIGNUP_RATE_LIMIT=2):
+                    with self.assertLogs("main.views", level="WARNING") as hit:
+                        responses["a rate-limited one"] = self.signup(
+                            "flood@example.com", next=GOOD_NEXT)
+
+        self.evidence = {
+            "reached_subscribe": [call.kwargs["email"]
+                                  for call in subscribe.call_args_list],
+            "logged": "\n".join(logs.output + hit.output),
+            "member_before": member_before,
+        }
         return responses
 
     def test_the_five_of_them_really_did_take_five_different_branches(self):
-        # The point of the tests below is that five unlike things answer
-        # alike, which is worth nothing if they were not unlike to begin with.
-        self.outcomes()
+        """The tests below compare five outcomes and are worth nothing unless
+        those are five genuinely different things.
 
-        subscribed = set(
-            Subscription.objects.values_list("email_field", flat=True))
-        # The new address is on file unconfirmed and has its link; nothing was
-        # written or mailed for the honeypotted, suppressed or refused ones.
-        self.assertIn("new@example.com", subscribed)
-        self.assertIn("member@example.com", subscribed)
-        self.assertNotIn("bot@example.com", subscribed)
-        self.assertNotIn("gone@example.com", subscribed)
-        self.assertNotIn("flood@example.com", subscribed)
+        So each one is pinned by evidence only its own branch produces --
+        whether mailing.subscribe() was reached at all, and which log line came
+        out of it -- rather than by an absent row or an absent email, which a
+        broken implementation that quietly did nothing would satisfy just as
+        well.
+        """
+        self.outcomes()
+        reached = self.evidence["reached_subscribe"]
+        logged = self.evidence["logged"]
+
+        # Reached the subscribe call, and came back with something to confirm.
+        self.assertIn("new@example.com", reached)
         self.assertEqual([message.to for message in mail.outbox],
                          [["new@example.com"]])
+
+        # Reached it too, and it declined to start a second confirmation for
+        # somebody already on the list -- so the row is exactly as it was, code
+        # included. That is the branch: not "nothing happened", but "subscribe
+        # ran and had nothing to do".
+        self.assertIn("member@example.com", reached)
+        member = Subscription.objects.get(email_field="member@example.com")
+        self.assertEqual((member.subscribed, member.activation_code),
+                         self.evidence["member_before"])
+
+        # Also reached it, and was turned away *inside* it by the suppression
+        # check, which is the only thing that logs this line.
+        self.assertIn("gone@example.com", reached)
+        self.assertIn("Refusing a signup for gone@example.com: it is "
+                      "suppressed.", logged)
+        self.assertFalse(Subscription.objects
+                         .filter(email_field="gone@example.com").exists())
+
+        # Never got that far: the honeypot returns before anything is written.
+        self.assertNotIn("bot@example.com", reached)
+        self.assertIn("Dropped a honeypotted mailing list signup.", logged)
+
+        # Nor did this one, and for its own separate reason -- the ceiling is
+        # checked ahead of the write precisely so a flood cannot fill the table.
+        self.assertNotIn("flood@example.com", reached)
+        self.assertIn("Dropping a mailing list signup for flood@example.com: "
+                      "over the rate limit.", logged)
 
     def test_every_outcome_redirects_to_the_same_place(self):
         for description, response in self.outcomes().items():
