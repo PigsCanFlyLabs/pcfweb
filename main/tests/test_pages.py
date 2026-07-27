@@ -539,6 +539,125 @@ class HomePageCardsTest(TestCase):
         # string and on markup inserted into the middle of the sentence.
         self.assertIn(self.FEATURED_CARD_COPY, self.featured_book_card())
 
+    # -- card chrome and the alternating grid ---------------------------
+
+    @staticmethod
+    def declarations_for(selector):
+        """Every declaration the stylesheet applies to `selector`.
+
+        Merged across all rules that name it, in source order, because the
+        grid's shared chrome is deliberately written as one selector list
+        with per-card overrides after it -- a test that read only the first
+        matching block would report the pre-override value.
+
+        Selectors are compared after collapsing whitespace, so a rule that
+        lists the card on its own line still counts. This is a small reader,
+        not a CSS engine: it ignores @media blocks, which is what we want
+        here -- these assertions are about the desktop cascade.
+        """
+        css = (REPO_ROOT / "main" / "static" / "assets"
+               / "css" / "main.css").read_text()
+        # Drop @media bodies so their overrides don't leak into the result.
+        css = re.sub(r"@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}", "", css)
+
+        declared = {}
+        for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+            names = {" ".join(part.split())
+                     for part in selectors.split(",")}
+            if selector not in names:
+                continue
+            for part in body.split(";"):
+                if ":" in part:
+                    prop, _, value = part.partition(":")
+                    declared[prop.strip().lower()] = value.strip().lower()
+        return declared
+
+    def test_the_featured_book_card_has_the_same_chrome_as_the_other_cards(
+            self):
+        """.second-image is a card in the grid, so it has to look like one.
+
+        It used to carry no CSS at all -- no background, no centring, no
+        box -- so it rendered as bare text next to three tiles and its <h4>
+        fell back to the browser default. Assert it against .types rather
+        than against literal values, so the two can only be changed
+        together.
+        """
+        card = self.declarations_for("#explore .second-image")
+        self.assertNotEqual(
+            card, {},
+            "the featured-book card has no styling of its own; it renders "
+            "with no chrome next to the other cards")
+
+        reference = self.declarations_for("#explore .types")
+        for prop in ("min-height", "background-color", "width"):
+            with self.subTest(property=prop):
+                self.assertEqual(
+                    card.get(prop), reference[prop],
+                    f"the featured-book card's {prop} does not match the "
+                    "other cards in the grid")
+
+    def test_the_featured_card_does_not_inherit_the_heading_only_padding(
+            self):
+        """padding-top:90px is tuned for .types, which holds one short line.
+
+        The featured card's copy runs to several lines and sits beside a
+        200px cover, so 90px of lead-in pushes it straight out of the 255px
+        box. The card centres its contents instead -- so what this guards is
+        that it never joins that rule.
+        """
+        heading = self.declarations_for("#explore .second-image h4")
+
+        # Styled at all, first -- otherwise the assertion below passes on a
+        # card whose heading is browser-default, which is the bug this
+        # branch set out to fix.
+        self.assertIn(
+            "font-size", heading,
+            "the featured card's heading has no styling, so it falls back "
+            "to the browser default next to three styled cards")
+        self.assertNotEqual(
+            heading.get("padding-top"), "90px",
+            "the featured card's long copy cannot survive the padding that "
+            "centres a one-line heading")
+
+    def test_the_featured_card_sets_its_cover_beside_the_copy(self):
+        """The zig-zag's second row: text on the left, cover on the right.
+
+        The alternation is only half in the markup -- the DOM order puts the
+        copy first, and the placement that makes it a row rather than a
+        stack lives in the stylesheet, so assert that half here.
+        """
+        cover = self.declarations_for("#explore .second-image img")
+
+        self.assertEqual(
+            cover.get("grid-column"), "2",
+            "the cover is not placed in the card's second column, so the "
+            "row does not read text-then-image")
+
+    def test_the_explore_cards_alternate_image_and_text(self):
+        """Image, text / text, image -- the zig-zag the grid used to have.
+
+        The order is the markup's, exactly as it was when the section last
+        had four cards (d7966bd), so it is readable straight off the
+        rendered page: the Liberated Bread unit leads with its mark, and the
+        featured book leads with its words.
+        """
+        section = self.explore_section()
+
+        logo = section.index("liberated-bread-logo-512.png")
+        bread_copy = section.index(
+            "The same company as Pigs Can Fly Labs, with its own site")
+        self.assertLess(
+            logo, bread_copy,
+            "the first row should read image-then-text")
+
+        card = self.featured_book_card()
+        book_copy = card.index(self.FEATURED_CARD_COPY)
+        cover = card.index("<img")
+        self.assertLess(
+            book_copy, cover,
+            "the second row should read text-then-image, so that it "
+            "alternates against the row above it")
+
 
 @override_settings(THUMBNAIL_DEBUG=False)
 class HomePageWithoutSeedDataTest(TestCase):
