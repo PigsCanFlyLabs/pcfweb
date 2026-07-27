@@ -22,44 +22,111 @@ def isbn13_check_digit(isbn: str) -> str:
 AMAZON_IN_LABEL = "Buy on Amazon.in (print)"
 FLIPKART_LABEL = "Buy on Flipkart (print)"
 BOOKSHOP_LABEL = "Buy on Bookshop.org (support local bookstores)"
+BOOKSHOP_EBOOK_LABEL = "Buy the e-book on Bookshop.org (DRM-free)"
+# Only these two of the eight catalogue rows have a Bookshop e-book listing;
+# coverage is publisher-gated, not something derivable from an ISBN.
+BOOKSHOP_EBOOK_URLS = {
+    102: (
+        "https://bookshop.org/p/books/kubeflow-for-machine-learning-"
+        "boris-lublinsky/6feb89c16760d5f7?ean=9781492050070"
+    ),
+    103: (
+        "https://bookshop.org/p/books/scaling-python-with-ray-adventures-"
+        "in-cloud-and-serverless-patterns-boris-lublinsky/"
+        "4dc16509c22353e3?ean=9781098118761"
+    ),
+}
+BOOKSHOP_EBOOK_ABSENT_PKS = [100, 101, 104, 105, 106, 107]
+
+# Every column whose contents can reach <g:gtin>. get_gtin() is
+# `print_isbn or ebook_isbn or upc`, so both of those carry a GTIN on their
+# own; `isbn` is the legacy column print_isbn is copied from, and a typo there
+# propagates to print_isbn on the next row that is written by hand. All three
+# are therefore feed-visible and all three need checking.
+ISBN_FIELDS = ("isbn", "print_isbn", "ebook_isbn")
 
 
 class BookIsbnTest(TestCase):
     """Every shipped ISBN has to be a real one.
 
-    get_gtin() hands `isbn` straight to the Google Merchant feed as the
+    get_gtin() hands an ISBN straight to the Google Merchant feed as the
     product's GTIN, and Google disapproves a product submitted with an
     incorrect one. A single mistyped digit is therefore a silent feed
     failure: nothing here breaks, the listing just stops being accepted.
     Checking the check digit is the cheapest possible defence, and it covers
     every book added later rather than only the ones in the fixture today.
+
+    The check has to run over `ebook_isbn` and `print_isbn` and not just the
+    legacy `isbn` column. A digital-only row -- pk 106 is the one in the
+    fixture today -- sets `ebook_isbn` alone and leaves `isbn` unset, so a
+    check that selects rows by `isbn` being truthy skips such a row
+    completely, even though `ebook_isbn` is the only thing standing between
+    that row and a wrong <g:gtin>.
     """
 
     fixtures = ["initial_products"]
 
+    def books(self):
+        return Product.objects.filter(cat=Product.Categories.BOOKS)
+
     def books_with_isbns(self):
-        return [book for book
-                in Product.objects.filter(cat=Product.Categories.BOOKS)
-                if book.isbn]
+        return [book for book in self.books() if book.isbn]
+
+    def populated_isbns(self):
+        """Every (book, field, value) whose ISBN column is actually set.
+
+        Blank and NULL are skipped rather than failed: a print-only SKU has no
+        `ebook_isbn` and a digital one has no `print_isbn`, so an unset column
+        is the normal case and only a populated one makes a claim worth
+        checking.
+        """
+        return [(book, field, str(value))
+                for book in self.books()
+                for field, value in ((f, getattr(book, f))
+                                     for f in ISBN_FIELDS)
+                if value]
 
     def test_every_book_isbn_is_a_valid_isbn13(self):
-        books = self.books_with_isbns()
+        populated = self.populated_isbns()
         # Guards against the whole test passing because the queryset is empty.
-        self.assertGreaterEqual(len(books), 6)
-        for book in books:
-            with self.subTest(pk=book.pk, isbn=book.isbn):
-                isbn = str(book.isbn)
-                self.assertRegex(isbn, r"^\d{13}$")
-                self.assertEqual(isbn[-1], isbn13_check_digit(isbn))
+        self.assertGreaterEqual(len(populated), 9)
+        # And against it passing because a whole column stopped being read --
+        # the ebook_isbn coverage in particular is the point of checking more
+        # than the legacy column, and it rests on a single fixture row.
+        for field in ISBN_FIELDS:
+            self.assertTrue(
+                any(f == field for _, f, _ in populated),
+                f"no fixture book has {field} set, so this test no longer "
+                f"covers {field} at all.")
+
+        for book, field, isbn in populated:
+            with self.subTest(pk=book.pk, field=field, isbn=isbn):
+                # Separators and an ISBN-10 both break the feed as surely as a
+                # bad check digit does, so each is reported as itself rather
+                # than as a bare assertion failure.
+                compact = isbn.replace("-", "").replace(" ", "")
+                self.assertRegex(
+                    compact, r"^\d{13}$",
+                    f"pk {book.pk} {field}={isbn!r} is not 13 digits; an "
+                    "ISBN-10 or a stray character is not a valid GTIN.")
+                self.assertEqual(
+                    isbn, compact,
+                    f"pk {book.pk} {field}={isbn!r} carries hyphens or "
+                    "spaces; get_gtin() emits the stored string verbatim, so "
+                    "store it unpunctuated.")
+                self.assertEqual(
+                    compact[-1], isbn13_check_digit(compact),
+                    f"pk {book.pk} {field}={isbn!r} has a bad ISBN-13 check "
+                    f"digit: expected {isbn13_check_digit(compact)}, found "
+                    f"{compact[-1]}. One of the first 12 digits is mistyped.")
 
     def test_the_check_digit_rule_rejects_a_typo(self):
         # Without this, a bug in isbn13_check_digit() that made it agree with
         # anything would leave the test above passing and useless. Every real
         # ISBN in the fixture, with its last digit bumped, must be rejected.
-        for book in self.books_with_isbns():
-            isbn = str(book.isbn)
+        for book, field, isbn in self.populated_isbns():
             typo = isbn[:12] + str((int(isbn[-1]) + 1) % 10)
-            with self.subTest(pk=book.pk, typo=typo):
+            with self.subTest(pk=book.pk, field=field, typo=typo):
                 self.assertNotEqual(typo, isbn)
                 self.assertNotEqual(typo[-1], isbn13_check_digit(typo))
 
@@ -328,3 +395,87 @@ class InitialProductsFixtureTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, "amazon.in")
         self.assertContains(response, BOOKSHOP_LABEL)
+
+    def test_learning_spark_1ed_offers_no_bookshop_link_at_all(self):
+        # The 1st edition is not in Bookshop's catalogue and the ISBN search
+        # we used to ship returns "No results found", so the button is gone
+        # rather than repointed at the 2nd edition -- a different book.
+        book = Product.objects.get(pk=100)
+        self.assertFalse(book.bookshop_link)
+        self.assertFalse(book.bookshop_ebook_link)
+        names = [name for name, _ in book.get_alt_links()]
+        self.assertNotIn(BOOKSHOP_LABEL, names)
+        self.assertNotIn(BOOKSHOP_EBOOK_LABEL, names)
+        self.assertFalse([n for n in names if "Bookshop" in n])
+
+    def test_learning_spark_1ed_page_shows_no_bookshop_button(self):
+        response = self.client.get("/product/100")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "bookshop.org")
+        self.assertNotContains(response, 'href=""')
+        # The rest of its buy links are untouched.
+        self.assertContains(response, "https://www.amazon.com/dp/1449358624")
+
+    def test_only_the_two_titles_with_a_listing_carry_a_bookshop_ebook(self):
+        for pk, url in BOOKSHOP_EBOOK_URLS.items():
+            with self.subTest(pk=pk):
+                self.assertEqual(
+                    Product.objects.get(pk=pk).bookshop_ebook_link, url)
+
+    def test_bookshop_ebook_urls_keep_the_format_selecting_ean(self):
+        # The slug+id alone serves the paperback; ?ean= is what selects the
+        # DRM-free e-book. Stripping it would silently sell the wrong format.
+        for pk, ean in ((102, "9781492050070"), (103, "9781098118761")):
+            with self.subTest(pk=pk):
+                url = Product.objects.get(pk=pk).bookshop_ebook_link
+                assert url is not None
+                self.assertTrue(url.endswith(f"?ean={ean}"), url)
+
+    def test_titles_without_a_bookshop_ebook_listing_have_none(self):
+        for pk in BOOKSHOP_EBOOK_ABSENT_PKS:
+            with self.subTest(pk=pk):
+                product = Product.objects.get(pk=pk)
+                self.assertFalse(product.bookshop_ebook_link)
+                names = [name for name, _ in product.get_alt_links()]
+                self.assertNotIn(BOOKSHOP_EBOOK_LABEL, names)
+
+    def test_bookshop_ebook_link_is_offered_under_its_own_label(self):
+        for pk, url in BOOKSHOP_EBOOK_URLS.items():
+            with self.subTest(pk=pk):
+                links = Product.objects.get(pk=pk).get_alt_links()
+                self.assertIn((BOOKSHOP_EBOOK_LABEL, url), links)
+
+    def test_bookshop_print_and_ebook_are_separate_labelled_links(self):
+        # The print label is format-neutral, so the e-book must never be
+        # emitted under it -- one label meaning two formats is the bug.
+        book = Product.objects.get(pk=102)
+        links = dict(book.get_alt_links())
+        self.assertEqual(links[BOOKSHOP_LABEL], book.bookshop_link)
+        self.assertEqual(links[BOOKSHOP_EBOOK_LABEL], book.bookshop_ebook_link)
+        self.assertNotEqual(links[BOOKSHOP_LABEL], links[BOOKSHOP_EBOOK_LABEL])
+
+    def test_book_page_offers_the_bookshop_ebook(self):
+        response = self.client.get("/product/103")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, BOOKSHOP_EBOOK_LABEL)
+        self.assertContains(response, BOOKSHOP_EBOOK_URLS[103])
+
+    def test_blank_alt_link_renders_no_button_and_no_empty_href(self):
+        # The filtering in get_alt_links() is what lets six rows leave the
+        # field unset with no gating flag; an empty string must drop out too,
+        # not render a button pointing at href="".
+        # .update() rather than .save(), which would mint a Stripe product.
+        self.assertFalse(Product.objects.get(pk=101).bookshop_ebook_link)
+        Product.objects.filter(pk=101).update(bookshop_ebook_link="")
+        book = Product.objects.get(pk=101)
+        self.assertEqual(book.bookshop_ebook_link, "")
+
+        self.assertNotIn(
+            BOOKSHOP_EBOOK_LABEL,
+            [name for name, _ in book.get_alt_links()])
+        self.assertTrue(all(url for _, url in book.get_alt_links()))
+
+        response = self.client.get("/product/101")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, BOOKSHOP_EBOOK_LABEL)
+        self.assertNotContains(response, 'href=""')
