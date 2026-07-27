@@ -43,6 +43,21 @@ the Django admin, never the fixture.**
 
 ## Current state
 
+**Not all of this is live on `main` today, and the table would be a lie if it did not
+say so.** As of this writing `main` carries **no** `ebook_isbn` for pks 100-103 and
+**no** `ebook_asin` for any row at all.
+
+- The `ebook_isbn` column becomes shipped state when PR #40 (`feat/ebook-isbns`) merges.
+  Until then `/book/<ebook-isbn>` returns **404** for pks 100-103, because the value is
+  simply not in the fixture that `seed_products` reads on a clean database.
+- The `ebook_asin` column is **verified data, not shipped state**. No `ebook_asin` has
+  ever been set on any row; the values below are the outcome of sourcing work and take
+  effect only once they are actually stored (see "Where values may be stored" above).
+  Until then no "Buy on Amazon (ebook)" button renders for any product.
+
+Treat the table as *what each identifier is*, not as *what the database currently
+contains*.
+
 | pk | Title | `ebook_isbn` | `ebook_asin` | Bookshop e-book |
 |---|---|---|---|---|
 | 100 | Learning Spark, 1st ed. | `9781449359058` | `B00SW0TY8O` | none |
@@ -74,7 +89,8 @@ the publisher item number incremented by one — the exact shape of a fabricated
 identifier. It was rejected rather than shipped. `9781784392574` also surfaces in
 searches for this title but is the **2nd edition** (Sankar & Karau), a different book.
 
-**pk 100's Bookshop print link was removed rather than repointed.** It used to be a
+**pk 100's Bookshop print link was removed rather than repointed** (landed on `main`
+in PR #42). It used to be a
 keyword search that returned "No results found", i.e. a live buy button landing on an
 empty page. Bookshop has no 1st-edition listing; its only Learning Spark entry is the
 2nd edition, which is a different book by different authors.
