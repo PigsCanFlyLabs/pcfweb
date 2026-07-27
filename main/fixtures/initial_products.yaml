@@ -8,14 +8,28 @@
 # external_product_id is intentionally unset; the Stripe product id is
 # generated lazily on first add-to-cart (see CartProduct.generate_price_id).
 #
-# ebook_asin is fixture-owned: put the Kindle ASIN here so a clean deploy
-# seeds it, rather than requiring someone to retype it in the admin after
-# every fresh database. The consequence is the usual one for this file -- a
-# row whose ebook_asin is set below has its admin edits overwritten on each
-# primary deploy. A row that OMITS the key keeps whatever the admin typed:
-# seed_products passes only the keys present here to .update(), so an absent
-# key is never written. print_asin, default_asin, external_product_id and
-# stock stay admin/runtime-owned and must not appear in this file at all.
+# Three of the four O'Reilly titles below now carry an e-book ASIN, so they
+# show the "Buy on Amazon (ebook)" button; pk 101 deliberately does not -- see
+# the comment on that row. That button is driven by `ebook_asin` (or an
+# explicit `kindle_link`) and renders only when one is set -- an absent value
+# produces no button rather than a dead one.
+#
+# The values belong here, not in the admin. `ebook_asin` used to be in
+# seed_products' SEED_PROTECTED_FIELDS, which made a fixture carrying one exit
+# 1 -- and under `set -e` in scripts/start-server.sh, that stops the primary
+# pod from booting -- so the only place to put an ASIN was the Django admin,
+# retyped after every fresh database. It is fixture-owned now: put the ASIN
+# here and a clean deploy seeds it. Take it from the Kindle edition's own
+# Amazon page -- the /dp/ id on the *Kindle* listing, not the paperback's.
+# There is no derivation from an ISBN: a guessed ASIN points at whatever
+# unrelated product happens to occupy that address.
+#
+# The consequence is the usual one for this file -- a row whose ebook_asin is
+# set below has its admin edits overwritten on each primary deploy. A row that
+# OMITS the key keeps whatever the admin typed: seed_products passes only the
+# keys present here to .update(), so an absent key is never written.
+# print_asin, default_asin, external_product_id and stock stay admin/runtime-
+# owned and must not appear in this file at all.
 - model: main.product
   pk: 100
   fields:

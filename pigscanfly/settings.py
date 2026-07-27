@@ -58,6 +58,12 @@ class Base(Configuration):
     # SECURITY WARNING: don't run with debug turned on in production!
     DEBUG = False
 
+    # Both easy-thumbnails and static-thumbnails read this setting directly.
+    # Keep missing source images non-fatal outside development; in particular,
+    # static-thumbnails does not provide a default and raises AttributeError
+    # while rendering when the setting is absent.
+    THUMBNAIL_DEBUG = False
+
     NEWSLETTER_THUMBNAIL = 'sorl-thumbnail'
     NEWSLETTER_USE_HTTPS = True
 
@@ -426,6 +432,10 @@ class Prod(Base):
     EMAIL_USE_TLS = True
     EMAIL_PORT = 25
     EMAIL_USE_SSL = False
+    # Django's default error logger emails ADMINS synchronously.  If the SMTP
+    # server is unreachable, an otherwise immediate 500 must not occupy a
+    # gunicorn worker until its 60-second timeout kills the process.
+    EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "5"))
     EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "support")
     EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
     DEFAULT_FROM_EMAIL = "support@pigscanfly.ca"

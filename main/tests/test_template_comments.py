@@ -43,6 +43,17 @@ KNOWN_TEMPLATES = (
 # comment, which is exactly why an unclosed one leaks.
 SINGLE_LINE_COMMENT = re.compile(r"\{#.*?#\}")
 
+LATIN_FILLER = re.compile(
+    r"\b("
+    r"lorem|ipsum|dolor sit amet|consectetur|adipiscing|eiusmod|"
+    r"incididunt|labore|aliqua|veniam|nostrud|ullamco|laboris|"
+    r"commodo|consequat|duis aute|cupidatat|proident|"
+    r"sunt in culpa|donec|nulla|vestibulum|curabitur|praesent|"
+    r"aenean|etiam|phasellus"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def find_templates():
     for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
@@ -63,6 +74,14 @@ def find_multiline_comments(text):
         text.count("\n", 0, match.start()) + 1
         for match in re.finditer(r"\{#", masked)
     ]
+
+
+def find_latin_filler(text):
+    """Line numbers containing classic theme filler copy."""
+    return sorted({
+        text.count("\n", 0, match.start()) + 1
+        for match in LATIN_FILLER.finditer(text)
+    })
 
 
 class MultiLineTemplateCommentTest(SimpleTestCase):
@@ -93,6 +112,26 @@ class MultiLineTemplateCommentTest(SimpleTestCase):
             "{# ... #} is single-line only; these are emitted into the "
             "rendered page instead of being stripped. Use "
             "{% comment %}...{% endcomment %}: " + ", ".join(offenders),
+        )
+
+    def test_no_latin_filler_text(self):
+        offenders = []
+        swept = set()
+        for path in find_templates():
+            swept.add(str(path.relative_to(REPO_ROOT)))
+            for lineno in find_latin_filler(path.read_text()):
+                offenders.append(
+                    f"{path.relative_to(REPO_ROOT)}:{lineno}"
+                )
+
+        for known in KNOWN_TEMPLATES:
+            self.assertIn(known, swept, f"{known} is not being scanned")
+
+        self.assertEqual(
+            offenders,
+            [],
+            "Classic latin/theme filler text found in rendered templates: "
+            + ", ".join(offenders),
         )
 
 

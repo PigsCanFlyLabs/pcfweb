@@ -67,6 +67,18 @@ class ProdConfigurationGuardTest(TestCase):
     """Prod refuses to boot on a misconfiguration rather than failing on a
     customer."""
 
+    def test_thumbnail_errors_are_non_fatal_in_production(self):
+        # static-thumbnails accesses this setting without a fallback while
+        # rendering every page that extends base.html.
+        self.assertIs(Prod.THUMBNAIL_DEBUG, False)
+
+    def test_error_email_cannot_outlive_the_request_worker(self):
+        # Django's AdminEmailHandler sends synchronously while handling a 500.
+        # An unreachable SMTP server caused the reported thumbnail exception
+        # to sit here until gunicorn killed the worker.
+        self.assertGreater(Prod.EMAIL_TIMEOUT, 0)
+        self.assertLess(Prod.EMAIL_TIMEOUT, 60)
+
     def test_secret_key_is_required(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ImproperlyConfigured):
