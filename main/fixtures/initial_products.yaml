@@ -7,6 +7,19 @@
 #
 # external_product_id is intentionally unset; the Stripe product id is
 # generated lazily on first add-to-cart (see CartProduct.generate_price_id).
+#
+# NONE of the four O'Reilly titles below carry an e-book ASIN yet, so none of
+# them show the "Buy on Amazon (ebook)" button. That button is driven by
+# `ebook_asin` (or an explicit `kindle_link`) and renders only when one is set
+# -- an absent value produces no button rather than a dead one.
+#
+# The values cannot be added here: `ebook_asin` is in seed_products'
+# SEED_PROTECTED_FIELDS, so a fixture carrying one makes the seed command exit
+# 1, which under `set -e` in scripts/start-server.sh stops the primary pod from
+# booting. Set them in the admin instead, one per title, taking the ASIN from
+# the Kindle edition's own Amazon page -- the /dp/ id on the *Kindle* listing,
+# not the paperback's. There is no derivation from an ISBN: a guessed ASIN
+# points at whatever unrelated product happens to occupy that address.
 - model: main.product
   pk: 100
   fields:
