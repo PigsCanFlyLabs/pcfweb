@@ -55,6 +55,13 @@ class Product(models.Model):
     print_asin = models.CharField(max_length=20, blank=True, null=True)
     ebook_asin = models.CharField(max_length=20, blank=True, null=True)
     bookshop_link = models.CharField(max_length=250, blank=True, null=True)
+    # A sibling field rather than a reuse of bookshop_link: the print link's
+    # label is format-neutral, and letting one field mean "print" on some rows
+    # and "e-book" on others would make the button lie on half the catalogue.
+    # Only two of the eight titles have a Bookshop e-book listing -- coverage
+    # is publisher-gated, so this is set per-row from a verified URL and never
+    # derived from an ISBN.
+    bookshop_ebook_link = models.CharField(max_length=250, blank=True, null=True)
     # Shown to visitors detected as being in India.
     amazon_in_link = models.CharField(max_length=250, blank=True, null=True)
     flipkart_link = models.CharField(max_length=250, blank=True, null=True)
@@ -248,6 +255,14 @@ class Product(models.Model):
     # them to drift apart.
     OREILLY_SAFARI_URL = "https://www.tkqlhce.com/click-7645222-14045081"
 
+    # The button's user-visible text, named here rather than written inline in
+    # get_alt_links() below so tests can assert against the source of truth
+    # instead of a copy. It has already been renamed once -- it read "Buy on
+    # Kindle (e-book)" before the storefront naming in #36 -- and each copy of
+    # the string is somewhere the next rename can be missed while the suite
+    # still passes.
+    AMAZON_EBOOK_LABEL = "Buy on Amazon (ebook)"
+
     def get_alt_links(self, country: Optional[str] = None):
         candidates = []
         if country == "IN":
@@ -259,6 +274,8 @@ class Product(models.Model):
             ("Buy on Amazon (print)", self.get_amazon_link()),
             ("Buy on Bookshop.org (support local bookstores)",
              self.bookshop_link),
+            ("Buy the e-book on Bookshop.org (DRM-free)",
+             self.bookshop_ebook_link),
             ("Read on O'Reilly Safari (free trial)",
              # Explicit flag, not an ISBN inference. The DC4K SKUs are
              # self-published and carry real print ISBNs, so keying this off
@@ -266,7 +283,17 @@ class Product(models.Model):
              # that is not on the platform. The flag also fails safe: a new
              # title added without it loses a link rather than inventing one.
              self.OREILLY_SAFARI_URL if self.on_oreilly_safari else None),
-            ("Buy on Kindle (e-book)", self.get_kindle_link()),
+            # Amazon's e-book store is Kindle, so this is one button, not two:
+            # a second "Buy on Amazon (ebook)" alongside a "Buy on Kindle" one
+            # would be two labels pointing at the identical /dp/<ebook_asin>
+            # URL. Named for the storefront the customer recognises rather than
+            # for the file format they get.
+            #
+            # Gated on data, not on on_oreilly_safari above: the ASIN itself is
+            # the per-title claim that the book is on Amazon, so an absent one
+            # is already the fail-safe. Adding a publisher flag on top would
+            # discard a correct owner-entered URL -- see AmazonEbookLinkTest.
+            (self.AMAZON_EBOOK_LABEL, self.get_kindle_link()),
             ("Follow along on Kickstarter", self.kickstarter),
         ]
         return [(label, url) for label, url in candidates if url]

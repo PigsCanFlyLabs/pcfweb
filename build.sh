@@ -1,33 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 set -x
-# Hack, for now. Only pcfweb-assets/images is copied -- that repo also keeps
-# an originals/ directory of full-resolution masters, which deliberately does
-# not ship.
-rm -rf main/static/assets/images
-cp -af ../pcfweb-assets/images main/static/assets/
-
-# Everything copied above lands in the image and is then duplicated by
-# collectstatic, in an artifact Kubernetes re-pulls on every rollout. The
-# per-file budget is 2MB (see pcfweb-assets/README.md); this is the hard
-# ceiling that catches a master committed to images/ by mistake, which is how
-# a single 50MB panorama used to ship.
-ASSET_MAX_BYTES=5000000
-oversized=$(find main/static/assets/images -type f -size +${ASSET_MAX_BYTES}c \
-  -printf '%s\t%p\n' | sort -rn || true)
-if [ -n "$oversized" ]; then
-  set +x
-  echo >&2
-  echo "ERROR: image assets over $((ASSET_MAX_BYTES / 1000000))MB:" >&2
-  echo "$oversized" | awk -F'\t' '{printf "  %6.1fMB  %s\n", $1/1000000, $2}' >&2
-  echo >&2
-  echo "Put the master in pcfweb-assets/originals/ and a resized copy in" >&2
-  echo "pcfweb-assets/images/ under the same name." >&2
-  exit 1
-fi
-./scripts/check-image-assets.sh main/static/assets/images "source image assets"
-
-./scripts/check-product-images.sh
+# Re-sync main/static/assets/images out of the sibling pcfweb-assets checkout
+# and run the three guards over what landed: the per-file size ceiling, the
+# Git LFS pointer check, and the fixture-references-real-files check. Same
+# steps in the same order as when they were inline here, and each one is still
+# fatal -- the script's default mode is fatal precisely so that this call site
+# needs no flag to stay strict.
+#
+# Shared with run_local.sh, which passes --warn, so the deploy path and the
+# local path cannot drift. The local path had no copy step at all, which is how
+# a checkout could sit on a stale image tree from a build months earlier; see
+# the header of scripts/sync-local-assets.sh.
+./scripts/sync-local-assets.sh
 
 # Digital book archives, from the sibling pcfweb-book-assets checkout (Git
 # LFS). These are the files paying customers get emailed a link to, so every
@@ -84,6 +69,47 @@ if [ "$(grep -cE 'image: holdenk/pcfweb:' deploy.yaml)" != "$(grep -cE "image: $
   echo "ERROR: deploy.yaml has holdenk/pcfweb image tags that disagree; they must all be ${TAG#*:}." >&2
   exit 1
 fi
+# Prod refuses to boot without these (Prod.pre_setup, pigscanfly/settings.py),
+# and they come from pcfweb-secret, which is created by hand -- so it drifts
+# from the code that reads it whenever a new one is added. The symptom is
+# unhelpful: the new pod crash-loops, the rollout never completes, and the
+# previous pods keep serving the old image, so the site looks fine while the
+# deploy is stuck. Catch it here, before the push, rather than at
+# `kubectl rollout status` fifteen minutes later.
+#
+# Keep this list in step with _prod_required_env in pigscanfly/settings.py --
+# ProdSecretPreflightTest in main/tests/test_deploy.py fails if they diverge.
+REQUIRED_SECRET_KEYS=(SECRET_KEY STRIPE_LIVE_SECRET_KEY STRIPE_WEBHOOK_SECRET)
+# Fails closed, for the same reason as the running-tag lookup above: an
+# unreadable Secret must not read as an empty one, which would look like every
+# key is missing, or (worse, if inverted) like every key is present.
+if ! SECRET_KEYS=$(kubectl get secret pcfweb-secret -n pcfweb \
+      -o go-template='{{range $k,$v := .data}}{{$k}}{{"\n"}}{{end}}' 2>&1); then
+  set +x
+  echo >&2
+  echo "ERROR: could not read pcfweb-secret from the cluster:" >&2
+  echo "  ${SECRET_KEYS}" >&2
+  echo "Refusing to build: Prod will not start without the keys it carries." >&2
+  exit 1
+fi
+MISSING_SECRET_KEYS=()
+for required in "${REQUIRED_SECRET_KEYS[@]}"; do
+  if ! printf '%s\n' "$SECRET_KEYS" | grep -qx -- "$required"; then
+    MISSING_SECRET_KEYS+=("$required")
+  fi
+done
+if [ ${#MISSING_SECRET_KEYS[@]} -ne 0 ]; then
+  set +x
+  echo >&2
+  echo "ERROR: pcfweb-secret is missing: ${MISSING_SECRET_KEYS[*]}" >&2
+  echo "Prod raises ImproperlyConfigured for each of these, so the new pods" >&2
+  echo "would crash-loop and the rollout would hang with the old pods up." >&2
+  echo "Add them, e.g.:" >&2
+  echo "  kubectl patch secret pcfweb-secret -n pcfweb --type=merge \\" >&2
+  echo "    -p '{\"stringData\":{\"${MISSING_SECRET_KEYS[0]}\":\"...\"}}'" >&2
+  exit 1
+fi
+
 # Bundle the GeoLite2 country DB when a MaxMind key is available (used for
 # the India-specific buy links); the image builds fine without it.
 MAXMIND_SECRET_ARGS=()

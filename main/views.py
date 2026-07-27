@@ -113,7 +113,9 @@ class FamilyView(View):
         projects = [
             {
                 "name": "Pigs Can Fly Labs",
-                "kind": "Parent company",
+                "kind": (
+                    "The company behind this site and all of Holden's books!"
+                ),
                 "description": (
                     "The company behind this site — "
                     "value-priced queer and nerdy stuff."

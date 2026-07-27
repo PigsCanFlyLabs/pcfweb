@@ -7,6 +7,7 @@ from unittest import mock
 from django.test import TestCase, override_settings
 
 from main.models import Product
+from main.tests.base import REPO_ROOT
 
 
 class StaticPagesTest(TestCase):
@@ -308,6 +309,18 @@ class HomePageCardsTest(TestCase):
 
     DC4K_TITLE = "Distributed Computing 4 Kids (and Executives)"
 
+    # The featured-book card's copy, exactly as the owner wrote it -- one
+    # sentence, one colon, no parenthesis around "and Executives". Spelled
+    # out here as an independent statement of the words, the same way
+    # test_dc4k.EXECUTIVE_EDITION_COPY is: a reworded template has to fail.
+    # It is a single string on purpose. Splitting it across an <h4> and a
+    # <span> would put markup in the middle of the sentence, and this
+    # assertion -- which is a substring test against rendered HTML -- would
+    # stop being able to see it.
+    FEATURED_CARD_COPY = (
+        "Distributed Computing 4 Kids and Executives: "
+        "Executives may require more help")
+
     def homepage(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
@@ -320,6 +333,20 @@ class HomePageCardsTest(TestCase):
         self.assertIsNotNone(section, "explore section missing from homepage")
         assert section is not None  # for mypy
         return section.group(1)
+
+    def featured_book_card(self):
+        """The .second-image block, which is the featured-book card.
+
+        Matched non-greedily to the first </div>, which is correct only
+        because the card holds no nested div -- if one is ever added this
+        helper has to grow a real parser rather than silently returning a
+        fragment.
+        """
+        card = re.search(r'<div class="second-image">(.*?)</div>',
+                         self.explore_section(), re.DOTALL)
+        self.assertIsNotNone(card, "featured-book card missing from #explore")
+        assert card is not None  # for mypy
+        return card.group(1)
 
     def test_the_homepage_no_longer_advertises_fmt2_network_services(self):
         # The offering is discontinued. History belongs on /about, not on a
@@ -358,9 +385,95 @@ class HomePageCardsTest(TestCase):
             r'<a href="(https://[^"]*liberatedbread[^"]*)"',
             self.client.get("/family").content.decode())
 
-        self.assertEqual(len(home_links), 1)
+        # The homepage now carries two of these -- the logo card and the
+        # wording beneath it -- so what matters is that every one of them
+        # agrees, not how many there are. Counting them would only say the
+        # card grid has not changed shape, which is not what this is for.
+        self.assertGreaterEqual(len(home_links), 1)
         self.assertEqual(len(family_links), 1)
-        self.assertEqual(home_links, family_links)
+        self.assertEqual(set(home_links), set(family_links))
+
+    def test_the_liberated_bread_logo_card_renders_the_512_asset(self):
+        """The 512 master, not the 128: it is displayed at 200px, so the
+        smaller file would be upscaled and soft on a HiDPI screen.
+
+        The file itself is not in this repo -- main/static/assets/images is
+        gitignored and filled by scripts/sync-local-assets.sh out of
+        ../pcfweb-assets -- so this pins the reference, which is the part
+        this template owns.
+        """
+        section = self.explore_section()
+
+        self.assertIn(
+            "assets/images/liberated-bread-logo-512.png", section)
+        self.assertNotIn("liberated-bread-logo.png", section)
+
+    def test_the_liberated_bread_logo_is_served_through_the_static_tag(self):
+        """Not a hand-written /static/... path.
+
+        STATIC_URL is what decides that prefix, and a literal that agrees
+        with it today goes wrong silently the day it moves.
+        """
+        with open("main/templates/index.html") as handle:
+            template = handle.read()
+
+        self.assertRegex(
+            template,
+            r"\{% static 'assets/images/liberated-bread-logo-512\.png' %\}")
+        self.assertNotIn('"/static/assets/images/liberated-bread', template)
+
+    def test_the_liberated_bread_logo_is_not_stretched(self):
+        """The squish bug, guarded at its source.
+
+        Both axes are pinned, and an <img> with a fixed width and height and
+        no object-fit uses `fill` -- it distorts the image to the box instead
+        of preserving its aspect ratio. That is a real defect this codebase
+        has already had to fix once, and it is invisible in the HTML, so the
+        assertion has to be against the stylesheet.
+        """
+        css = (REPO_ROOT / "main" / "static" / "assets"
+               / "css" / "main.css").read_text()
+
+        rule = re.search(
+            r"#explore \.liberated-bread img \{(.*?)\}", css, re.DOTALL)
+        self.assertIsNotNone(
+            rule, "no #explore .liberated-bread img rule in main.css")
+        assert rule is not None  # for mypy
+        body = rule.group(1)
+
+        fit = re.search(r"object-fit:\s*([a-z-]+)", body)
+        self.assertIsNotNone(fit, "the logo pins both axes but sets no "
+                                  "object-fit, so it renders as `fill`")
+        assert fit is not None  # for mypy
+        self.assertNotEqual(fit.group(1), "fill")
+        self.assertEqual(fit.group(1), "cover")
+
+    def test_the_liberated_bread_logo_card_and_its_wording_are_one_unit(self):
+        """Two cards, one voice. If they drift apart in the grid the logo
+        reads as an unexplained tile, so pin that they are adjacent."""
+        section = self.explore_section()
+
+        logo = section.index("liberated-bread-logo-512.png")
+        wording = section.index(
+            "The same company as Pigs Can Fly Labs, with its own site")
+        between = section[logo:wording]
+
+        # Nothing else's card sits between them.
+        self.assertNotIn("second-image", between)
+        self.assertNotIn("featured_book", between)
+
+    def test_the_companion_text_card_keeps_its_wording_and_badge(self):
+        """The copy is the owner's, verbatim -- not a paraphrase."""
+        section = self.explore_section()
+
+        self.assertIn(
+            "<span>The same company as Pigs Can Fly Labs, with its own "
+            "site</span>",
+            section)
+        self.assertIn("Liberated Bread <span", section)
+        self.assertIn(">Coming Soon</span>", section)
+        # Still the .types card, so it keeps the grid's shared styling.
+        self.assertIn('<div class="types">', section)
 
     def test_the_featured_book_card_links_to_the_seeded_product(self):
         section = self.explore_section()
@@ -389,6 +502,162 @@ class HomePageCardsTest(TestCase):
         self.assertNotIn("'product' 106", template)
         self.assertRegex(template, r"\{% url 'product' featured_book\.pk %\}")
 
+    def test_the_featured_cover_is_cropped_rather_than_squished(self):
+        """A 2:3 book cover in a square box must not be stretched.
+
+        The card pins both axes at 200px. CSS `object-fit` defaults to
+        `fill`, which scales width and height by *different* factors to
+        make the image meet both -- a 2:3 cover comes out visibly squished.
+        `cover` scales uniformly and crops the overflow instead, which is
+        the behaviour the owner asked for.
+
+        Asserted as "both axes pinned implies an object-fit that preserves
+        the aspect ratio", not as a literal style string, so that unpinning
+        an axis is also an acceptable way to pass -- the bug is the
+        combination, not the declaration.
+        """
+        tag = re.search(r'<img\b[^>]*>', self.featured_book_card())
+        self.assertIsNotNone(tag, "featured-book card renders no <img>")
+        assert tag is not None  # for mypy
+
+        style = re.search(r'style="([^"]*)"', tag.group(0))
+        declared = {}
+        if style is not None:
+            for part in style.group(1).split(";"):
+                if ":" in part:
+                    prop, _, value = part.partition(":")
+                    declared[prop.strip().lower()] = value.strip().lower()
+
+        if "width" in declared and "height" in declared:
+            self.assertEqual(
+                declared.get("object-fit"), "cover",
+                "both axes are pinned, so without object-fit:cover the "
+                f"browser falls back to `fill` and squishes the cover: {tag.group(0)}")
+
+    def test_the_featured_card_carries_the_owners_copy(self):
+        # Substring of the rendered page, so it fails both on a reworded
+        # string and on markup inserted into the middle of the sentence.
+        self.assertIn(self.FEATURED_CARD_COPY, self.featured_book_card())
+
+    # -- card chrome and the alternating grid ---------------------------
+
+    @staticmethod
+    def declarations_for(selector):
+        """Every declaration the stylesheet applies to `selector`.
+
+        Merged across all rules that name it, in source order, because the
+        grid's shared chrome is deliberately written as one selector list
+        with per-card overrides after it -- a test that read only the first
+        matching block would report the pre-override value.
+
+        Selectors are compared after collapsing whitespace, so a rule that
+        lists the card on its own line still counts. This is a small reader,
+        not a CSS engine: it ignores @media blocks, which is what we want
+        here -- these assertions are about the desktop cascade.
+        """
+        css = (REPO_ROOT / "main" / "static" / "assets"
+               / "css" / "main.css").read_text()
+        # Drop @media bodies so their overrides don't leak into the result.
+        css = re.sub(r"@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}", "", css)
+
+        declared = {}
+        for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+            names = {" ".join(part.split())
+                     for part in selectors.split(",")}
+            if selector not in names:
+                continue
+            for part in body.split(";"):
+                if ":" in part:
+                    prop, _, value = part.partition(":")
+                    declared[prop.strip().lower()] = value.strip().lower()
+        return declared
+
+    def test_the_featured_book_card_has_the_same_chrome_as_the_other_cards(
+            self):
+        """.second-image is a card in the grid, so it has to look like one.
+
+        It used to carry no CSS at all -- no background, no centring, no
+        box -- so it rendered as bare text next to three tiles and its <h4>
+        fell back to the browser default. Assert it against .types rather
+        than against literal values, so the two can only be changed
+        together.
+        """
+        card = self.declarations_for("#explore .second-image")
+        self.assertNotEqual(
+            card, {},
+            "the featured-book card has no styling of its own; it renders "
+            "with no chrome next to the other cards")
+
+        reference = self.declarations_for("#explore .types")
+        for prop in ("min-height", "background-color", "width"):
+            with self.subTest(property=prop):
+                self.assertEqual(
+                    card.get(prop), reference[prop],
+                    f"the featured-book card's {prop} does not match the "
+                    "other cards in the grid")
+
+    def test_the_featured_card_does_not_inherit_the_heading_only_padding(
+            self):
+        """padding-top:90px is tuned for .types, which holds one short line.
+
+        The featured card's copy runs to several lines and sits beside a
+        200px cover, so 90px of lead-in pushes it straight out of the 255px
+        box. The card centres its contents instead -- so what this guards is
+        that it never joins that rule.
+        """
+        heading = self.declarations_for("#explore .second-image h4")
+
+        # Styled at all, first -- otherwise the assertion below passes on a
+        # card whose heading is browser-default, which is the bug this
+        # branch set out to fix.
+        self.assertIn(
+            "font-size", heading,
+            "the featured card's heading has no styling, so it falls back "
+            "to the browser default next to three styled cards")
+        self.assertNotEqual(
+            heading.get("padding-top"), "90px",
+            "the featured card's long copy cannot survive the padding that "
+            "centres a one-line heading")
+
+    def test_the_featured_card_sets_its_cover_beside_the_copy(self):
+        """The zig-zag's second row: text on the left, cover on the right.
+
+        The alternation is only half in the markup -- the DOM order puts the
+        copy first, and the placement that makes it a row rather than a
+        stack lives in the stylesheet, so assert that half here.
+        """
+        cover = self.declarations_for("#explore .second-image img")
+
+        self.assertEqual(
+            cover.get("grid-column"), "2",
+            "the cover is not placed in the card's second column, so the "
+            "row does not read text-then-image")
+
+    def test_the_explore_cards_alternate_image_and_text(self):
+        """Image, text / text, image -- the zig-zag the grid used to have.
+
+        The order is the markup's, exactly as it was when the section last
+        had four cards (d7966bd), so it is readable straight off the
+        rendered page: the Liberated Bread unit leads with its mark, and the
+        featured book leads with its words.
+        """
+        section = self.explore_section()
+
+        logo = section.index("liberated-bread-logo-512.png")
+        bread_copy = section.index(
+            "The same company as Pigs Can Fly Labs, with its own site")
+        self.assertLess(
+            logo, bread_copy,
+            "the first row should read image-then-text")
+
+        card = self.featured_book_card()
+        book_copy = card.index(self.FEATURED_CARD_COPY)
+        cover = card.index("<img")
+        self.assertLess(
+            book_copy, cover,
+            "the second row should read text-then-image, so that it "
+            "alternates against the row above it")
+
 
 @override_settings(THUMBNAIL_DEBUG=False)
 class HomePageWithoutSeedDataTest(TestCase):
@@ -410,6 +679,9 @@ class HomePageWithoutSeedDataTest(TestCase):
 
         self.assertIn("Distributed Computing 4 Kids", html)
         self.assertIn('href="/products/B"', html)
+        # The same words as the seeded card, so the two branches of the
+        # {% if featured_book %} cannot drift apart.
+        self.assertIn(HomePageCardsTest.FEATURED_CARD_COPY, html)
 
 
 @override_settings(THUMBNAIL_DEBUG=False)
@@ -472,10 +744,10 @@ class FamilyPageTest(TestCase):
     company as well as a project.
 
     The "Coming Soon" badge used to be driven by the absence of an outbound
-    URL, which badged Pigs Can Fly Labs itself -- it is the parent company and
-    this is its own site, so it deliberately links nowhere. Asserting the badge
-    appears *somewhere* on the page could not catch that, so these tests pin
-    the badge to a specific card.
+    URL, which badged Pigs Can Fly Labs itself -- it is the company behind
+    this site and all of Holden's books, so it deliberately links nowhere.
+    Asserting the badge appears *somewhere* on the page could not catch that,
+    so these tests pin the badge to a specific card.
     """
 
     COMING_SOON_BADGE = ">Coming Soon</span>"
@@ -552,11 +824,18 @@ class FamilyPageTest(TestCase):
                             html=False)
 
     def test_pigs_can_fly_labs_is_not_marked_coming_soon(self):
-        # Regression: the parent company links nowhere by design, which the
-        # old "no URL means coming soon" rule read as not being live yet.
+        # Regression: Pigs Can Fly Labs links nowhere by design, which the old
+        # "no URL means coming soon" rule read as not being live yet.
         self.assertNotIn(
             self.COMING_SOON_BADGE,
             self.get_project_cards()["Pigs Can Fly Labs"])
+
+    def test_pigs_can_fly_labs_uses_owner_supplied_kind_copy(self):
+        card = self.get_project_cards()["Pigs Can Fly Labs"]
+        owner_copy = (
+            "The company behind this site and all of Holden's books!")
+        self.assertIn(
+            html_module.escape(owner_copy), card)
 
     def test_liberated_bread_links_to_owner_supplied_url(self):
         # The owner supplied this exact URL; do not invent alternatives.

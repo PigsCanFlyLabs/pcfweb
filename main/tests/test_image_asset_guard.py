@@ -123,28 +123,69 @@ class ImageAssetGuardTest(SimpleTestCase):
         self.assertEqual(empty_result.returncode, 0, empty_result.stderr)
         self.assertEqual(absent_result.returncode, 0, absent_result.stderr)
 
-    def test_build_invokes_the_guard_after_the_oversized_check(self):
-        build_script = (REPO_ROOT / "build.sh").read_text()
+    def test_the_sync_invokes_the_guard_after_the_oversized_check(self):
+        """The source-tree half of the pipeline moved into the shared script.
 
+        It used to be inline in build.sh. It now lives in
+        scripts/sync-local-assets.sh so run_local.sh runs the same code, but
+        the ordering it asserts is unchanged: size ceiling, then the LFS
+        pointer guard over the copy, then the fixture cross-check.
+        """
+        sync_script = (REPO_ROOT / "scripts"
+                       / "sync-local-assets.sh").read_text()
+
+        # The copy dereferences: a symlinked images/ component, or a symlink
+        # inside it, would otherwise land as a symlink that neither the size
+        # ceiling nor the pointer detector descends through.
+        copy_call = 'cp -a -L "$source_images/." "$staging/"'
         oversized_block = "if [ -n \"$oversized\" ]; then"
         source_guard_call = (
-            "./scripts/check-image-assets.sh main/static/assets/images "
-            "\"source image assets\""
+            './scripts/check-image-assets.sh "$dest" "source image assets"'
         )
+        product_guard_call = "./scripts/check-product-images.sh"
+
+        for fragment in (copy_call, oversized_block, source_guard_call,
+                         product_guard_call):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, sync_script)
+
+        self.assertLess(sync_script.index(copy_call),
+                        sync_script.index(oversized_block))
+        self.assertLess(sync_script.index(oversized_block),
+                        sync_script.index(source_guard_call))
+        self.assertLess(sync_script.index(source_guard_call),
+                        sync_script.index(product_guard_call))
+
+    def test_build_runs_the_sync_before_checks_and_the_collected_guard(self):
+        build_script = (REPO_ROOT / "build.sh").read_text()
+
+        sync_call = "./scripts/sync-local-assets.sh"
         checks_call = "./scripts/checks.sh"
         static_guard_call = (
             "./scripts/check-image-assets.sh static/assets/images "
             "\"collected static image assets\""
         )
 
-        self.assertIn(source_guard_call, build_script)
+        self.assertIn(sync_call, build_script)
         self.assertIn(static_guard_call, build_script)
-        self.assertLess(build_script.index(oversized_block),
-                        build_script.index(source_guard_call))
-        self.assertLess(build_script.index(source_guard_call),
+        self.assertLess(build_script.index(sync_call),
                         build_script.index(checks_call))
         self.assertLess(build_script.index(checks_call),
                         build_script.index(static_guard_call))
+
+    def test_the_collected_static_guard_stays_out_of_the_shared_sync(self):
+        """It has no local analogue and must not follow the source guard.
+
+        static/assets/images only exists after collectstatic, which build.sh
+        runs (via checks.sh) and run_local.sh deliberately does not. Pulling
+        this call into the shared script would make it a no-op locally and
+        move it before collectstatic in the build.
+        """
+        sync_script = (REPO_ROOT / "scripts"
+                       / "sync-local-assets.sh").read_text()
+
+        self.assertNotIn("static/assets/images \"collected", sync_script)
+        self.assertNotIn("collected static image assets", sync_script)
 
     def test_static_root_pointer_output_names_collected_copy(self):
         with tempfile.TemporaryDirectory() as tmp:

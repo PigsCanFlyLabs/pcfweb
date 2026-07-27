@@ -83,6 +83,12 @@ class Base(Configuration):
     # SECURITY WARNING: don't run with debug turned on in production!
     DEBUG = False
 
+    # Both easy-thumbnails and static-thumbnails read this setting directly.
+    # Keep missing source images non-fatal outside development; in particular,
+    # static-thumbnails does not provide a default and raises AttributeError
+    # while rendering when the setting is absent.
+    THUMBNAIL_DEBUG = False
+
     NEWSLETTER_THUMBNAIL = 'sorl-thumbnail'
     NEWSLETTER_USE_HTTPS = True
 
@@ -364,7 +370,49 @@ class Dev(Base):
     EMAIL_FILE_PATH = os.path.join(BASE_DIR, "sent_emails")
 
 
+# The environment variables Prod refuses to boot without, and the one-line
+# reason each is fatal (the properties below carry the long version). Held as
+# data so Prod.pre_setup can name every missing one in a single failure.
+# Lower-cased deliberately: an upper-case module-level name would be copied
+# into the settings themselves.
+_prod_required_env = {
+    "SECRET_KEY": "signs sessions and password-reset tokens",
+    "STRIPE_LIVE_SECRET_KEY": "every checkout call to Stripe",
+    "STRIPE_WEBHOOK_SECRET": "without it no order is ever marked paid",
+}
+
+
 class Prod(Base):
+
+    @classmethod
+    def pre_setup(cls):
+        """Fail on a missing environment variable while the message survives.
+
+        The per-setting guards below cannot be relied on to report anything.
+        Django's ManagementUtility touches settings.INSTALLED_APPS inside a
+        try/except, stores whatever ImproperlyConfigured comes back, and --
+        seeing settings.configured is still False -- skips django.setup() and
+        runs the command anyway. The command's system checks then walk into an
+        empty app registry, so `manage.py migrate` in a fresh pod dies with
+        "AppRegistryNotReady: Models aren't loaded yet." and never a word
+        about the variable that is actually missing.
+
+        pre_setup runs before any of that: django-configurations calls it
+        while importing the settings module, so raising here reaches the
+        console intact. Checking the whole set at once matters too -- the
+        properties are evaluated in alphabetical order, so one guard at a time
+        would mean one failed rollout per missing variable.
+        """
+        super().pre_setup()
+        missing = [name for name in _prod_required_env if not os.getenv(name)]
+        if missing:
+            raise ImproperlyConfigured(
+                "Prod is missing required environment variable(s) "
+                + ", ".join(missing)
+                + ". In the cluster these come from the pcfweb-secret Secret "
+                "(see deploy.yaml). Details:\n"
+                + "\n".join(f"  {name}: {_prod_required_env[name]}"
+                            for name in missing))
 
     ALLOWED_HOSTS: List[str] = [
         'www.pigscanfly.ca',
@@ -461,6 +509,10 @@ class Prod(Base):
     EMAIL_USE_TLS = True
     EMAIL_PORT = 25
     EMAIL_USE_SSL = False
+    # Django's default error logger emails ADMINS synchronously.  If the SMTP
+    # server is unreachable, an otherwise immediate 500 must not occupy a
+    # gunicorn worker until its 60-second timeout kills the process.
+    EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "5"))
     EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "support")
     EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
     DEFAULT_FROM_EMAIL = "support@pigscanfly.ca"

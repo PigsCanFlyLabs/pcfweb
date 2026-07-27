@@ -1,6 +1,7 @@
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from main.models import Product
+from main.tests.base import EBOOK_PK
 
 
 class ProductIdentifierTest(SimpleTestCase):
@@ -64,12 +65,12 @@ class ProductIdentifierTest(SimpleTestCase):
         print_links = dict(print_product.get_alt_links())
         ebook_links = dict(ebook_product.get_alt_links())
 
-        # Anti-vacuity: a real e-book ASIN still creates the Kindle link.
+        # Anti-vacuity: a real e-book ASIN still creates the e-book link.
         self.assertEqual(
-            ebook_links["Buy on Kindle (e-book)"],
+            ebook_links[Product.AMAZON_EBOOK_LABEL],
             "https://www.amazon.com/dp/EBOOKASIN",
         )
-        self.assertNotIn("Buy on Kindle (e-book)", print_links)
+        self.assertNotIn(Product.AMAZON_EBOOK_LABEL, print_links)
 
     def test_alt_links_use_derived_amazon_links(self):
         product = Product(print_asin="PRINTASIN", ebook_asin="EBOOKASIN")
@@ -85,7 +86,7 @@ class ProductIdentifierTest(SimpleTestCase):
             "https://www.amazon.in/dp/PRINTASIN",
         )
         self.assertEqual(
-            links["Buy on Kindle (e-book)"],
+            links[Product.AMAZON_EBOOK_LABEL],
             "https://www.amazon.com/dp/EBOOKASIN",
         )
 
@@ -136,3 +137,112 @@ class ProductIdentifierTest(SimpleTestCase):
         self.assertIn(
             safari_label,
             [label for label, _ in flagged_without_isbn.get_alt_links()])
+
+
+class AmazonEbookLinkTest(TestCase):
+    """The "Buy on Amazon (ebook)" button, end to end.
+
+    Unlike the Safari link directly above it, this one is *not* gated on
+    on_oreilly_safari. Safari needs a flag because its URL is a single
+    affiliate constant shared by every title, so nothing in the row itself
+    says whether the claim is true. An Amazon e-book link is per-title data:
+    the e-book ASIN *is* the statement "this book is on Amazon at this
+    address". Gating a correct, owner-entered ASIN behind a second publisher
+    flag would silently swallow a true link, which is a worse failure than the
+    one the flag exists to prevent.
+
+    So the rule is presence, not publisher: no ebook_asin (and no explicit
+    kindle_link), no button. Only the O'Reilly titles are expected to carry
+    one, and the fixture gives none of the self-published SKUs a value -- see
+    test_no_self_published_sku_offers_the_amazon_ebook_link.
+    """
+
+    fixtures = ["initial_products"]
+
+    LABEL = Product.AMAZON_EBOOK_LABEL
+
+    OREILLY_PK = 100
+    # The O'Reilly row the fixture deliberately leaves without an ebook_asin:
+    # Amazon delisted High Performance Spark's 1st-edition Kindle listing. The
+    # "no ASIN supplied" cases below used OREILLY_PK while the fixture shipped
+    # no ASINs at all; it seeds three of them now, so they need a row that is
+    # still blank on purpose. See main/fixtures/initial_products.yaml pk 101.
+    NO_ASIN_PK = 101
+    SELF_PUBLISHED_PKS = (104, 105, EBOOK_PK)
+
+    def ebook_url(self, pk):
+        links = dict(Product.objects.get(pk=pk).get_alt_links())
+        return links.get(self.LABEL)
+
+    def set_ebook_asin(self, pk, asin):
+        # Queryset update rather than save(): fixture rows carry no
+        # external_product_id, so Product.save() would call Stripe to mint one.
+        Product.objects.filter(pk=pk).update(ebook_asin=asin)
+
+    def test_an_oreilly_book_with_an_asin_renders_the_link(self):
+        self.set_ebook_asin(self.OREILLY_PK, "B0EBOOK100")
+
+        response = self.client.get(f"/product/{self.OREILLY_PK}")
+
+        self.assertContains(response, self.LABEL)
+        self.assertContains(response, "https://www.amazon.com/dp/B0EBOOK100")
+
+    def test_an_explicit_kindle_link_wins_over_the_derived_one(self):
+        # The curated-URL escape hatch every other retailer link has: a
+        # stored URL beats anything derived from an identifier.
+        Product.objects.filter(pk=self.OREILLY_PK).update(
+            kindle_link="https://www.amazon.com/dp/CURATED",
+            ebook_asin="B0EBOOK100")
+
+        self.assertEqual(
+            self.ebook_url(self.OREILLY_PK),
+            "https://www.amazon.com/dp/CURATED")
+
+    def test_a_book_without_an_asin_renders_no_link_at_all(self):
+        # NO_ASIN_PK is an O'Reilly title the fixture leaves blank on purpose,
+        # so it is the "no ASIN supplied" case as-is. The point is that the
+        # absent value produces no button rather than one with a dead or empty
+        # href.
+        response = self.client.get(f"/product/{self.NO_ASIN_PK}")
+
+        self.assertIsNone(self.ebook_url(self.NO_ASIN_PK))
+        self.assertNotContains(response, self.LABEL)
+        self.assertNotContains(response, 'href=""')
+        # Anti-vacuity: the page did render its other retailer buttons, so the
+        # assertions above are about this link and not about an empty page.
+        self.assertContains(response, "Buy on Amazon (print)")
+
+    def test_no_self_published_sku_offers_the_amazon_ebook_link(self):
+        # DC4K is the owner's own book: the print SKUs are not on Amazon as
+        # e-books and the digital SKU is sold here directly, pay-what-you-want.
+        # None of them carry an ebook_asin, so none of them get the button.
+        for pk in self.SELF_PUBLISHED_PKS:
+            with self.subTest(pk=pk):
+                response = self.client.get(f"/product/{pk}")
+
+                self.assertIsNone(self.ebook_url(pk))
+                self.assertNotContains(response, self.LABEL)
+
+    def test_the_ebook_isbn_alone_never_conjures_the_link(self):
+        # pk 106 has a real ebook_isbn. An ISBN is not an ASIN and there is no
+        # public mapping between them, so deriving an Amazon URL from one would
+        # be a fabricated link pointing at whatever product happens to sit at
+        # that address. Presence of the ISBN must change nothing.
+        ebook = Product.objects.get(pk=EBOOK_PK)
+
+        self.assertTrue(ebook.ebook_isbn)
+        self.assertFalse(ebook.ebook_asin)
+        self.assertIsNone(ebook.get_kindle_link())
+        self.assertIsNone(self.ebook_url(EBOOK_PK))
+
+    def test_a_print_asin_does_not_produce_an_ebook_link(self):
+        # Guards the other direction of the same mistake: a print/catalogue
+        # identifier must not be spent on an e-book link, or the button would
+        # sell the paperback. Uses the row with no e-book ASIN of its own, so
+        # a link appearing could only have come from the print identifiers.
+        self.assertIsNone(self.ebook_url(self.NO_ASIN_PK))
+
+        Product.objects.filter(pk=self.NO_ASIN_PK).update(
+            print_asin="PRINTASIN", default_asin="DEFAULTASIN")
+
+        self.assertIsNone(self.ebook_url(self.NO_ASIN_PK))

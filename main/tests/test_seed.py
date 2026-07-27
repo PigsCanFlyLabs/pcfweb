@@ -92,6 +92,12 @@ class SeedProductsCommandTest(TestCase):
         self.assertEqual(product.name, "Learning Spark (1st edition)")
 
     def test_preserves_admin_owned_asins_on_existing_product(self):
+        """print_asin and default_asin stay admin-owned.
+
+        ebook_asin is deliberately excluded here: it is fixture-owned now, and
+        pk 100's overwrite behaviour is pinned by
+        ``test_fixture_ebook_asin_overwrites_admin_value`` below.
+        """
         Product.objects.create(
             pk=100,
             name="Old name that should be clobbered",
@@ -102,7 +108,6 @@ class SeedProductsCommandTest(TestCase):
             isbn="9781449358624",
             default_asin="DEFAULTASIN",
             print_asin="PRINTASIN",
-            ebook_asin="EBOOKASIN",
         )
 
         self._run_seed()
@@ -110,7 +115,42 @@ class SeedProductsCommandTest(TestCase):
         product = Product.objects.get(pk=100)
         self.assertEqual(product.default_asin, "DEFAULTASIN")
         self.assertEqual(product.print_asin, "PRINTASIN")
-        self.assertEqual(product.ebook_asin, "EBOOKASIN")
+
+    # -- ebook_asin is fixture-owned ---------------------------------------
+
+    def test_fixture_ebook_asin_overwrites_admin_value(self):
+        """The documented trade-off, pinned.
+
+        ebook_asin left SEED_PROTECTED_FIELDS so a clean deploy seeds the
+        Kindle ASINs. The price of that is this: on a row where the fixture
+        sets ebook_asin, an admin edit is overwritten on the next deploy.
+        """
+        Product.objects.create(
+            pk=100,
+            name="Old name",
+            price=1,
+            cat=Product.Categories.BOOKS,
+            ebook_asin="ADMINTYPED",
+        )
+
+        self._run_seed()
+
+        self.assertEqual(Product.objects.get(pk=100).ebook_asin, "B00SW0TY8O")
+
+    def test_omitted_ebook_asin_preserves_admin_value(self):
+        """The other half, and the reason unprotecting it is safe.
+
+        seed_products passes only the keys present in the fixture to
+        ``.update()``, so a key the fixture omits is never written. pk 101
+        omits ebook_asin, so an ASIN typed into the admin for it survives
+        every deploy rather than being blanked.
+        """
+        self._run_seed()
+        Product.objects.filter(pk=101).update(ebook_asin="ADMINTYPED")
+
+        self._run_seed()
+
+        self.assertEqual(Product.objects.get(pk=101).ebook_asin, "ADMINTYPED")
 
     # -- non-fixture products untouched ------------------------------------
 
@@ -255,6 +295,43 @@ class SeedProductsCommandTest(TestCase):
                 self._run_seed()
 
         self.assertFalse(Product.objects.filter(pk=100).exists())
+
+
+class SeedProtectedFieldsContractTest(TestCase):
+    """What is and is not fixture-owned, pinned as a contract.
+
+    The membership of this set is a production-safety decision, not an
+    implementation detail: a field wrongly added means a deploy overwrites
+    live data, and a field wrongly removed means the fixture is rejected and
+    the primary pod fails to boot under ``set -e``.
+    """
+
+    def test_ebook_asin_is_no_longer_protected(self):
+        from main.management.commands.seed_products import (
+            SEED_PROTECTED_FIELDS,
+        )
+
+        self.assertNotIn("ebook_asin", SEED_PROTECTED_FIELDS)
+
+    def test_stock_and_external_product_id_remain_protected(self):
+        """A deploy must never reset inventory or drop a live Stripe id."""
+        from main.management.commands.seed_products import (
+            SEED_PROTECTED_FIELDS,
+        )
+
+        for field in ("stock", "external_product_id"):
+            with self.subTest(field=field):
+                self.assertIn(field, SEED_PROTECTED_FIELDS)
+
+    def test_print_and_default_asin_remain_protected(self):
+        """Only ebook_asin moved; the print-side ASINs stay admin-owned."""
+        from main.management.commands.seed_products import (
+            SEED_PROTECTED_FIELDS,
+        )
+
+        for field in ("print_asin", "default_asin"):
+            with self.subTest(field=field):
+                self.assertIn(field, SEED_PROTECTED_FIELDS)
 
 
 class SeedProductsStripeTest(TestCase):

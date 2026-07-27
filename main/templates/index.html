@@ -46,6 +46,19 @@
 		    <div class="right-content">
 			<div class="row">
 			    <div class="col-lg-6">
+			      {# The logo and the card below it are one unit: the      #}
+			      {# mark, then the words. Both link through the same      #}
+			      {# liberated_bread_url the view supplies, so there is    #}
+			      {# still exactly one destination to keep in step.        #}
+			      {# The file arrives via scripts/sync-local-assets.sh out #}
+			      {# of ../pcfweb-assets; it is not committed here.        #}
+			      <div class="liberated-bread">
+				<a href="{{ liberated_bread_url }}">
+				    <img src="{% static 'assets/images/liberated-bread-logo-512.png' %}" alt="Liberated Bread">
+				  </a>
+				</div>
+			    </div>
+			    <div class="col-lg-6">
 			      <div class="types">
 				<a href="{{ liberated_bread_url }}">
 				    <h4>Liberated Bread <span class="badge badge-secondary" style="font-size: 0.7rem; vertical-align: middle; background: #aaa; color: #fff; padding: 2px 6px; border-radius: 4px;">Coming Soon</span></h4>
@@ -53,18 +66,31 @@
 				    </a>
 				</div>
 			    </div>
-			    <div class="col-lg-6">
+			    {# Full width, so this card is the grid's second row on its  #}
+			    {# own. The row above reads mark-then-words; this one reads  #}
+			    {# words-then-cover, which is the zig-zag the section had    #}
+			    {# when it last held four cards (d7966bd) -- carried by the  #}
+			    {# order of the markup then and now, not by a CSS reversal.  #}
+			    {# The width is also what lets the long title sit beside a   #}
+			    {# 200px cover inside the same 255px box as the others.      #}
+			    <div class="col-lg-12">
 			      {# Linked through the object the view resolved, never a #}
 			      {# hardcoded pk: a pk that moves keeps resolving, just  #}
 			      {# to the wrong product. No book seeded, no card.       #}
 			      <div class="second-image">
+				{# The box is square, the cover is 2:3. With both axes pinned  #}
+				{# and no object-fit the browser uses `fill`, which scales the #}
+				{# two axes by different factors and visibly squishes the      #}
+				{# book. `cover` crops to the box instead.                     #}
 				{% if featured_book %}
 				<a href="{% url 'product' featured_book.pk %}">
-				  <img src="{{ featured_book.get_thumb }}" alt="{{ featured_book.name }}" style="width:200px;height:200px">
+				    <h4>Distributed Computing 4 Kids and Executives: Executives may require more help</h4>
+				    <span>Our new book</span>
+				  <img src="{{ featured_book.get_thumb }}" alt="{{ featured_book.name }}" style="width:200px;height:200px;object-fit:cover">
 				  </a>
 				{% else %}
 				<a href="{% url 'products' 'B' %}">
-				    <h4>Distributed Computing 4 Kids (and Executives)</h4>
+				    <h4>Distributed Computing 4 Kids and Executives: Executives may require more help</h4>
 				    <span>Our new book</span>
 				  </a>
 				{% endif %}

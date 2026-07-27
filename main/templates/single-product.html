@@ -89,10 +89,12 @@
 		    {% if product.is_physical_good and not product.noorder %}
 		    {% include 'components/shipping-notice.html' %}
 		    {% endif %}
-		    {# The quantity input is a real field of this form and the
+		    {% comment %}
+		       The quantity input is a real field of this form and the
 		       form has a real action, so buying works with JavaScript
 		       off. The URL's quantity segment is only a fallback -- the
-		       posted field wins. #}
+		       posted field wins.
+		    {% endcomment %}
 		    <form id="add-to-cart-form" method="POST"
 			  action="{% url 'add-to-cart' product_id=product.pk quantity=1 %}">
 			{% csrf_token %}

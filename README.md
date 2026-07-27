@@ -16,6 +16,11 @@ pip install -r requirements.txt -r requirements-dev.txt
 ./run_local.sh          # runserver_plus with TLS via mkcert
 ```
 
+`run_local.sh` needs the sibling `pcfweb-assets` checkout too — see [Image
+assets](#image-assets). It re-syncs `main/static/assets/images` from that
+checkout on **every** run and reports what it found, warning rather than
+refusing so an unrelated missing image cannot stop you getting a server.
+
 The `Dev` configuration (sqlite, file-based email in `sent_emails/`) is the
 default; set `ENVIRONMENT=Prod` (or `DJANGO_CONFIGURATION=Prod`) for the
 production settings class.
@@ -414,13 +419,63 @@ IP resolves to India via MaxMind GeoLite2. Country detection needs
 the image history). Without the database the site quietly serves the default
 links only.
 
+## Image assets
+
+The product and site images are deliberately kept out of this repo
+(`.gitignore` excludes `main/static/assets/images`) and live in
+[`pcfweb-assets`](https://github.com/pigsCanFlyLabs/pcfweb-assets), which has
+to be checked out one level up:
+
+```bash
+git clone https://github.com/pigsCanFlyLabs/pcfweb-assets.git ../pcfweb-assets
+cd ../pcfweb-assets
+git lfs install
+git lfs pull
+```
+
+That repo stores its images in Git LFS; without the `git lfs pull` the
+checkout holds ~130-byte pointer files instead of images, which copy and serve
+without complaint and render as broken images everywhere.
+
+`main/static/assets/images` is therefore a **derived copy**, refreshed by
+`scripts/sync-local-assets.sh`. Both `build.sh` and `run_local.sh` call it, so
+the deploy path and the local path cannot drift:
+
+| | `build.sh` | `run_local.sh` |
+| --- | --- | --- |
+| Re-syncs the directory | every run | every run |
+| Sibling checkout missing | fails the build | warns, keeps the existing copy |
+| LFS pointers instead of images | fails the build | warns |
+| Image over 5MB | fails the build | warns |
+| Fixture names a file that isn't there | fails the build | warns, lists the pks |
+
+The copy is unconditional and destructive — `rm -rf` then `cp -af`. That is
+deliberate, and the reason is worth knowing, because it caused a bug that hid
+for weeks:
+
+> `main/static/assets/images` is gitignored, so `git pull` never touches it.
+> Before this was shared, only `build.sh` refreshed it. A checkout whose last
+> build predated the move of every book cover into `images/book_covers/`
+> therefore had a directory that was **full and still wrong** — flat cover
+> files, no `book_covers/` subdirectory, and leftovers for retired products.
+> Every book cover 404d while the banners and the logo rendered fine, so it
+> read as a partial breakage rather than as a missing directory. Because the
+> directory existed, a "copy it if it's absent" sync would have fixed
+> nothing; the `rm -rf` is the part that does the work.
+
+Running `build.sh` with `../pcfweb-assets` absent no longer deletes your
+local copy: the sibling checkout is verified before anything is removed.
+
 ## Deploying
 
-`./build.sh` is the whole pipeline: copy in the sibling `pcfweb-assets`
-images → fail on any oversized image asset → validate and stage the sibling
-`pcfweb-book-assets` archives → mypy → migration check → tests → template
-validation → collectstatic → multi-arch Docker build/push
-(`holdenk/pcfweb:<tag>`) → `kubectl apply` → wait for both rollouts.
+`./build.sh` is the whole pipeline: re-sync the sibling `pcfweb-assets` images
+and run the four asset guards over them (sibling checkout present, per-file
+size ceiling, LFS pointers, fixture references — see
+[Image assets](#image-assets)) → validate and stage the
+sibling `pcfweb-book-assets` archives → mypy → migration check → tests →
+template validation → collectstatic → LFS check over the collected static
+tree → multi-arch Docker build/push (`holdenk/pcfweb:<tag>`) →
+`kubectl apply` → wait for both rollouts.
 
 ### Bump the image tag first
 
@@ -442,7 +497,20 @@ disagree with each other. There are **three** of them — `web-primary`, the
 2. Confirm `pcfweb-secret` carries `SECRET_KEY`, `STRIPE_LIVE_SECRET_KEY` and
    `STRIPE_WEBHOOK_SECRET`. Prod refuses to boot without any of them (see
    *Environment variables*), so a missing one is a failed rollout rather than
-   a silent misbehaviour — Kubernetes keeps the old pods serving.
+   a silent misbehaviour — Kubernetes keeps the old pods serving. `build.sh`
+   now checks this before it builds, so the failure arrives in a second rather
+   than at `kubectl rollout status`. Note the name: an older `pcfweb-secret`
+   carries `DJSTRIPE_WEBHOOK_SECRET`, left over from dj-stripe, and that is
+   *not* the variable Prod reads. The value is per-endpoint, so take the
+   signing secret of the endpoint currently registered at `/stripe/webhook`
+   rather than copying the old key across.
+
+   A rollout that got out anyway looks like this: `kubectl get pods` shows two
+   generations of `web-primary` (the old one `Running`, the new one
+   `CrashLoopBackOff`) and `web` pods stuck in `Init:0/1`, because
+   `wait-for-migrations` is waiting on a migration the primary never applied.
+   The old pods keep serving throughout, so the site is up and only the deploy
+   is stuck.
 3. Confirm the `STRIPE_SHIPPING_RATES` ids exist under the **live** key.
    Shipping rate ids are livemode-scoped, so a rate created in test mode does
    not exist in live and Stripe rejects the entire session — every physical
@@ -462,29 +530,13 @@ disagree with each other. There are **three** of them — `web-primary`, the
    from it. Send yourself a test from the send page before sending anything to
    anybody else.
 
-**Before running `./build.sh`, check out the image assets as a sibling
-directory.** They are deliberately kept out of this repo (`.gitignore`
-excludes `main/static/assets/images`), so the build depends on
-[`pcfweb-assets`](https://github.com/pigsCanFlyLabs/pcfweb-assets) being
-present one level up:
-
-```bash
-git clone https://github.com/pigsCanFlyLabs/pcfweb-assets.git ../pcfweb-assets
-cd ../pcfweb-assets
-git lfs install
-git lfs pull
-```
-
-The asset repo stores images in Git LFS; without the LFS pull, the checkout
-contains pointer files instead of real images.
+Both `./build.sh` and `./run_local.sh` need the image assets checked out as a
+sibling directory — see [Image assets](#image-assets).
 
 The build also needs the book archives in `../pcfweb-book-assets` — see
-[Digital products](#digital-products).
-
-Note that `build.sh` does `rm -rf main/static/assets/images` *before* it
-copies the new ones in, so running it without `../pcfweb-assets` present
-both fails the build and leaves your local images deleted — re-clone the
-sibling repo and re-run to recover.
+[Digital products](#digital-products). `build.sh` refuses to build without
+them; `run_local.sh` only warns, because locally the sole consequence is that
+an e-book download 404s.
 
 The Kubernetes objects:
 

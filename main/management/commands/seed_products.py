@@ -5,7 +5,7 @@ Replaces ``manage.py loaddata initial_products`` so that every deploy still
 updates fixture-owned fields (name, description, price, links, tax_code, ...)
 but never overwrites fields that are owned outside the fixture -- generated
 runtime fields like ``external_product_id`` and admin-edited fields like
-``stock`` and ASINs.
+``stock``, ``print_asin`` and ``default_asin``.
 
 The fixture file ``main/fixtures/initial_products.yaml`` is still the single
 source of truth for fixture-owned fields; edit it to change product metadata.
@@ -26,9 +26,14 @@ from main.models import Product
 # on existing rows: some are generated lazily at runtime, and some are owned by
 # the Django admin after initial fixture creation.
 # ---------------------------------------------------------------------------
+#
+# ``ebook_asin`` deliberately is NOT in this set: the Kindle ASIN is now
+# fixture-owned so that a clean deploy seeds it instead of requiring manual
+# admin entry on every fresh database.  Rows the fixture leaves blank are
+# unaffected -- an omitted key is never passed to .update() below, so an
+# admin-entered ASIN on such a row survives.
 SEED_PROTECTED_FIELDS: Set[str] = {
     "default_asin",
-    "ebook_asin",
     "external_product_id",
     "print_asin",
     "stock",
@@ -48,7 +53,7 @@ class Command(BaseCommand):
     help = (
         "Upsert fixture-owned products from main/fixtures/initial_products.yaml, "
         "preserving runtime/admin-owned fields like external_product_id, "
-        "stock, and ASINs."
+        "stock, print_asin and default_asin."
     )
 
     def handle(self, **options: Any) -> None:
