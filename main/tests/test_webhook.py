@@ -17,6 +17,7 @@ from main.tests.base import (
     stripe_signature,
     OrderTestBase,
 )
+from main.views import StripeWebhookView
 
 
 class WebhookSignatureTest(OrderTestBase):
@@ -664,9 +665,7 @@ class WebhookIdempotencyTest(OrderTestBase):
         self.assertEqual(self.order.status, Order.Status.FULFILLED)
         self.assertEqual(len(mail.outbox), 0)
 
-    def test_a_redelivery_after_a_failed_email_does_not_retry_the_email(self):
-        # Deliberate: the order is recorded either way, and re-mailing on
-        # every one of Stripe's retries is exactly the flood being avoided.
+    def test_a_redelivery_after_a_failed_email_retries_the_email(self):
         with mock.patch("main.models.send_mail",
                         side_effect=OSError("SMTP is down")):
             with self.assertLogs("main.models", level="ERROR"):
@@ -675,7 +674,32 @@ class WebhookIdempotencyTest(OrderTestBase):
         response = self.deliver(self.event_body(self.order))
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        self.order.refresh_from_db()
+        self.assertIsNotNone(self.order.notified_at)
+
+    def test_redelivery_resumes_after_a_crash_just_after_marking_paid(self):
+        body = self.event_body(self.order)
+
+        with mock.patch.object(
+                StripeWebhookView, "fulfil_order",
+                side_effect=SystemExit("simulated worker crash")):
+            with self.assertRaisesRegex(SystemExit, "simulated worker crash"):
+                self.deliver(body)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertIsNone(self.order.reconciled_at)
+        self.assertIsNone(self.order.notified_at)
         self.assertEqual(len(mail.outbox), 0)
+
+        response = self.deliver(body)
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertIsNotNone(self.order.reconciled_at)
+        self.assertIsNotNone(self.order.notified_at)
+        self.assertEqual(len(self.order_emails()), 1)
 
 
 class WebhookEmailFailureTest(OrderTestBase):

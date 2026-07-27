@@ -827,8 +827,10 @@ class StripeWebhookView(View):
     solely by the signature on the body. Every path out of here that is not a
     verified payload is a 400 before any state is touched.
 
-    Everything runs synchronously: the work is one UPDATE and one email, and
-    a queue would be more moving parts than the whole feature.
+    Everything runs synchronously, but each post-payment action has a durable
+    completion marker on the order.  A redelivery of a paid event resumes any
+    action whose marker is still empty; this matters when a worker disappears
+    after the paid transition has committed but before fulfilment finishes.
     """
 
     # Both mean "the money arrived". async_payment_succeeded is the delayed
@@ -851,6 +853,13 @@ class StripeWebhookView(View):
     # pay-what-you-want with a floor of zero, and the owner's decision is that
     # a $0 order is still an order and the book still gets delivered.
     PAID_PAYMENT_STATUSES = frozenset({"paid", "no_payment_required"})
+
+    # A webhook can be re-entered in the same worker while an email send is in
+    # progress (some test and development backends make that possible).  The
+    # database completion markers protect ordinary sequential redeliveries;
+    # this small guard prevents the re-entrant call from starting the same
+    # still-in-progress action recursively.
+    _fulfilling_order_ids: set[int] = set()
 
     def post(self, request):
         secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
@@ -917,23 +926,51 @@ class StripeWebhookView(View):
                 pk=order.pk, status=Order.Status.PENDING).update(**fields)
 
         if not updated:
+            order.refresh_from_db()
+            if order.status == Order.Status.PAID:
+                logger.info(
+                    "Order #%s is already PAID; retrying incomplete "
+                    "fulfilment for Stripe session %s.",
+                    order.pk, session.get("id"))
+                self.fulfil_order(order)
+                return
             logger.info(
                 "Order #%s is already past PENDING; ignoring a duplicate "
                 "delivery of Stripe session %s.", order.pk, session.get("id"))
             return
 
         order.refresh_from_db()
-        # Only the delivery that actually moved the row gets here, so this
-        # runs once per order -- which is exactly what keeps a webhook
-        # re-delivery from emailing the customer their book a second time.
-        # All three calls are best-effort by construction: the payment is
-        # already recorded and must not be undone by a secondary lookup, a
-        # missing file or an SMTP outage.
-        order.reconcile_line_items()
-        # Before notify_owner, so the owner's email can report whether the
-        # customer actually got their download.
-        order.deliver_digital_goods()
-        order.notify_owner()
+        self.fulfil_order(order)
+
+    def fulfil_order(self, order: Order) -> None:
+        """Run only the paid order actions that have not completed yet.
+
+        The PAID transition deliberately commits before this method.  Each
+        successful action writes its own marker, so a crash at any point is
+        repaired by Stripe's next delivery rather than turning PAID into a
+        terminal, unfulfilled state.
+        """
+        if order.pk in self._fulfilling_order_ids:
+            logger.info("Order #%s fulfilment is already in progress.", order.pk)
+            return
+        self._fulfilling_order_ids.add(order.pk)
+        try:
+            order.refresh_from_db()
+            if order.reconciled_at is None:
+                order.reconcile_line_items()
+
+            order.refresh_from_db()
+            if (order.digital_delivery_sent_at is None
+                    and order.digital_items()):
+                order.deliver_digital_goods()
+
+            # Kept last so the owner's message reports the final reconciliation
+            # and digital-delivery outcome.
+            order.refresh_from_db()
+            if order.notified_at is None:
+                order.notify_owner()
+        finally:
+            self._fulfilling_order_ids.discard(order.pk)
 
     def handle_cancelled(self, session, reason: str) -> None:
         order = self.find_order(session)
