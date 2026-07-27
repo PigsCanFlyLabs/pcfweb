@@ -19,6 +19,10 @@
     price: 3999
     isbn: "9781449358624"
     print_isbn: "9781449358624"
+    # Retail EPUB ISBN. Deliberately distinct from both the print ISBN above
+    # and O'Reilly's own platform id in /library/view/ URLs (9781449359034),
+    # which is a third number and not used here.
+    ebook_isbn: "9781449359058"
     amazon_link: "https://www.amazon.com/dp/1449358624"
     # No bookshop_link: the 2015 1st edition is absent from Bookshop's
     # catalogue entirely, and the ISBN search we used to link to returns
@@ -48,6 +52,10 @@
     price: 4999
     isbn: "9781491943205"
     print_isbn: "9781491943205"
+    # Retail EPUB ISBN. Deliberately distinct from both the print ISBN above
+    # and O'Reilly's own platform id in /library/view/ URLs (9781491943199),
+    # which is a third number and not used here.
+    ebook_isbn: "9781491943151"
     amazon_link: "https://www.amazon.com/dp/1491943203"
     bookshop_link: "https://bookshop.org/p/books/high-performance-spark-best-practices-for-scaling-and-optimizing-apache-spark-holden-karau/8133976"
     amazon_in_link: "https://www.amazon.in/dp/1491943203"
@@ -72,6 +80,10 @@
     price: 4999
     isbn: "9781492050124"
     print_isbn: "9781492050124"
+    # Retail EPUB ISBN. Deliberately distinct from both the print ISBN above
+    # and O'Reilly's own platform id in /library/view/ URLs (9781492050117),
+    # which is a third number and not used here.
+    ebook_isbn: "9781492050070"
     amazon_link: "https://www.amazon.com/dp/1492050121"
     bookshop_link: "https://bookshop.org/books/kubeflow-for-machine-learning-from-lab-to-production/9781492050124"
     # The ?ean= is load-bearing: the same slug+id serves the paperback by
@@ -100,6 +112,10 @@
     price: 6599
     isbn: "9781098118808"
     print_isbn: "9781098118808"
+    # Retail EPUB ISBN. Deliberately distinct from both the print ISBN above
+    # and O'Reilly's own platform id in /library/view/ URLs (9781098118792),
+    # which is a third number and not used here.
+    ebook_isbn: "9781098118761"
     amazon_link: "https://www.amazon.com/dp/1098118804"
     bookshop_link: "https://bookshop.org/search?keywords=9781098118808"
     # As on pk 102, the ?ean= selects the "Ebook (DRM-free)" listing on a page
