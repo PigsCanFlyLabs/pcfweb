@@ -344,6 +344,26 @@ class InitialProductsFixtureTest(TestCase):
         self.assertNotContains(response, "amazon.in")
         self.assertContains(response, BOOKSHOP_LABEL)
 
+    def test_learning_spark_1ed_offers_no_bookshop_link_at_all(self):
+        # The 1st edition is not in Bookshop's catalogue and the ISBN search
+        # we used to ship returns "No results found", so the button is gone
+        # rather than repointed at the 2nd edition -- a different book.
+        book = Product.objects.get(pk=100)
+        self.assertFalse(book.bookshop_link)
+        self.assertFalse(book.bookshop_ebook_link)
+        names = [name for name, _ in book.get_alt_links()]
+        self.assertNotIn(BOOKSHOP_LABEL, names)
+        self.assertNotIn(BOOKSHOP_EBOOK_LABEL, names)
+        self.assertFalse([n for n in names if "Bookshop" in n])
+
+    def test_learning_spark_1ed_page_shows_no_bookshop_button(self):
+        response = self.client.get("/product/100")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "bookshop.org")
+        self.assertNotContains(response, 'href=""')
+        # The rest of its buy links are untouched.
+        self.assertContains(response, "https://www.amazon.com/dp/1449358624")
+
     def test_only_the_two_titles_with_a_listing_carry_a_bookshop_ebook(self):
         for pk, url in BOOKSHOP_EBOOK_URLS.items():
             with self.subTest(pk=pk):

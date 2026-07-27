@@ -20,8 +20,12 @@
     isbn: "9781449358624"
     print_isbn: "9781449358624"
     amazon_link: "https://www.amazon.com/dp/1449358624"
-    # 2015 1st edition has no bookshop.org product page; link to its search.
-    bookshop_link: "https://bookshop.org/search?keywords=9781449358624"
+    # No bookshop_link: the 2015 1st edition is absent from Bookshop's
+    # catalogue entirely, and the ISBN search we used to link to returns
+    # "No results found." Deliberately not repointed at the 2nd edition
+    # (ean 9781492050049, Wenig/Damji) -- that is a different book by
+    # different authors, so linking it would misrepresent this product.
+    # No link beats a button that lands on an empty search page.
     amazon_in_link: "https://www.amazon.in/dp/1449358624"
     flipkart_link: "https://www.flipkart.com/search?q=9781449358624"
     image_name: "book_covers/learning_spark_1ed.jpg"
