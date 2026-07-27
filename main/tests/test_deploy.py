@@ -6,15 +6,17 @@ about.
 """
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest import mock
 
 import yaml
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
-from pigscanfly.settings import Prod
+from pigscanfly.settings import Prod, _prod_required_env
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -65,6 +67,18 @@ class ProdConfigurationGuardTest(TestCase):
     """Prod refuses to boot on a misconfiguration rather than failing on a
     customer."""
 
+    def test_thumbnail_errors_are_non_fatal_in_production(self):
+        # static-thumbnails accesses this setting without a fallback while
+        # rendering every page that extends base.html.
+        self.assertIs(Prod.THUMBNAIL_DEBUG, False)
+
+    def test_error_email_cannot_outlive_the_request_worker(self):
+        # Django's AdminEmailHandler sends synchronously while handling a 500.
+        # An unreachable SMTP server caused the reported thumbnail exception
+        # to sit here until gunicorn killed the worker.
+        self.assertGreater(Prod.EMAIL_TIMEOUT, 0)
+        self.assertLess(Prod.EMAIL_TIMEOUT, 60)
+
     def test_secret_key_is_required(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ImproperlyConfigured):
@@ -95,6 +109,38 @@ class ProdConfigurationGuardTest(TestCase):
             self.assertEqual(prod.STRIPE_API_KEY, "sk_live_x")
             self.assertEqual(prod.STRIPE_WEBHOOK_SECRET, "whsec_x")
 
+    def test_pre_setup_names_every_missing_variable_at_once(self):
+        # The guards above are evaluated in alphabetical order, so relying on
+        # them alone costs one failed rollout per missing variable.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(ImproperlyConfigured) as caught:
+                Prod.pre_setup()
+        message = str(caught.exception)
+        for name in ("SECRET_KEY", "STRIPE_LIVE_SECRET_KEY",
+                     "STRIPE_WEBHOOK_SECRET"):
+            self.assertIn(name, message)
+        # Where to go and set them.
+        self.assertIn("pcfweb-secret", message)
+
+    def test_pre_setup_reports_only_what_is_missing(self):
+        env = {"SECRET_KEY": "x" * 60, "STRIPE_LIVE_SECRET_KEY": "sk_live_x"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(ImproperlyConfigured) as caught:
+                Prod.pre_setup()
+        message = str(caught.exception)
+        self.assertIn("STRIPE_WEBHOOK_SECRET", message)
+        self.assertNotIn("SECRET_KEY:", message)
+        self.assertNotIn("STRIPE_LIVE_SECRET_KEY", message)
+
+    def test_pre_setup_passes_once_the_variables_are_set(self):
+        env = {
+            "SECRET_KEY": "x" * 60,
+            "STRIPE_LIVE_SECRET_KEY": "sk_live_x",
+            "STRIPE_WEBHOOK_SECRET": "whsec_x",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            Prod.pre_setup()
+
     def test_the_database_connection_is_bounded(self):
         env = {"DBNAME": "d", "DBUSER": "u", "DBPASSWORD": "p", "DBHOST": "h"}
         with mock.patch.dict(os.environ, env, clear=True):
@@ -103,6 +149,54 @@ class ProdConfigurationGuardTest(TestCase):
         # the request outlives the gunicorn worker timeout.
         self.assertIn("connect_timeout", options)
         self.assertIn("timeout", options["pool"])
+
+
+class ProdSecretPreflightTest(SimpleTestCase):
+    """build.sh checks pcfweb-secret before pushing, against a list it has to
+    copy. A new required variable added to the settings and not to the script
+    is a guard that silently stops guarding, so tie the two together."""
+
+    def build_sh_required_keys(self):
+        with open(REPO_ROOT / "build.sh") as fh:
+            for line in fh:
+                if line.startswith("REQUIRED_SECRET_KEYS="):
+                    return set(line.split("(", 1)[1].split(")", 1)[0].split())
+        self.fail("build.sh no longer declares REQUIRED_SECRET_KEYS")
+
+    def test_build_sh_checks_exactly_what_prod_requires(self):
+        self.assertEqual(self.build_sh_required_keys(),
+                         set(_prod_required_env))
+
+
+class ManageErrorReportingTest(SimpleTestCase):
+    """A misconfigured Prod has to say so through manage.py.
+
+    Django's ManagementUtility swallows an ImproperlyConfigured raised while
+    the settings are read, then skips django.setup() and runs the command
+    anyway, so the failure resurfaces as an unrelated "AppRegistryNotReady:
+    Models aren't loaded yet" out of the system checks. In a Kubernetes pod
+    that is the entire log: a crash loop with nothing pointing at the Secret.
+    manage.py reads the settings itself to keep the real message.
+    """
+
+    def run_manage(self, *args, **env):
+        environment = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "DJANGO_CONFIGURATION": "Prod",
+            **env,
+        }
+        return subprocess.run(
+            [sys.executable, "manage.py", *args],
+            cwd=REPO_ROOT, env=environment, capture_output=True, text=True)
+
+    def test_a_missing_variable_is_named_instead_of_the_app_registry(self):
+        result = self.run_manage("check")
+        self.assertNotEqual(result.returncode, 0)
+        output = result.stdout + result.stderr
+        self.assertIn("SECRET_KEY", output)
+        self.assertIn("STRIPE_WEBHOOK_SECRET", output)
+        self.assertNotIn("AppRegistryNotReady", output)
 
 
 class DeployManifestTest(TestCase):
