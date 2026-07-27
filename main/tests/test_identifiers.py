@@ -67,10 +67,10 @@ class ProductIdentifierTest(SimpleTestCase):
 
         # Anti-vacuity: a real e-book ASIN still creates the e-book link.
         self.assertEqual(
-            ebook_links["Buy on Amazon (ebook)"],
+            ebook_links[Product.AMAZON_EBOOK_LABEL],
             "https://www.amazon.com/dp/EBOOKASIN",
         )
-        self.assertNotIn("Buy on Amazon (ebook)", print_links)
+        self.assertNotIn(Product.AMAZON_EBOOK_LABEL, print_links)
 
     def test_alt_links_use_derived_amazon_links(self):
         product = Product(print_asin="PRINTASIN", ebook_asin="EBOOKASIN")
@@ -86,7 +86,7 @@ class ProductIdentifierTest(SimpleTestCase):
             "https://www.amazon.in/dp/PRINTASIN",
         )
         self.assertEqual(
-            links["Buy on Amazon (ebook)"],
+            links[Product.AMAZON_EBOOK_LABEL],
             "https://www.amazon.com/dp/EBOOKASIN",
         )
 
@@ -159,9 +159,15 @@ class AmazonEbookLinkTest(TestCase):
 
     fixtures = ["initial_products"]
 
-    LABEL = "Buy on Amazon (ebook)"
+    LABEL = Product.AMAZON_EBOOK_LABEL
 
     OREILLY_PK = 100
+    # The O'Reilly row the fixture deliberately leaves without an ebook_asin:
+    # Amazon delisted High Performance Spark's 1st-edition Kindle listing. The
+    # "no ASIN supplied" cases below used OREILLY_PK while the fixture shipped
+    # no ASINs at all; it seeds three of them now, so they need a row that is
+    # still blank on purpose. See main/fixtures/initial_products.yaml pk 101.
+    NO_ASIN_PK = 101
     SELF_PUBLISHED_PKS = (104, 105, EBOOK_PK)
 
     def ebook_url(self, pk):
@@ -193,12 +199,13 @@ class AmazonEbookLinkTest(TestCase):
             "https://www.amazon.com/dp/CURATED")
 
     def test_a_book_without_an_asin_renders_no_link_at_all(self):
-        # The fixture ships no e-book ASINs, so pk 100 is the "not supplied
-        # yet" case as-is. The point is that the absent value produces no
-        # button rather than a button with a dead or empty href.
-        response = self.client.get(f"/product/{self.OREILLY_PK}")
+        # NO_ASIN_PK is an O'Reilly title the fixture leaves blank on purpose,
+        # so it is the "no ASIN supplied" case as-is. The point is that the
+        # absent value produces no button rather than one with a dead or empty
+        # href.
+        response = self.client.get(f"/product/{self.NO_ASIN_PK}")
 
-        self.assertIsNone(self.ebook_url(self.OREILLY_PK))
+        self.assertIsNone(self.ebook_url(self.NO_ASIN_PK))
         self.assertNotContains(response, self.LABEL)
         self.assertNotContains(response, 'href=""')
         # Anti-vacuity: the page did render its other retailer buttons, so the
@@ -231,10 +238,11 @@ class AmazonEbookLinkTest(TestCase):
     def test_a_print_asin_does_not_produce_an_ebook_link(self):
         # Guards the other direction of the same mistake: a print/catalogue
         # identifier must not be spent on an e-book link, or the button would
-        # sell the paperback.
-        self.assertIsNone(self.ebook_url(self.OREILLY_PK))
+        # sell the paperback. Uses the row with no e-book ASIN of its own, so
+        # a link appearing could only have come from the print identifiers.
+        self.assertIsNone(self.ebook_url(self.NO_ASIN_PK))
 
-        Product.objects.filter(pk=self.OREILLY_PK).update(
+        Product.objects.filter(pk=self.NO_ASIN_PK).update(
             print_asin="PRINTASIN", default_asin="DEFAULTASIN")
 
-        self.assertIsNone(self.ebook_url(self.OREILLY_PK))
+        self.assertIsNone(self.ebook_url(self.NO_ASIN_PK))

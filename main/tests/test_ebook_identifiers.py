@@ -71,15 +71,15 @@ class SeededKindleAsinTest(TestCase):
                 self.assertEqual(response.status_code, 200)
                 body = response.content.decode()
                 self.assertIn(f"https://www.amazon.com/dp/{asin}", body)
-                self.assertIn("Buy on Kindle (e-book)", body)
+                self.assertIn(Product.AMAZON_EBOOK_LABEL, body)
 
     def test_high_performance_spark_kindle_link_is_blank_by_design(self):
-        """pk 101 has no Kindle link, and that is the intended state.
+        """pk 101 has no Amazon e-book link, and that is the intended state.
 
         Amazon delisted the 1st edition's Kindle edition (B0725YT69J 404s),
         and the 2nd edition's B0H3CMNN3Q is a different book, so the fixture
         deliberately omits ebook_asin. The page must therefore carry no
-        Kindle link at all -- not an empty href, which get_alt_links()
+        Amazon e-book link at all -- not an empty href, which get_alt_links()
         prevents by filtering out falsy URLs.
         """
         product = Product.objects.get(pk=101)
@@ -87,12 +87,15 @@ class SeededKindleAsinTest(TestCase):
         self.assertIsNone(product.get_kindle_link())
 
         labels = [label for label, _ in product.get_alt_links()]
-        self.assertNotIn("Buy on Kindle (e-book)", labels)
+        self.assertNotIn(Product.AMAZON_EBOOK_LABEL, labels)
+        # Anti-vacuity: the row did render its other retailer buttons, so the
+        # assertion above is about this link and not about an empty list.
+        self.assertIn("Buy on Amazon (print)", labels)
 
         response = self.client.get("/product/101")
         self.assertEqual(response.status_code, 200)
         body = response.content.decode()
-        self.assertNotIn("Buy on Kindle (e-book)", body)
+        self.assertNotIn(Product.AMAZON_EBOOK_LABEL, body)
         # The wrong-book ASIN must never appear on this page.
         self.assertNotIn("B0H3CMNN3Q", body)
         self.assertNotIn('href=""', body)

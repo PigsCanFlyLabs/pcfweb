@@ -250,6 +250,14 @@ class Product(models.Model):
     # them to drift apart.
     OREILLY_SAFARI_URL = "https://www.tkqlhce.com/click-7645222-14045081"
 
+    # The button's user-visible text, named here rather than written inline in
+    # get_alt_links() below so tests can assert against the source of truth
+    # instead of a copy. It has already been renamed once -- it read "Buy on
+    # Kindle (e-book)" before the storefront naming in #36 -- and each copy of
+    # the string is somewhere the next rename can be missed while the suite
+    # still passes.
+    AMAZON_EBOOK_LABEL = "Buy on Amazon (ebook)"
+
     def get_alt_links(self, country: Optional[str] = None):
         candidates = []
         if country == "IN":
@@ -280,7 +288,7 @@ class Product(models.Model):
             # the per-title claim that the book is on Amazon, so an absent one
             # is already the fail-safe. Adding a publisher flag on top would
             # discard a correct owner-entered URL -- see AmazonEbookLinkTest.
-            ("Buy on Amazon (ebook)", self.get_kindle_link()),
+            (self.AMAZON_EBOOK_LABEL, self.get_kindle_link()),
             ("Follow along on Kickstarter", self.kickstarter),
         ]
         return [(label, url) for label, url in candidates if url]
