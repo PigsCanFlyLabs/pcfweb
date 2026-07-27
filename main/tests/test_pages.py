@@ -7,6 +7,7 @@ from unittest import mock
 from django.test import TestCase, override_settings
 
 from main.models import Product
+from main.tests.base import REPO_ROOT
 
 
 class StaticPagesTest(TestCase):
@@ -358,9 +359,95 @@ class HomePageCardsTest(TestCase):
             r'<a href="(https://[^"]*liberatedbread[^"]*)"',
             self.client.get("/family").content.decode())
 
-        self.assertEqual(len(home_links), 1)
+        # The homepage now carries two of these -- the logo card and the
+        # wording beneath it -- so what matters is that every one of them
+        # agrees, not how many there are. Counting them would only say the
+        # card grid has not changed shape, which is not what this is for.
+        self.assertGreaterEqual(len(home_links), 1)
         self.assertEqual(len(family_links), 1)
-        self.assertEqual(home_links, family_links)
+        self.assertEqual(set(home_links), set(family_links))
+
+    def test_the_liberated_bread_logo_card_renders_the_512_asset(self):
+        """The 512 master, not the 128: it is displayed at 200px, so the
+        smaller file would be upscaled and soft on a HiDPI screen.
+
+        The file itself is not in this repo -- main/static/assets/images is
+        gitignored and filled by scripts/sync-local-assets.sh out of
+        ../pcfweb-assets -- so this pins the reference, which is the part
+        this template owns.
+        """
+        section = self.explore_section()
+
+        self.assertIn(
+            "assets/images/liberated-bread-logo-512.png", section)
+        self.assertNotIn("liberated-bread-logo.png", section)
+
+    def test_the_liberated_bread_logo_is_served_through_the_static_tag(self):
+        """Not a hand-written /static/... path.
+
+        STATIC_URL is what decides that prefix, and a literal that agrees
+        with it today goes wrong silently the day it moves.
+        """
+        with open("main/templates/index.html") as handle:
+            template = handle.read()
+
+        self.assertRegex(
+            template,
+            r"\{% static 'assets/images/liberated-bread-logo-512\.png' %\}")
+        self.assertNotIn('"/static/assets/images/liberated-bread', template)
+
+    def test_the_liberated_bread_logo_is_not_stretched(self):
+        """The squish bug, guarded at its source.
+
+        Both axes are pinned, and an <img> with a fixed width and height and
+        no object-fit uses `fill` -- it distorts the image to the box instead
+        of preserving its aspect ratio. That is a real defect this codebase
+        has already had to fix once, and it is invisible in the HTML, so the
+        assertion has to be against the stylesheet.
+        """
+        css = (REPO_ROOT / "main" / "static" / "assets"
+               / "css" / "main.css").read_text()
+
+        rule = re.search(
+            r"#explore \.liberated-bread img \{(.*?)\}", css, re.DOTALL)
+        self.assertIsNotNone(
+            rule, "no #explore .liberated-bread img rule in main.css")
+        assert rule is not None  # for mypy
+        body = rule.group(1)
+
+        fit = re.search(r"object-fit:\s*([a-z-]+)", body)
+        self.assertIsNotNone(fit, "the logo pins both axes but sets no "
+                                  "object-fit, so it renders as `fill`")
+        assert fit is not None  # for mypy
+        self.assertNotEqual(fit.group(1), "fill")
+        self.assertEqual(fit.group(1), "cover")
+
+    def test_the_liberated_bread_logo_card_and_its_wording_are_one_unit(self):
+        """Two cards, one voice. If they drift apart in the grid the logo
+        reads as an unexplained tile, so pin that they are adjacent."""
+        section = self.explore_section()
+
+        logo = section.index("liberated-bread-logo-512.png")
+        wording = section.index(
+            "The same company as Pigs Can Fly Labs, with its own site")
+        between = section[logo:wording]
+
+        # Nothing else's card sits between them.
+        self.assertNotIn("second-image", between)
+        self.assertNotIn("featured_book", between)
+
+    def test_the_companion_text_card_keeps_its_wording_and_badge(self):
+        """The copy is the owner's, verbatim -- not a paraphrase."""
+        section = self.explore_section()
+
+        self.assertIn(
+            "<span>The same company as Pigs Can Fly Labs, with its own "
+            "site</span>",
+            section)
+        self.assertIn("Liberated Bread <span", section)
+        self.assertIn(">Coming Soon</span>", section)
+        # Still the .types card, so it keeps the grid's shared styling.
+        self.assertIn('<div class="types">', section)
 
     def test_the_featured_book_card_links_to_the_seeded_product(self):
         section = self.explore_section()
