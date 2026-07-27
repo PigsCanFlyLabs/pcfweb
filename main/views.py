@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from typing import *
 from django.conf import settings
@@ -24,6 +24,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 from django.utils.decorators import method_decorator
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
@@ -1226,6 +1227,13 @@ class MailingListSubscribeView(View):
                 'message': error,
             }, status=400)
 
+        # Kept on the view rather than handed to respond() by whichever branch
+        # below gets there. respond() is the one place every outcome converges,
+        # and the `next` redirect hangs off it -- so it has to read the target
+        # for itself, from the one submission, with no caller in a position to
+        # pass a different one. See respond().
+        self._form = form
+
         if form.is_bot():
             # Answered exactly like a success, minus the subscription: telling
             # a bot it was caught only teaches whoever wrote it.
@@ -1261,13 +1269,106 @@ class MailingListSubscribeView(View):
               "check your email for a link to confirm.")
 
     def respond(self, request):
+        """The one answer every accepted submission gets.
+
+        The `next` redirect lives here, and only here, for the same reason
+        ANSWER does. Every outcome above arrives at this method -- a new
+        signup, an address already subscribed, a suppressed one, a honeypotted
+        one, a rate-limited one -- so hanging the redirect off it makes the
+        redirect one of the things that cannot tell them apart. Redirecting
+        only for a genuinely new subscriber would rebuild the membership
+        oracle ANSWER exists to close, in the status code instead of the words:
+        anybody could ask "is this address on the list?" and read the answer
+        off whether they were sent back to their own site.
+        """
+        target = self.next_url()
         if self.wants_json(request):
-            return self.json_response({"ok": True, "message": self.ANSWER})
+            payload: Dict[str, Any] = {"ok": True, "message": self.ANSWER}
+            if target:
+                # Told, never taken. fetch() follows a 302 itself and hands
+                # the script our HTML result page as if it were the answer, so
+                # a JSON caller that wants the visitor moved has to be given
+                # the destination and do it.
+                payload["next"] = target
+            return self.json_response(payload)
+        if target:
+            return redirect(target)
         return render(request, 'mailing_list_result.html', context={
             'title': 'Subscribe for updates',
             'ok': True,
             'message': self.ANSWER,
         })
+
+    def next_url(self) -> str:
+        """Where this submission asked to be sent, if we are willing.
+
+        Empty string means "render our own result page", which is both the
+        default and what every unusable `next` collapses to.
+        """
+        form = getattr(self, "_form", None)
+        if form is None:
+            return ""
+        return self.allowed_next(form.cleaned_data.get("next", ""))
+
+    # http is honoured only for these, and only with DEBUG on: somebody
+    # running the other site on their laptop has no certificate to serve. In
+    # production this is unreachable -- Prod sets DEBUG False -- which is the
+    # point. There is no configuration that turns plaintext redirects on for a
+    # real host.
+    LOCAL_NEXT_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+    def allowed_next(self, target: str) -> str:
+        """A `next` we are prepared to send a browser to, or "".
+
+        Everything we will not honour -- an unrecognised host, a malformed
+        URL, a scheme-relative "//evil.example", a javascript: or data: target,
+        a bare path -- comes back as "" and the visitor gets the result page.
+        Never a 400: this field arrives from markup on somebody else's site
+        that we cannot fix, and an integrator's typo must not throw away a
+        signup that was otherwise fine. It just quietly stops working, which is
+        why the snippet says so in as many words.
+
+        The host has to match an entry in MAILING_LIST_ALLOWED_NEXT_HOSTS
+        exactly. Django's own url_has_allowed_host_and_scheme does the rest of
+        the judging, including the cases a hand-rolled check gets wrong: the
+        backslash forms browsers read as a host separator and we do not, the
+        leading control characters Chrome skips over, and "//evil.example",
+        which parses as no scheme and an attacker's host.
+        """
+        target = (target or "").strip()
+        if not target:
+            return ""
+        # urlsplit() drops tabs and newlines before parsing, so a target
+        # containing one is not the URL it appears to parse as -- and it is the
+        # raw string that would go into the Location header. Nothing legitimate
+        # has one; refuse rather than reason about the difference.
+        if any(char in target for char in "\t\r\n"):
+            return ""
+        allowed = set(getattr(settings, "MAILING_LIST_ALLOWED_NEXT_HOSTS", ()))
+        if not allowed:
+            return ""
+        try:
+            parsed = urlparse(target)
+            netloc, hostname = parsed.netloc, parsed.hostname
+        except ValueError:
+            # An unparseable target: a malformed IPv6 literal, a junk port.
+            # Not something to report, just not somewhere to send anybody.
+            return ""
+        if netloc not in allowed:
+            # Catches the empty netloc of a relative "/thanks/" as well. The
+            # whole point of this field is landing the visitor back on the site
+            # the form was on, and requiring the host to be spelled out is what
+            # keeps "is this allowlisted?" a question with one obvious answer.
+            return ""
+        # getattr rather than settings.DEBUG so the fallback is the safe
+        # direction: a settings object that cannot answer the question gets
+        # https required, not http allowed.
+        require_https = not (getattr(settings, "DEBUG", False)
+                             and hostname in self.LOCAL_NEXT_HOSTS)
+        if not url_has_allowed_host_and_scheme(target, allowed,
+                                               require_https=require_https):
+            return ""
+        return target
 
     # Confirmations one address can be sent per hour, whoever asks. Low: there
     # is no legitimate reason to need a fourth, and this is the ceiling on

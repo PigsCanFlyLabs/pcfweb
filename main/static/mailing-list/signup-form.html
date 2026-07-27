@@ -5,20 +5,38 @@
   stylesheet, nothing to load from us. The endpoint it posts to is CSRF
   exempt precisely so this works from another origin.
 
-  One value to set, explicit in the form -- nothing is inferred from which
-  site the form is on:
+  Two values to set, both explicit in the form -- nothing is inferred from
+  which site the form is on:
 
     * "interest" -- the slug of the list people are signing up for. Leave it
       out entirely and they land on the general list. The slugs are in the
       admin under Interest areas.
 
+    * "next" -- optional; where to send the visitor after they submit, so they
+      stay on your site instead of landing on ours. See below.
+
   The "all_updates" checkbox is ticked by default and adds the All list on top
   of that one. Leave it in: it is what makes "everything" an opt-in the person
   can see and untick, rather than something we do to them quietly.
 
-  After submitting, the visitor lands on a thank-you page on pigscanfly.ca.
-  To keep them on your own site instead, use the iframe version -- see the
-  page linked above.
+  ABOUT "next"
+
+  Without it, the visitor lands on a thank-you page on pigscanfly.ca. With it,
+  they land on the page you name -- but only if its host is on an allowlist we
+  keep, and only over https. That allowlist exists because this endpoint takes
+  a post from anywhere: without it, anyone could write a link that bounces
+  people off pigscanfly.ca to wherever they liked, with our domain on it.
+
+  So if the host is not one we have been told about, or the URL is anything
+  other than a plain absolute https:// one -- a bare "/thanks/", a
+  "//example.com/thanks/", anything else -- the field is *silently ignored*.
+  The signup still happens, the visitor just sees our thank-you page. There is
+  no error, on purpose: a typo here should not throw away somebody's signup.
+  If you have set it and people are still landing on pigscanfly.ca, that is
+  what has happened -- write to us and we will add your host.
+
+  If you would rather not involve us at all, use the iframe version, which
+  keeps the visitor on your page throughout -- see the page linked above.
 
   Signing up sends a confirmation email; nobody is added to the list until
   they click the link in it.
@@ -31,6 +49,11 @@
 
   <!-- Which list. Change or remove; removing means the general list. -->
   <input type="hidden" name="interest" value="general">
+
+  <!-- Where to send them afterwards. Uncomment and point it at a page of your
+       own; it must be an absolute https:// URL and its host must be one we
+       have allowlisted. Anything else is ignored and they see our page. -->
+  <!-- <input type="hidden" name="next" value="https://example.com/thanks/"> -->
 
   <label class="pcf-signup-all">
     <input type="checkbox" name="all_updates" value="1" checked>

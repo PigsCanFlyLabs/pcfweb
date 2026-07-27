@@ -34,6 +34,16 @@ class MailingListSignupForm(forms.Form):
     # submission with it set is answered exactly like a real one so whatever
     # filled it cannot tell the difference.
     website = forms.CharField(max_length=200, required=False)
+    # Where the visitor is sent afterwards, so a form embedded on another site
+    # can land them back on that site rather than bouncing them to ours.
+    #
+    # Deliberately a plain CharField with no max_length and no validator: what
+    # may actually be redirected to is decided by the view against a host
+    # allowlist, and anything it does not like has to fall back silently to our
+    # own result page. A URLField -- or any rule enforced here -- would instead
+    # make the whole submission invalid, so an integrator's typo in a field
+    # nobody can see would 400 a signup that was otherwise perfectly good.
+    next = forms.CharField(required=False)
 
     def clean_email(self) -> str:
         return normalize_email(self.cleaned_data["email"])

@@ -314,6 +314,23 @@ class Base(Configuration):
     MAILING_LIST_SIGNUP_RATE_LIMIT = parse_int(
         os.getenv("MAILING_LIST_SIGNUP_RATE_LIMIT"), 20)
 
+    # Hosts an embedded signup form may send the visitor back to with its
+    # `next` field, so a form on somebody else's site can land them on that
+    # site's own thank-you page instead of ours.
+    #
+    # An allowlist and not "wherever the form says", because the endpoint is
+    # CSRF exempt and open to the internet: honouring an arbitrary target
+    # would make www.pigscanfly.ca a redirector anybody could point at
+    # anything, with our domain on the link. A host that is not here is not an
+    # error -- the signup still happens and the visitor lands on our result
+    # page -- so the cost of forgetting to add one is cosmetic, which is the
+    # direction to be wrong in. Matched against the URL's netloc exactly, so
+    # write the host as it appears in the URL, without a scheme.
+    MAILING_LIST_ALLOWED_NEXT_HOSTS = parse_comma_list(
+        os.getenv("MAILING_LIST_ALLOWED_NEXT_HOSTS",
+                  "www.pigscanfly.ca,pigscanfly.ca,"
+                  "liberatedbread.com,www.liberatedbread.com"))
+
     # How many freshly imported addresses the import page will email the
     # "we've updated our list" notice to. Above this it imports and says to
     # write a mailing instead: the notice loop runs inside one request, and a

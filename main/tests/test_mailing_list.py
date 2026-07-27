@@ -14,6 +14,7 @@ import io
 import json
 from unittest import mock
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core import mail
 from django.core.cache import cache
@@ -360,24 +361,239 @@ class EverythingCheckboxTest(MailingListTestBase):
         self.assertEqual(mail.outbox, [])
 
 
-class NoRedirectBackTest(MailingListTestBase):
-    """The endpoint never redirects anywhere a submission asked it to.
+ALLOWED_NEXT_HOSTS = ["liberatedbread.com", "www.liberatedbread.com"]
+GOOD_NEXT = "https://liberatedbread.com/thanks/"
 
-    It is CSRF exempt and open to the internet, so honouring a `next` would
-    make it an open redirect with our domain on it -- and doing that safely
-    means a per-site allowlist, which is exactly the site-by-site mapping this
-    feature does without. Embedded forms that need the visitor to stay put use
-    the iframe instead.
+
+@override_settings(MAILING_LIST_ALLOWED_NEXT_HOSTS=ALLOWED_NEXT_HOSTS)
+class NextRedirectTest(MailingListTestBase):
+    """`next` lands the visitor back on the site the form was on.
+
+    The endpoint is CSRF exempt and posted to from anywhere, so honouring the
+    field as submitted would make us a redirector with our domain on the link.
+    Hence the allowlist -- and hence that everything off it is dropped rather
+    than refused, because the field comes out of markup on somebody else's
+    site that we cannot go and fix.
     """
 
-    def test_a_next_field_is_ignored_but_the_signup_still_happens(self):
-        response = self.client.post(SUBSCRIBE_URL, {
-            "email": "kid@example.com",
-            "next": "https://evil.example/landing"})
+    def test_an_allowlisted_target_is_where_they_land(self):
+        response = self.signup("kid@example.com", next=GOOD_NEXT)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], GOOD_NEXT)
+        # Only where they land changes: the signup is still a signup.
+        self.assertTrue(Subscription.objects.exists())
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_no_next_at_all_is_the_page_it_always_was(self):
+        response = self.signup("kid@example.com")
 
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "mailing_list_result.html")
-        self.assertTrue(Subscription.objects.exists())
+
+    def test_an_empty_next_is_the_same_as_not_sending_one(self):
+        # What a form template renders when the integrator left the value
+        # blank rather than removing the input.
+        response = self.signup("kid@example.com", next="")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "mailing_list_result.html")
+
+    @override_settings(MAILING_LIST_SIGNUP_RATE_LIMIT=100)
+    def test_anything_else_falls_back_without_a_word(self):
+        # None of these may become a Location header, and none of them may
+        # cost somebody their signup either.
+        for index, target in enumerate([
+                "https://evil.example/landing",
+                # Scheme relative: no scheme and an attacker's host, which a
+                # browser reads as "same scheme, that host".
+                "//evil.example/landing",
+                # The same trick wearing a host we do allow. Still not https,
+                # still not honoured.
+                "//liberatedbread.com/thanks/",
+                "///evil.example/landing",
+                "https:///evil.example/landing",
+                # Allowlisted host, but plaintext.
+                "http://liberatedbread.com/thanks/",
+                "javascript:alert(document.domain)",
+                "data:text/html,<script>alert(1)</script>",
+                # A bare path. Safe enough, but the field is for going back to
+                # another site, and requiring the host keeps the rule simple.
+                "/thanks/",
+                # Hosts that only look allowlisted: a suffix, a userinfo part,
+                # and the backslash some browsers read as a host separator.
+                "https://liberatedbread.com.evil.example/thanks/",
+                "https://liberatedbread.com@evil.example/thanks/",
+                "https://evil.example\\@liberatedbread.com/thanks/",
+                # A port we were not told about is a different entry.
+                "https://liberatedbread.com:8443/thanks/",
+                # urlsplit() drops the newline before parsing, so this would
+                # otherwise pass the check as one host and redirect as another.
+                "https://liberated\nbread.com/thanks/",
+                "not a url at all",
+        ]):
+            with self.subTest(next=target):
+                # A fresh address each time: the per-address ceiling is low,
+                # and a rate-limited submission would land on the result page
+                # for the wrong reason.
+                email = f"kid{index}@example.com"
+
+                response = self.signup(email, next=target)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertTemplateUsed(response, "mailing_list_result.html")
+                self.assertTrue(
+                    Subscription.objects.filter(email_field=email).exists())
+
+    @override_settings(MAILING_LIST_ALLOWED_NEXT_HOSTS=[])
+    def test_an_empty_allowlist_turns_the_feature_off(self):
+        response = self.signup("kid@example.com", next=GOOD_NEXT)
+
+        self.assertEqual(response.status_code, 200)
+
+    @override_settings(DEBUG=True,
+                       MAILING_LIST_ALLOWED_NEXT_HOSTS=["localhost:8000"])
+    def test_plaintext_localhost_works_while_somebody_is_developing(self):
+        # A site being written on a laptop has no certificate to serve.
+        response = self.signup("dev@example.com",
+                               next="http://localhost:8000/thanks/")
+
+        self.assertEqual(response.status_code, 302)
+
+    @override_settings(DEBUG=False,
+                       MAILING_LIST_ALLOWED_NEXT_HOSTS=["localhost:8000"])
+    def test_plaintext_localhost_is_only_ever_a_debug_thing(self):
+        # The exception above is the only http anywhere in this, and it is not
+        # reachable with DEBUG off -- so no configuration turns plaintext
+        # redirects on in production, not even for a host named localhost.
+        response = self.signup("dev@example.com",
+                               next="http://localhost:8000/thanks/")
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_a_json_caller_is_told_where_but_never_sent(self):
+        # fetch() follows a 302 itself and would hand the script our HTML
+        # result page in place of the JSON it asked for.
+        response = self.client.post(
+            SUBSCRIBE_URL,
+            data=json.dumps({"email": "js@example.com", "next": GOOD_NEXT}),
+            content_type="application/json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        self.assertEqual(response.json()["next"], GOOD_NEXT)
+
+    def test_a_json_caller_is_not_handed_a_target_we_would_not_take(self):
+        response = self.client.post(
+            SUBSCRIBE_URL,
+            data=json.dumps({"email": "js@example.com",
+                             "next": "https://evil.example/landing"}),
+            content_type="application/json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("next", response.json())
+
+    def test_the_form_route_still_answers_json_when_asked(self):
+        response = self.signup("js@example.com", next=GOOD_NEXT,
+                               format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["next"], GOOD_NEXT)
+
+    def test_a_bad_address_is_still_a_400_and_not_a_redirect(self):
+        # The one thing this endpoint does say out loud. It happens before
+        # there is a validated submission to read a `next` out of, so a broken
+        # form cannot be bounced somewhere on the strength of its own field.
+        response = self.signup("not-an-email", next=GOOD_NEXT)
+
+        self.assertEqual(response.status_code, 400)
+
+
+class NextAllowlistDefaultTest(TestCase):
+    def test_the_shipped_allowlist_is_our_sites_and_liberated_bread(self):
+        # Liberated Bread's site is static, hosted elsewhere, and posts its
+        # form here; without its hosts on this list its visitors get bounced
+        # off it onto ours, which is the whole reason the field exists.
+        self.assertEqual(
+            set(settings.MAILING_LIST_ALLOWED_NEXT_HOSTS),
+            {"www.pigscanfly.ca", "pigscanfly.ca",
+             "liberatedbread.com", "www.liberatedbread.com"})
+
+
+@override_settings(MAILING_LIST_ALLOWED_NEXT_HOSTS=ALLOWED_NEXT_HOSTS)
+class NextRedirectSaysNothingTest(MailingListTestBase):
+    """The redirect must not become the membership oracle ANSWER avoids.
+
+    ANSWER is deliberately the same words for a new signup, an address already
+    subscribed, a suppressed one, a honeypotted one and a rate-limited one.
+    A redirect that fired for only some of those would say in the status code
+    exactly what the words refuse to: point a form at somebody's address, see
+    whether you get sent back to your own site, and you know whether they are
+    on the list. So it hangs off respond(), which all five go through, and
+    every one of them has to come back the same.
+    """
+
+    def outcomes(self):
+        """One response per thing that can happen to a valid submission."""
+        self.subscriber("member@example.com", self.general)
+        SuppressedAddress.objects.create(email="gone@example.com")
+
+        # Every branch of post() below logs somewhere under main.*, and
+        # assertLogs is what keeps that noise out of the test output.
+        with self.assertLogs("main", level="INFO"):
+            responses = {
+                "a new address": self.signup("new@example.com",
+                                             next=GOOD_NEXT),
+                "one already subscribed": self.signup("member@example.com",
+                                                      next=GOOD_NEXT),
+                "a suppressed one": self.signup("gone@example.com",
+                                                next=GOOD_NEXT),
+                "a honeypotted one": self.signup(
+                    "bot@example.com", next=GOOD_NEXT,
+                    website="http://spam.example"),
+            }
+            # The source counter has four posts on it by now, so any ceiling
+            # below that refuses the next one. Asserted rather than assumed:
+            # without the warning this branch was never taken and the case
+            # this class exists for went untested.
+            with self.settings(MAILING_LIST_SIGNUP_RATE_LIMIT=2):
+                with self.assertLogs("main.views", level="WARNING"):
+                    responses["a rate-limited one"] = self.signup(
+                        "flood@example.com", next=GOOD_NEXT)
+        return responses
+
+    def test_the_five_of_them_really_did_take_five_different_branches(self):
+        # The point of the tests below is that five unlike things answer
+        # alike, which is worth nothing if they were not unlike to begin with.
+        self.outcomes()
+
+        subscribed = set(
+            Subscription.objects.values_list("email_field", flat=True))
+        # The new address is on file unconfirmed and has its link; nothing was
+        # written or mailed for the honeypotted, suppressed or refused ones.
+        self.assertIn("new@example.com", subscribed)
+        self.assertIn("member@example.com", subscribed)
+        self.assertNotIn("bot@example.com", subscribed)
+        self.assertNotIn("gone@example.com", subscribed)
+        self.assertNotIn("flood@example.com", subscribed)
+        self.assertEqual([message.to for message in mail.outbox],
+                         [["new@example.com"]])
+
+    def test_every_outcome_redirects_to_the_same_place(self):
+        for description, response in self.outcomes().items():
+            with self.subTest(outcome=description):
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response["Location"], GOOD_NEXT)
+
+    @override_settings(MAILING_LIST_ALLOWED_NEXT_HOSTS=[])
+    def test_and_without_a_redirect_they_are_still_the_same_page(self):
+        # The property is not "they all redirect", it is "they are all
+        # indistinguishable" -- which has to hold on the fallback path too,
+        # the way it did before any of this existed.
+        answers = {(response.status_code, response.content)
+                   for response in self.outcomes().values()}
+
+        self.assertEqual(len(answers), 1)
 
 
 class ConfirmAndUnsubscribeTest(MailingListTestBase):
@@ -801,6 +1017,19 @@ class StaticSnippetTest(TestCase):
             markup = snippet.read()
         self.assertIn('name="all_updates" value="1" checked', markup)
         self.assertIn("/mailing-list/subscribe", markup)
+
+    def test_the_snippet_shows_next_and_warns_it_can_be_ignored(self):
+        # An integrator whose host is not allowlisted sees their `next` do
+        # nothing at all, with no error anywhere to explain it. The snippet is
+        # where they would look, so it has to say so.
+        from django.contrib.staticfiles import finders
+
+        path = finders.find("mailing-list/signup-form.html")
+        with open(str(path)) as snippet:
+            markup = snippet.read()
+        self.assertIn('name="next"', markup)
+        self.assertIn("allowlist", markup)
+        self.assertIn("silently ignored", markup)
 
 
 class SendingTest(MailingListTestBase):
