@@ -625,10 +625,10 @@ class FamilyPageTest(TestCase):
     company as well as a project.
 
     The "Coming Soon" badge used to be driven by the absence of an outbound
-    URL, which badged Pigs Can Fly Labs itself -- it is the parent company and
-    this is its own site, so it deliberately links nowhere. Asserting the badge
-    appears *somewhere* on the page could not catch that, so these tests pin
-    the badge to a specific card.
+    URL, which badged Pigs Can Fly Labs itself -- it is the company behind
+    this site and all of Holden's books, so it deliberately links nowhere.
+    Asserting the badge appears *somewhere* on the page could not catch that,
+    so these tests pin the badge to a specific card.
     """
 
     COMING_SOON_BADGE = ">Coming Soon</span>"
@@ -705,11 +705,18 @@ class FamilyPageTest(TestCase):
                             html=False)
 
     def test_pigs_can_fly_labs_is_not_marked_coming_soon(self):
-        # Regression: the parent company links nowhere by design, which the
-        # old "no URL means coming soon" rule read as not being live yet.
+        # Regression: Pigs Can Fly Labs links nowhere by design, which the old
+        # "no URL means coming soon" rule read as not being live yet.
         self.assertNotIn(
             self.COMING_SOON_BADGE,
             self.get_project_cards()["Pigs Can Fly Labs"])
+
+    def test_pigs_can_fly_labs_uses_owner_supplied_kind_copy(self):
+        card = self.get_project_cards()["Pigs Can Fly Labs"]
+        owner_copy = (
+            "The company behind this site and all of Holden's books!")
+        self.assertIn(
+            html_module.escape(owner_copy), card)
 
     def test_liberated_bread_links_to_owner_supplied_url(self):
         # The owner supplied this exact URL; do not invent alternatives.
