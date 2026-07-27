@@ -8,18 +8,28 @@
 # external_product_id is intentionally unset; the Stripe product id is
 # generated lazily on first add-to-cart (see CartProduct.generate_price_id).
 #
-# NONE of the four O'Reilly titles below carry an e-book ASIN yet, so none of
-# them show the "Buy on Amazon (ebook)" button. That button is driven by
-# `ebook_asin` (or an explicit `kindle_link`) and renders only when one is set
-# -- an absent value produces no button rather than a dead one.
+# Three of the four O'Reilly titles below now carry an e-book ASIN, so they
+# show the "Buy on Amazon (ebook)" button; pk 101 deliberately does not -- see
+# the comment on that row. That button is driven by `ebook_asin` (or an
+# explicit `kindle_link`) and renders only when one is set -- an absent value
+# produces no button rather than a dead one.
 #
-# The values cannot be added here: `ebook_asin` is in seed_products'
-# SEED_PROTECTED_FIELDS, so a fixture carrying one makes the seed command exit
-# 1, which under `set -e` in scripts/start-server.sh stops the primary pod from
-# booting. Set them in the admin instead, one per title, taking the ASIN from
-# the Kindle edition's own Amazon page -- the /dp/ id on the *Kindle* listing,
-# not the paperback's. There is no derivation from an ISBN: a guessed ASIN
-# points at whatever unrelated product happens to occupy that address.
+# The values belong here, not in the admin. `ebook_asin` used to be in
+# seed_products' SEED_PROTECTED_FIELDS, which made a fixture carrying one exit
+# 1 -- and under `set -e` in scripts/start-server.sh, that stops the primary
+# pod from booting -- so the only place to put an ASIN was the Django admin,
+# retyped after every fresh database. It is fixture-owned now: put the ASIN
+# here and a clean deploy seeds it. Take it from the Kindle edition's own
+# Amazon page -- the /dp/ id on the *Kindle* listing, not the paperback's.
+# There is no derivation from an ISBN: a guessed ASIN points at whatever
+# unrelated product happens to occupy that address.
+#
+# The consequence is the usual one for this file -- a row whose ebook_asin is
+# set below has its admin edits overwritten on each primary deploy. A row that
+# OMITS the key keeps whatever the admin typed: seed_products passes only the
+# keys present here to .update(), so an absent key is never written.
+# print_asin, default_asin, external_product_id and stock stay admin/runtime-
+# owned and must not appear in this file at all.
 - model: main.product
   pk: 100
   fields:
@@ -36,6 +46,10 @@
     # and O'Reilly's own platform id in /library/view/ URLs (9781449359034),
     # which is a third number and not used here.
     ebook_isbn: "9781449359058"
+    # Kindle edition ASIN, verified against the live Amazon listing. Drives
+    # get_kindle_link(); never falls back to default_asin, which would point
+    # the "Buy on Kindle" link at a paperback.
+    ebook_asin: "B00SW0TY8O"
     amazon_link: "https://www.amazon.com/dp/1449358624"
     # No bookshop_link: the 2015 1st edition is absent from Bookshop's
     # catalogue entirely, and the ISBN search we used to link to returns
@@ -69,6 +83,15 @@
     # and O'Reilly's own platform id in /library/view/ URLs (9781491943199),
     # which is a third number and not used here.
     ebook_isbn: "9781491943151"
+    # ebook_asin is deliberately left unset, and this blank is correct -- do
+    # not "fix" it. Amazon has delisted the 1st edition's Kindle edition:
+    # B0725YT69J now 404s on .com, .co.uk, .ca and .de alike. The 2nd
+    # edition's B0H3CMNN3Q is NOT a substitute -- it is a different book
+    # (Karau, Polak and Warren, covering Spark 4.x) sold under a different
+    # listing, so pointing this row's "Buy on Kindle" link at it would sell
+    # the reader something other than the product on the page. Leaving it
+    # unset drops the link entirely, which get_alt_links() does by filtering
+    # out falsy URLs -- no link beats a wrong one.
     amazon_link: "https://www.amazon.com/dp/1491943203"
     bookshop_link: "https://bookshop.org/p/books/high-performance-spark-best-practices-for-scaling-and-optimizing-apache-spark-holden-karau/8133976"
     amazon_in_link: "https://www.amazon.in/dp/1491943203"
@@ -97,6 +120,8 @@
     # and O'Reilly's own platform id in /library/view/ URLs (9781492050117),
     # which is a third number and not used here.
     ebook_isbn: "9781492050070"
+    # Kindle edition ASIN, verified against the live Amazon listing.
+    ebook_asin: "B08L5Q9W59"
     amazon_link: "https://www.amazon.com/dp/1492050121"
     bookshop_link: "https://bookshop.org/books/kubeflow-for-machine-learning-from-lab-to-production/9781492050124"
     # The ?ean= is load-bearing: the same slug+id serves the paperback by
@@ -129,6 +154,8 @@
     # and O'Reilly's own platform id in /library/view/ URLs (9781098118792),
     # which is a third number and not used here.
     ebook_isbn: "9781098118761"
+    # Kindle edition ASIN, verified against the live Amazon listing.
+    ebook_asin: "B0BNM6PQ9Q"
     amazon_link: "https://www.amazon.com/dp/1098118804"
     bookshop_link: "https://bookshop.org/search?keywords=9781098118808"
     # As on pk 102, the ?ean= selects the "Ebook (DRM-free)" listing on a page
@@ -270,12 +297,16 @@
 # /book/9781782167068, which is what the /services credentials link to.
 #
 # print_asin is deliberately NOT set here even though the ASIN is known
-# (1782167064). ASINs are in seed_products' SEED_PROTECTED_FIELDS, so a
-# fixture carrying one makes the seed command exit 1 -- which under `set -e`
-# in scripts/start-server.sh stops the primary pod from booting. It is also
-# redundant: get_amazon_link() prefers an explicit amazon_link, which is set
-# below, so the ASIN would never be consulted for this row. Set it in the
-# admin if it is ever wanted.
+# (1782167064). print_asin is still in seed_products' SEED_PROTECTED_FIELDS
+# (only ebook_asin was moved out), so a fixture carrying one makes the seed
+# command exit 1 -- which under `set -e` in scripts/start-server.sh stops the
+# primary pod from booting. It is also redundant: get_amazon_link() prefers an
+# explicit amazon_link, which is set below, so the ASIN would never be
+# consulted for this row. Set it in the admin if it is ever wanted.
+#
+# ebook_asin is unset for a different reason: no Kindle edition ASIN has been
+# verified for this title. Unlike print_asin it is now fixture-owned, so it
+# can simply be added here once one is confirmed.
 - model: main.product
   pk: 107
   fields:
