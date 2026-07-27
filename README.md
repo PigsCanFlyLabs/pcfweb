@@ -292,7 +292,20 @@ disagree with each other. There are **three** of them — `web-primary`, the
 2. Confirm `pcfweb-secret` carries `SECRET_KEY`, `STRIPE_LIVE_SECRET_KEY` and
    `STRIPE_WEBHOOK_SECRET`. Prod refuses to boot without any of them (see
    *Environment variables*), so a missing one is a failed rollout rather than
-   a silent misbehaviour — Kubernetes keeps the old pods serving.
+   a silent misbehaviour — Kubernetes keeps the old pods serving. `build.sh`
+   now checks this before it builds, so the failure arrives in a second rather
+   than at `kubectl rollout status`. Note the name: an older `pcfweb-secret`
+   carries `DJSTRIPE_WEBHOOK_SECRET`, left over from dj-stripe, and that is
+   *not* the variable Prod reads. The value is per-endpoint, so take the
+   signing secret of the endpoint currently registered at `/stripe/webhook`
+   rather than copying the old key across.
+
+   A rollout that got out anyway looks like this: `kubectl get pods` shows two
+   generations of `web-primary` (the old one `Running`, the new one
+   `CrashLoopBackOff`) and `web` pods stuck in `Init:0/1`, because
+   `wait-for-migrations` is waiting on a migration the primary never applied.
+   The old pods keep serving throughout, so the site is up and only the deploy
+   is stuck.
 3. Confirm the `STRIPE_SHIPPING_RATES` ids exist under the **live** key.
    Shipping rate ids are livemode-scoped, so a rate created in test mode does
    not exist in live and Stripe rejects the entire session — every physical
