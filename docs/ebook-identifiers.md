@@ -35,11 +35,26 @@ them. If you have an O'Reilly author account, one look at a catalogue page settl
 `ebook_isbn` is **not** in `SEED_PROTECTED_FIELDS`, so it ships in
 `main/fixtures/initial_products.yaml` through a normal PR.
 
-`ebook_asin`, `print_asin`, `default_asin`, `external_product_id`, and `stock` **are**
-protected (`main/management/commands/seed_products.py`). A fixture row carrying one makes
+`print_asin`, `default_asin`, `external_product_id`, and `stock` **are** protected
+(`main/management/commands/seed_products.py`). A fixture row carrying one makes
 `seed_products` raise `CommandError` and exit non-zero; because `scripts/start-server.sh`
-runs under `set -euo pipefail`, that stops the primary pod booting. **Enter ASINs through
-the Django admin, never the fixture.**
+runs under `set -euo pipefail`, that stops the primary pod booting. `stock` in particular
+must stay protected — a deployment resetting inventory is a production incident.
+
+`ebook_asin` **was** in that protected set and is being moved out by PR #44, so the
+verified Kindle ASINs ship in the fixture rather than being typed into the admin. Until
+#44 merges the old rule still holds and a fixture carrying `ebook_asin` will stop the
+pod booting. After it merges the ownership rule is asymmetric, and the asymmetry is the
+whole point:
+
+- On a row where the fixture **sets** `ebook_asin` (pks 100, 102, 103), the fixture wins:
+  an ASIN edited in the Django admin is **overwritten on every primary deployment**.
+  Change those values by PR, not by admin.
+- On a row where the fixture **omits** `ebook_asin` (pks 101, 104–107), the admin wins:
+  `seed_products` calls `.update(**fixture_fields)` with only the keys present in the
+  YAML, so an omitted key never reaches SQL and an admin-entered value survives
+  redeployment. This is why pk 101's blank is a deliberate choice rather than a value
+  waiting to be wiped.
 
 ## Current state
 
