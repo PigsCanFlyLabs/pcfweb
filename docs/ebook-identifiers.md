@@ -90,7 +90,23 @@ contains*.
 genuinely the 1st edition's Kindle ASIN — it still appears in review markup on the live
 1st-edition print page — but the product page has been deleted and returns 404 on every
 Amazon domain (`.com`, `us`, `.co.uk`, `.ca`, `.de`) via both `/dp/` and `/gp/product/`.
-There is no replacement. The 2nd edition's Kindle ASIN `B0H3CMNN3Q` **must not be used
+There is no replacement.
+
+This finding has been **challenged once and re-confirmed**, so do not re-litigate it from a
+search result. A reviewer asserted the ASIN was live and cited two descriptive-slug URLs
+(`amazon.com/-/zh_TW/Holden-Karau-ebook/dp/B0725YT69J` and
+`amazon.ca/High-Performance-Spark-Practices-Optimizing-ebook/dp/B0725YT69J`). Both return
+**HTTP 404** with a ~2 KB dogs-of-Amazon body. A descriptive slug carries the title and
+author names in the path and therefore *looks* authoritative, but it has no power to
+resurrect a delisted ASIN — bare `/dp/`, `/gp/product/`, and slugged forms all 404
+identically across `.com`, `.ca`, `.co.uk`, and `.de`, with no redirect to any other ASIN.
+
+Two methodological traps make this specific check easy to get wrong in both directions:
+Amazon serves bodies **gzip-compressed**, so grepping a raw response finds nothing and
+resembles a bot-block; and a 404 is indistinguishable from rate-limiting unless you run a
+positive control. The control here is `B0H3CMNN3Q` (the 2nd edition), which returns
+**HTTP 200 with a 1.6 MB product page** from the same client, same UA, same moment. The
+404s are therefore real delisting, not blocking. The 2nd edition's Kindle ASIN `B0H3CMNN3Q` **must not be used
 here**: it is a different book (Karau + **Polak** + Warren, covering Spark 4.x) and
 linking it from a 1st-edition listing would misrepresent the product.
 
