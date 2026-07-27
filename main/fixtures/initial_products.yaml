@@ -7,6 +7,19 @@
 #
 # external_product_id is intentionally unset; the Stripe product id is
 # generated lazily on first add-to-cart (see CartProduct.generate_price_id).
+#
+# NONE of the four O'Reilly titles below carry an e-book ASIN yet, so none of
+# them show the "Buy on Amazon (ebook)" button. That button is driven by
+# `ebook_asin` (or an explicit `kindle_link`) and renders only when one is set
+# -- an absent value produces no button rather than a dead one.
+#
+# The values cannot be added here: `ebook_asin` is in seed_products'
+# SEED_PROTECTED_FIELDS, so a fixture carrying one makes the seed command exit
+# 1, which under `set -e` in scripts/start-server.sh stops the primary pod from
+# booting. Set them in the admin instead, one per title, taking the ASIN from
+# the Kindle edition's own Amazon page -- the /dp/ id on the *Kindle* listing,
+# not the paperback's. There is no derivation from an ISBN: a guessed ASIN
+# points at whatever unrelated product happens to occupy that address.
 - model: main.product
   pk: 100
   fields:
@@ -19,9 +32,17 @@
     price: 3999
     isbn: "9781449358624"
     print_isbn: "9781449358624"
+    # Retail EPUB ISBN. Deliberately distinct from both the print ISBN above
+    # and O'Reilly's own platform id in /library/view/ URLs (9781449359034),
+    # which is a third number and not used here.
+    ebook_isbn: "9781449359058"
     amazon_link: "https://www.amazon.com/dp/1449358624"
-    # 2015 1st edition has no bookshop.org product page; link to its search.
-    bookshop_link: "https://bookshop.org/search?keywords=9781449358624"
+    # No bookshop_link: the 2015 1st edition is absent from Bookshop's
+    # catalogue entirely, and the ISBN search we used to link to returns
+    # "No results found." Deliberately not repointed at the 2nd edition
+    # (ean 9781492050049, Wenig/Damji) -- that is a different book by
+    # different authors, so linking it would misrepresent this product.
+    # No link beats a button that lands on an empty search page.
     amazon_in_link: "https://www.amazon.in/dp/1449358624"
     flipkart_link: "https://www.flipkart.com/search?q=9781449358624"
     image_name: "book_covers/learning_spark_1ed.jpg"
@@ -44,6 +65,10 @@
     price: 4999
     isbn: "9781491943205"
     print_isbn: "9781491943205"
+    # Retail EPUB ISBN. Deliberately distinct from both the print ISBN above
+    # and O'Reilly's own platform id in /library/view/ URLs (9781491943199),
+    # which is a third number and not used here.
+    ebook_isbn: "9781491943151"
     amazon_link: "https://www.amazon.com/dp/1491943203"
     bookshop_link: "https://bookshop.org/p/books/high-performance-spark-best-practices-for-scaling-and-optimizing-apache-spark-holden-karau/8133976"
     amazon_in_link: "https://www.amazon.in/dp/1491943203"
@@ -68,8 +93,17 @@
     price: 4999
     isbn: "9781492050124"
     print_isbn: "9781492050124"
+    # Retail EPUB ISBN. Deliberately distinct from both the print ISBN above
+    # and O'Reilly's own platform id in /library/view/ URLs (9781492050117),
+    # which is a third number and not used here.
+    ebook_isbn: "9781492050070"
     amazon_link: "https://www.amazon.com/dp/1492050121"
     bookshop_link: "https://bookshop.org/books/kubeflow-for-machine-learning-from-lab-to-production/9781492050124"
+    # The ?ean= is load-bearing: the same slug+id serves the paperback by
+    # default, and this ean selects the "Ebook (DRM-free)" listing. Do not
+    # strip or reorder it. Verified 2026-07-26: page lists Ebook (DRM-free)
+    # $42.99 at EAN 9781492050070 alongside the paperback at 9781492050124.
+    bookshop_ebook_link: "https://bookshop.org/p/books/kubeflow-for-machine-learning-boris-lublinsky/6feb89c16760d5f7?ean=9781492050070"
     amazon_in_link: "https://www.amazon.in/dp/1492050121"
     flipkart_link: "https://www.flipkart.com/search?q=9781492050124"
     image_name: "book_covers/kubeflow_for_ml.jpg"
@@ -91,8 +125,16 @@
     price: 6599
     isbn: "9781098118808"
     print_isbn: "9781098118808"
+    # Retail EPUB ISBN. Deliberately distinct from both the print ISBN above
+    # and O'Reilly's own platform id in /library/view/ URLs (9781098118792),
+    # which is a third number and not used here.
+    ebook_isbn: "9781098118761"
     amazon_link: "https://www.amazon.com/dp/1098118804"
     bookshop_link: "https://bookshop.org/search?keywords=9781098118808"
+    # As on pk 102, the ?ean= selects the "Ebook (DRM-free)" listing on a page
+    # that otherwise serves the paperback. Verified 2026-07-26: Ebook
+    # (DRM-free) $56.99 at EAN 9781098118761, paperback at 9781098118808.
+    bookshop_ebook_link: "https://bookshop.org/p/books/scaling-python-with-ray-adventures-in-cloud-and-serverless-patterns-boris-lublinsky/4dc16509c22353e3?ean=9781098118761"
     amazon_in_link: "https://www.amazon.in/dp/1098118804"
     flipkart_link: "https://www.flipkart.com/search?q=9781098118808"
     image_name: "book_covers/scaling_python_with_ray.jpg"

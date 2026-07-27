@@ -69,6 +69,47 @@ if [ "$(grep -cE 'image: holdenk/pcfweb:' deploy.yaml)" != "$(grep -cE "image: $
   echo "ERROR: deploy.yaml has holdenk/pcfweb image tags that disagree; they must all be ${TAG#*:}." >&2
   exit 1
 fi
+# Prod refuses to boot without these (Prod.pre_setup, pigscanfly/settings.py),
+# and they come from pcfweb-secret, which is created by hand -- so it drifts
+# from the code that reads it whenever a new one is added. The symptom is
+# unhelpful: the new pod crash-loops, the rollout never completes, and the
+# previous pods keep serving the old image, so the site looks fine while the
+# deploy is stuck. Catch it here, before the push, rather than at
+# `kubectl rollout status` fifteen minutes later.
+#
+# Keep this list in step with _prod_required_env in pigscanfly/settings.py --
+# ProdSecretPreflightTest in main/tests/test_deploy.py fails if they diverge.
+REQUIRED_SECRET_KEYS=(SECRET_KEY STRIPE_LIVE_SECRET_KEY STRIPE_WEBHOOK_SECRET)
+# Fails closed, for the same reason as the running-tag lookup above: an
+# unreadable Secret must not read as an empty one, which would look like every
+# key is missing, or (worse, if inverted) like every key is present.
+if ! SECRET_KEYS=$(kubectl get secret pcfweb-secret -n pcfweb \
+      -o go-template='{{range $k,$v := .data}}{{$k}}{{"\n"}}{{end}}' 2>&1); then
+  set +x
+  echo >&2
+  echo "ERROR: could not read pcfweb-secret from the cluster:" >&2
+  echo "  ${SECRET_KEYS}" >&2
+  echo "Refusing to build: Prod will not start without the keys it carries." >&2
+  exit 1
+fi
+MISSING_SECRET_KEYS=()
+for required in "${REQUIRED_SECRET_KEYS[@]}"; do
+  if ! printf '%s\n' "$SECRET_KEYS" | grep -qx -- "$required"; then
+    MISSING_SECRET_KEYS+=("$required")
+  fi
+done
+if [ ${#MISSING_SECRET_KEYS[@]} -ne 0 ]; then
+  set +x
+  echo >&2
+  echo "ERROR: pcfweb-secret is missing: ${MISSING_SECRET_KEYS[*]}" >&2
+  echo "Prod raises ImproperlyConfigured for each of these, so the new pods" >&2
+  echo "would crash-loop and the rollout would hang with the old pods up." >&2
+  echo "Add them, e.g.:" >&2
+  echo "  kubectl patch secret pcfweb-secret -n pcfweb --type=merge \\" >&2
+  echo "    -p '{\"stringData\":{\"${MISSING_SECRET_KEYS[0]}\":\"...\"}}'" >&2
+  exit 1
+fi
+
 # Bundle the GeoLite2 country DB when a MaxMind key is available (used for
 # the India-specific buy links); the image builds fine without it.
 MAXMIND_SECRET_ARGS=()
