@@ -1310,8 +1310,14 @@ Social
     margin-bottom: 30px;
 }
 
+/* Every tile in the grid is the same card: one box, one background, one
+   set of type. Kept as a single selector list rather than a block per card,
+   so a card cannot quietly drift out of the family -- which is exactly how
+   .second-image ended up with no chrome at all. */
 #explore .leather,
-#explore .types {
+#explore .types,
+#explore .liberated-bread,
+#explore .second-image {
     min-height: 255px;
     background-color: #f8f8f8;
     text-align: center;
@@ -1319,31 +1325,36 @@ Social
 }
 
 #explore .leather h4,
-#explore .types h4 {
+#explore .types h4,
+#explore .second-image h4 {
     font-size: 24px;
     font-weight: 700;
     color: #2a2a2a;
-    padding-top: 90px;
     margin-bottom: 5px;
 }
 
+/* .leather and .types hold a heading and nothing else, so they centre it
+   with a lead-in rather than a layout. The cards that carry an image centre
+   their contents instead, below -- 90px of padding is measured for one
+   short line and has nothing to do with the others. */
+#explore .leather h4,
+#explore .types h4 {
+    padding-top: 90px;
+}
+
 #explore .leather span,
-#explore .types span {
+#explore .types span,
+#explore .second-image span {
     font-size: 14px;
     font-style: italic;
     color: #aaa;
     font-weight: 500;
 }
 
-/* The Liberated Bread logo card. Same 255px box, same #f8f8f8 as .types, so
-   the mark and its wording read as one unit rather than two unrelated tiles;
-   flex-centred instead of .types' padding-top:90px, which is tuned for a
-   heading and not for an image. */
+/* The Liberated Bread logo card: the shared box above, with its mark
+   flex-centred in it, so the mark and the wording beside it read as one
+   unit rather than two unrelated tiles. */
 #explore .liberated-bread {
-    min-height: 255px;
-    background-color: #f8f8f8;
-    text-align: center;
-    width: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1361,10 +1372,52 @@ Social
     object-fit: cover;
 }
 
-/* Three col-lg-6 cards in a col-lg-6 column, so the row wraps: the two
-   Liberated Bread cards on the first line, the featured book beneath. The
-   wrapping cards need the gap that .first-image already carries for exactly
-   this reason, or the two lines butt together. */
+/* The featured book is the grid's second row, full width and on its own, and
+   it reads words-then-cover against the row above it. Two columns: the copy
+   takes the free space, the cover takes its 200px and spans both rows so it
+   centres against the whole of the text.
+
+   Laid out on the <a>, and placed explicitly rather than by source order,
+   because the card holds no wrapper divs -- the heading and the line under
+   it are siblings of the cover, and a nested div here would also break the
+   test helper that reads this card out of the page. */
+#explore .second-image a {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    /* The title and the line under it take rows 2 and 3; the empty 1fr
+       tracks around them split whatever the cover leaves over, which
+       centres the two as one block. Sizing the text rows themselves would
+       instead share the cover's 200px between them and open a gap down the
+       middle of the copy. */
+    grid-template-rows: 1fr auto auto 1fr;
+    align-items: center;
+    column-gap: 25px;
+    min-height: 255px;
+    padding: 25px;
+}
+
+#explore .second-image h4 {
+    grid-column: 1;
+    grid-row: 2;
+    /* Three or four lines of the owner's title, not the one short line the
+       24px in the shared rule is sized for. Same weight and colour, so it
+       still reads as the same card. */
+    font-size: 19px;
+    line-height: 1.35;
+}
+
+#explore .second-image span {
+    grid-column: 1;
+    grid-row: 3;
+}
+
+#explore .second-image img {
+    grid-column: 2;
+    grid-row: 1 / span 4;
+}
+
+/* The cards that share a line with another card need the gap under them, or
+   the two lines of the grid butt together. */
 #explore .liberated-bread,
 #explore .types {
     margin-bottom: 30px;
@@ -2293,6 +2346,30 @@ responsive
 
     .subscribe form button {
         width: 100%;
+    }
+
+    /* On a phone the card is about as wide as the cover is, so the two
+       columns would leave the title a ~100px gutter to wrap in. Stack it
+       instead, keeping the copy above the cover so the row still reads
+       words-then-image the way it does on a desktop. */
+    #explore .second-image a {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto auto;
+        justify-items: center;
+        row-gap: 15px;
+    }
+
+    #explore .second-image h4 {
+        grid-row: 1;
+    }
+
+    #explore .second-image span {
+        grid-row: 2;
+    }
+
+    #explore .second-image img {
+        grid-column: 1;
+        grid-row: 3;
     }
 
     footer {
