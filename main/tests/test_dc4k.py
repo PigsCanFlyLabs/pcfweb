@@ -56,6 +56,16 @@ P6 = (
 )
 STANDARD_COPY = "\n\n".join((P1, P2, P3, P4, P5, P6))
 STANDARD_PARAGRAPHS = (P1, P2, P3, P4, P5, P6)
+EBOOK_DELIVERY_NOTE = (
+    "Delivered by email as a DRM-free ZIP containing both the EPUB and the "
+    "PDF."
+)
+STANDARD_EBOOK_COPY = (
+    f"{STANDARD_COPY}\n\n{EBOOK_DELIVERY_NOTE}"
+)
+STANDARD_EBOOK_PARAGRAPHS = STANDARD_PARAGRAPHS + (
+    EBOOK_DELIVERY_NOTE,
+)
 
 # The Executive Edition keeps the new standard copy and appends the row's
 # existing executive-only add-on text verbatim.
@@ -295,7 +305,7 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         self.assertEqual(len(assigned), 2)
         self.assertEqual(len(set(assigned)), len(assigned))
 
-    def test_both_print_editions_offer_a_signature_and_the_ebook_does_not(self):
+    def test_both_print_editions_offer_a_signature_and_the_ebook_gets_delivery_text(self):
         # get_display_text() adds the note whenever isbn is set. That is right
         # for a printed book Holden can physically sign -- including the
         # Executive Edition, which is a print run like any other -- and is the
@@ -309,6 +319,8 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         # apostrophe-free fragment, which is how a vacuous assertion gets in.
         escaped_note = escape(Product.SIGNED_ON_REQUEST_NOTE)
         self.assertNotEqual(escaped_note, Product.SIGNED_ON_REQUEST_NOTE)
+        escaped_delivery_note = escape(EBOOK_DELIVERY_NOTE)
+        self.assertNotEqual(EBOOK_DELIVERY_NOTE, Product.SIGNED_ON_REQUEST_NOTE)
         for pk in (104, 105):
             with self.subTest(pk=pk):
                 product = Product.objects.get(pk=pk)
@@ -321,6 +333,9 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         self.assertNotIn(escaped_note, ebook.get_display_text())
         self.assertNotIn(Product.SIGNED_ON_REQUEST_NOTE,
                          ebook.get_feed_description())
+        self.assertIn(escaped_delivery_note, ebook.get_display_text())
+        self.assertIn(EBOOK_DELIVERY_NOTE,
+                      ebook.get_feed_description())
 
     def test_the_ebooks_isbn_is_left_unset_rather_than_placeheld(self):
         # A shared placeholder would emit Merchant-feed products with one id.
@@ -391,6 +406,7 @@ class DistributedComputing4KidsCatalogTest(TestCase):
 
         ebook = Product.objects.get(pk=EBOOK_PK)
         self.assertEqual(ebook.description, STANDARD_COPY)
+        self.assertEqual(ebook.get_feed_description(), STANDARD_EBOOK_COPY)
 
     def test_the_executive_copy_survives_yaml_intact(self):
         # The copy carries two double quotes, two apostrophes, a literal $ and
@@ -449,16 +465,17 @@ class DistributedComputing4KidsCatalogTest(TestCase):
                 self.assertContains(response, "Distributed Computing 4 Kids")
 
     def test_the_standard_and_ebook_pages_render_six_description_paragraphs(self):
-        for pk in (104, EBOOK_PK):
-            with self.subTest(pk=pk):
-                paragraphs = self.rendered_description_paragraphs(pk)
+        paragraphs = self.rendered_description_paragraphs(104)
 
-                self.assertEqual(paragraphs[:6], list(STANDARD_PARAGRAPHS))
-                if pk == 104:
-                    self.assertEqual(paragraphs[6], Product.SIGNED_ON_REQUEST_NOTE)
-                    self.assertEqual(len(paragraphs), 7)
-                else:
-                    self.assertEqual(len(paragraphs), 6)
+        self.assertEqual(paragraphs[:6], list(STANDARD_PARAGRAPHS))
+        self.assertEqual(paragraphs[6], Product.SIGNED_ON_REQUEST_NOTE)
+        self.assertEqual(len(paragraphs), 7)
+
+    def test_the_ebook_page_renders_the_six_paragraphs_plus_delivery_text(self):
+        paragraphs = self.rendered_description_paragraphs(EBOOK_PK)
+
+        self.assertEqual(paragraphs[:7], list(STANDARD_EBOOK_PARAGRAPHS))
+        self.assertEqual(len(paragraphs), 7)
 
     def test_the_executive_page_renders_the_six_paragraphs_plus_the_add_on(self):
         paragraphs = self.rendered_description_paragraphs(105)
