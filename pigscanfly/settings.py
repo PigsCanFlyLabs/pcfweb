@@ -64,8 +64,8 @@ def _email_encryption_flags() -> Tuple[bool, bool]:
     which refuses to boot when both are on (see the guard there). Inlining
     the getenv calls twice would let the defaults drift apart.
     """
-    return (parse_email_flag(os.getenv("EMAIL_USE_TLS", "true")),
-            parse_email_flag(os.getenv("EMAIL_USE_SSL", "false")))
+    return (parse_email_flag(os.getenv("EMAIL_USE_TLS", "false")),
+            parse_email_flag(os.getenv("EMAIL_USE_SSL", "true")))
 
 
 class Base(Configuration):
@@ -486,7 +486,14 @@ class Prod(Base):
     # burns the ten-second timeout below on every send. mail.pigscanfly.ca
     # is the machine (71.19.157.174) the apex used to point at.
     EMAIL_HOST = os.getenv("EMAIL_HOST", "mail.pigscanfly.ca")
-    EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
+    # The submissions port (RFC 8314): TLS from the first byte, and the
+    # meaning the port carries -- an authenticated client handing mail in,
+    # which is what this app is. Not 25, the MTA-to-MTA relay port, where
+    # outbound traffic is widely blocked or throttled and servers routinely
+    # refuse AUTH. If the mail server turns out not to listen on 465, the
+    # flip is port 587 with EMAIL_USE_TLS on and EMAIL_USE_SSL off
+    # (STARTTLS submission) -- in the ConfigMap, not here.
+    EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465"))
     # STARTTLS on a plaintext port versus TLS from the first byte (SMTPS,
     # port 465). At most one may be on; pre_setup fails the rollout on the
     # pair rather than letting Django's backend raise at send time -- which

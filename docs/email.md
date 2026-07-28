@@ -36,9 +36,9 @@ each other by `DeployManifestTest.test_the_mail_relay_in_the_manifest_matches_th
 | Variable | Set in | Value today |
 |---|---|---|
 | `EMAIL_HOST` | ConfigMap (deploy.yaml) | `mail.pigscanfly.ca` — the MX name, never the bare apex (see DNS below) |
-| `EMAIL_PORT` | ConfigMap | `25` |
-| `EMAIL_USE_TLS` | ConfigMap | `true` (STARTTLS) |
-| `EMAIL_USE_SSL` | ConfigMap | `false` — both on refuses to boot |
+| `EMAIL_PORT` | ConfigMap | `465`, the submissions port (RFC 8314) — not 25, the relay port, which networks block outbound and servers refuse AUTH on |
+| `EMAIL_USE_TLS` | ConfigMap | `false` (no STARTTLS; 465 is TLS from the first byte) |
+| `EMAIL_USE_SSL` | ConfigMap | `true` — both flags on refuses to boot |
 | `EMAIL_HOST_USER` | ConfigMap | `support` |
 | `EMAIL_HOST_PASSWORD` | `pcfweb-secret`, from the colo-scripts vault (`pcf_email_host_password` in `passwd.yml`, applied by `playbooks/cluster-setup.yaml`) | that mailbox's password; empty disables SMTP AUTH |
 | `EMAIL_TIMEOUT` | code default | `10` seconds |
@@ -96,9 +96,11 @@ From a prod pod (`kubectl -n pcfweb exec -it deploy/web -- bash`):
     cd /opt/app && ./manage.py sendtestemail you@example.com
 
 That exercises host, port, TLS mode, credentials and timeout in one shot and
-prints the real SMTP error on failure — including a STARTTLS certificate
-mismatch, the one thing DNS cannot tell you (the server has to present a
-certificate valid for `mail.pigscanfly.ca`). After a deploy, the passive
+prints the real SMTP error on failure — the two things DNS cannot tell you:
+whether the server actually listens on 465 (a refused or timed-out
+connection here means it does not — flip the ConfigMap to `587` with
+`EMAIL_USE_TLS` on and `EMAIL_USE_SSL` off), and whether it presents a
+certificate valid for `mail.pigscanfly.ca`. After a deploy, the passive
 signals are: `Order.notification_error` / `digital_delivery_error` in the
 admin's order list (empty on healthy sends), and `check_book_assets` output
 in the primary pod's startup log.

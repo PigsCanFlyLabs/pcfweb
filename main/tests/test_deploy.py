@@ -188,14 +188,27 @@ class ProdConfigurationGuardTest(TestCase):
         self.assertIn("pcfweb-db-config", message)
 
     def test_pre_setup_accepts_smtps_in_place_of_starttls(self):
-        # The SendGrid:465 shape -- implicit TLS with STARTTLS off -- is a
-        # configuration the guard must let through.
+        # Implicit TLS with STARTTLS off: the deployed shape (465, the
+        # submissions port). The guard must let it through.
         env = {
             "SECRET_KEY": "x" * 60,
             "STRIPE_LIVE_SECRET_KEY": "sk_live_x",
             "STRIPE_WEBHOOK_SECRET": "whsec_x",
             "EMAIL_USE_TLS": "false",
             "EMAIL_USE_SSL": "true",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            Prod.pre_setup()
+
+    def test_pre_setup_accepts_starttls_in_place_of_smtps(self):
+        # STARTTLS with implicit TLS off: the 587 fallback the ConfigMap
+        # comment offers if the server has no smtps listener.
+        env = {
+            "SECRET_KEY": "x" * 60,
+            "STRIPE_LIVE_SECRET_KEY": "sk_live_x",
+            "STRIPE_WEBHOOK_SECRET": "whsec_x",
+            "EMAIL_USE_TLS": "true",
+            "EMAIL_USE_SSL": "false",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             Prod.pre_setup()

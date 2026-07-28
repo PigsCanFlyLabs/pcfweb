@@ -40,10 +40,17 @@ data:
   # (its "mx" mechanism); if the relay ever changes, adjust that TXT record
   # where the DNS is actually served -- Cloudflare, not the retired bind
   # zone files in colo-scripts.
+  #
+  # 465 is the submissions port -- TLS from the first byte, for exactly
+  # this shape of client: authenticated, handing mail in. Not 25, the
+  # MTA-to-MTA relay port, which networks block outbound and servers often
+  # refuse AUTH on. Should the server turn out not to listen on 465, the
+  # flip is EMAIL_PORT "587" with EMAIL_USE_TLS "true" and EMAIL_USE_SSL
+  # "false" (STARTTLS submission); setting both flags on refuses to boot.
   EMAIL_HOST: "mail.pigscanfly.ca"
-  EMAIL_PORT: "25"
-  EMAIL_USE_TLS: "true"
-  EMAIL_USE_SSL: "false"
+  EMAIL_PORT: "465"
+  EMAIL_USE_TLS: "false"
+  EMAIL_USE_SSL: "true"
   EMAIL_HOST_USER: "support"
 ---
 apiVersion: apps/v1
