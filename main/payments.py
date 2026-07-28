@@ -72,16 +72,23 @@ class Payments:
         second line item in the same session, a quantity above one, an
         adjustable_quantity, a discount, and subscription mode.
         """
-        product_price = None
-        if interval is None:
-            product_price = stripe.Price.create(
-                unit_amount=price, currency=currency, product=product_id
-            )
-        else:
-            product_price = stripe.Price.create(
-                unit_amount=price, currency=currency, product=product_id,
-                recurring = {"interval": interval}
-            )
+        price_params = {
+            "unit_amount": price,
+            "currency": currency,
+            "product": product_id,
+        }
+
+        # When automatic tax is enabled, Stripe requires prices to have
+        # tax_behavior set. 'exclusive' means the unit_amount is the pre-tax
+        # price and tax is added on top (the default for physical goods and
+        # the behavior customers expect).
+        if settings.STRIPE_AUTOMATIC_TAX:
+            price_params["tax_behavior"] = "exclusive"
+
+        if interval is not None:
+            price_params["recurring"] = {"interval": interval}
+
+        product_price = stripe.Price.create(**price_params)
         return product_price['id']
 
     # Seconds. The SDK's default is ~80, far longer than Stripe's own webhook
@@ -260,7 +267,14 @@ class Payments:
 
     @staticmethod
     def _is_tax_configuration_error(error: stripe.InvalidRequestError) -> bool:
-        return error.param == "automatic_tax" or error.code == "stripe_tax_inactive"
+        # Stripe Tax not activated
+        if error.param == "automatic_tax" or error.code == "stripe_tax_inactive":
+            return True
+        # Price missing tax_behavior (required when automatic_tax is enabled)
+        message = str(error).lower()
+        if "tax" in message and "behavior" in message:
+            return True
+        return False
 
     @staticmethod
     def _is_shipping_rate_error(error: stripe.InvalidRequestError) -> bool:
