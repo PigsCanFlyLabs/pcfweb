@@ -365,6 +365,15 @@ class EverythingCheckboxTest(MailingListTestBase):
 class NextRedirectTest(MailingListTestBase):
     """Embedded forms may send a visitor back only to an allowed host."""
 
+    def assert_ignored(self, target: str):
+        response = self.client.post(SUBSCRIBE_URL, {
+            "email": "kid@example.com",
+            "next": target})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "mailing_list_result.html")
+        return response
+
     def test_an_allowlisted_absolute_https_next_gets_a_redirect(self):
         response = self.client.post(SUBSCRIBE_URL, {
             "email": "kid@example.com",
@@ -373,6 +382,23 @@ class NextRedirectTest(MailingListTestBase):
         self.assertRedirects(
             response, "https://example.com/thanks/", fetch_redirect_response=False)
         self.assertTrue(Subscription.objects.exists())
+
+    @override_settings(MAILING_LIST_ALLOWED_NEXT_HOSTS=["Example.COM"])
+    def test_a_mixed_case_allowlist_entry_accepts_a_lowercase_url(self):
+        response = self.client.post(SUBSCRIBE_URL, {
+            "email": "kid@example.com",
+            "next": "https://example.com/thanks/"})
+
+        self.assertRedirects(
+            response, "https://example.com/thanks/", fetch_redirect_response=False)
+
+    def test_a_mixed_case_url_matches_a_lowercase_allowlist_entry(self):
+        response = self.client.post(SUBSCRIBE_URL, {
+            "email": "kid@example.com",
+            "next": "https://ExAmPlE.cOm/thanks/"})
+
+        self.assertRedirects(
+            response, "https://ExAmPlE.cOm/thanks/", fetch_redirect_response=False)
 
     def test_a_json_caller_is_told_the_next_url_instead_of_being_redirected(self):
         response = self.client.post(
@@ -387,31 +413,36 @@ class NextRedirectTest(MailingListTestBase):
         self.assertTrue(response.json()["ok"])
 
     def test_an_off_allowlist_absolute_url_is_ignored(self):
-        response = self.client.post(SUBSCRIBE_URL, {
-            "email": "kid@example.com",
-            "next": "https://evil.example/landing"})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertTemplateUsed(response, "mailing_list_result.html")
+        response = self.assert_ignored("https://evil.example/landing")
         self.assertTrue(Subscription.objects.exists())
 
     def test_a_protocol_relative_next_is_ignored(self):
-        response = self.client.post(SUBSCRIBE_URL, {
-            "email": "kid@example.com",
-            "next": "//evil.example/landing"})
+        self.assert_ignored("//evil.example/landing")
 
-        self.assertEqual(response.status_code, 200)
-        self.assertTemplateUsed(response, "mailing_list_result.html")
+    def test_userinfo_and_lookalike_hosts_are_ignored(self):
+        for target in [
+                "https://allowed.example@evil.com/landing",
+                "https://example.com@evil.com/landing",
+                "https://еxample.com/landing",
+        ]:
+            with self.subTest(target=target):
+                self.assert_ignored(target)
+
+    def test_backslash_forms_are_ignored(self):
+        for target in [
+                r"https:\evil.example\landing",
+                r"https://example.com\@evil.example/landing",
+        ]:
+            with self.subTest(target=target):
+                self.assert_ignored(target)
 
     def test_scheme_targets_like_javascript_and_data_are_ignored(self):
         for target in ["javascript:alert(1)", "data:text/html,owned"]:
             with self.subTest(target=target):
-                response = self.client.post(SUBSCRIBE_URL, {
-                    "email": "kid@example.com",
-                    "next": target})
+                self.assert_ignored(target)
 
-                self.assertEqual(response.status_code, 200)
-                self.assertTemplateUsed(response, "mailing_list_result.html")
+    def test_http_to_an_allowlisted_host_is_ignored(self):
+        self.assert_ignored("http://example.com/thanks/")
 
     def test_repeated_next_uses_djangos_last_value_and_checks_that_one(self):
         response = self.client.post(
@@ -430,12 +461,7 @@ class NextRedirectTest(MailingListTestBase):
                 "https://example.com/thanks/%0d%0aLocation:%20https://evil.example/",
         ]:
             with self.subTest(target=target):
-                response = self.client.post(SUBSCRIBE_URL, {
-                    "email": "kid@example.com",
-                    "next": target})
-
-                self.assertEqual(response.status_code, 200)
-                self.assertTemplateUsed(response, "mailing_list_result.html")
+                self.assert_ignored(target)
 
     def test_encoded_and_double_encoded_redirect_forms_are_ignored(self):
         for target in [
@@ -443,12 +469,7 @@ class NextRedirectTest(MailingListTestBase):
                 "https%253A%252F%252Fevil.example%252Flanding",
         ]:
             with self.subTest(target=target):
-                response = self.client.post(SUBSCRIBE_URL, {
-                    "email": "kid@example.com",
-                    "next": target})
-
-                self.assertEqual(response.status_code, 200)
-                self.assertTemplateUsed(response, "mailing_list_result.html")
+                self.assert_ignored(target)
 
 
 class ConfirmAndUnsubscribeTest(MailingListTestBase):

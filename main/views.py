@@ -1283,6 +1283,13 @@ class MailingListSubscribeView(View):
     ENCODED_CONTROL = re.compile(r"%(?:0[0-9a-f]|1[0-9a-f]|7f)",
                                  flags=re.IGNORECASE)
 
+    @staticmethod
+    def normalized_netloc(netloc: str) -> str:
+        # Hostnames are case-insensitive. `lower()`, not `casefold()`, keeps
+        # this to straightforward case normalisation rather than broader
+        # Unicode folding, so a homograph does not collapse onto ASCII.
+        return netloc.lower()
+
     def next_url(self) -> str:
         form = getattr(self, "_form", None)
         if form is None:
@@ -1298,7 +1305,9 @@ class MailingListSubscribeView(View):
         if self.ENCODED_CONTROL.search(target):
             return ""
 
-        allowed = set(getattr(settings, "MAILING_LIST_ALLOWED_NEXT_HOSTS", ()))
+        allowed = {self.normalized_netloc(entry)
+                   for entry in getattr(settings,
+                                        "MAILING_LIST_ALLOWED_NEXT_HOSTS", ())}
         if not allowed:
             return ""
 
@@ -1306,10 +1315,12 @@ class MailingListSubscribeView(View):
             parsed = urlparse(target)
         except ValueError:
             return ""
-        if parsed.netloc not in allowed:
+        normalized_netloc = self.normalized_netloc(parsed.netloc)
+        if normalized_netloc not in allowed:
             return ""
+        normalized_target = parsed._replace(netloc=normalized_netloc).geturl()
         if not url_has_allowed_host_and_scheme(
-                target, allowed, require_https=True):
+                normalized_target, allowed, require_https=True):
             return ""
         return target
 

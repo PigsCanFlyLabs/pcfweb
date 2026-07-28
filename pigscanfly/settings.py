@@ -56,6 +56,17 @@ def parse_shipping_rates(raw: str) -> List[str]:
     return parse_comma_list(raw)
 
 
+def parse_lowercase_comma_list(raw: str) -> List[str]:
+    """Split a comma-separated setting and lowercase each entry.
+
+    Hostnames are case-insensitive, so a mixed-case allowlist entry should not
+    silently stop a legitimate redirect from matching. `lower()`, not
+    `casefold()`: this is ASCII-style hostname normalisation, not broader
+    Unicode equivalence.
+    """
+    return [item.lower() for item in parse_comma_list(raw)]
+
+
 def parse_invite_half(raw: str) -> str:
     """Clean one half of the Discord invite (see DISCORD_INVITE_PART_ONE).
 
@@ -346,9 +357,9 @@ class Base(Configuration):
         os.getenv("MAILING_LIST_SIGNUP_RATE_LIMIT"), 20)
 
     # Absolute hosts the embeddable signup form may redirect back to through
-    # its `next` field. Exact netlocs only, so a host with a port must be
-    # listed with that port.
-    MAILING_LIST_ALLOWED_NEXT_HOSTS: List[str] = parse_comma_list(
+    # its `next` field. Matched case-insensitively, but still as exact netlocs,
+    # so a host with a port must be listed with that port.
+    MAILING_LIST_ALLOWED_NEXT_HOSTS: List[str] = parse_lowercase_comma_list(
         os.getenv("MAILING_LIST_ALLOWED_NEXT_HOSTS", ""))
 
     # How many freshly imported addresses the import page will email the
