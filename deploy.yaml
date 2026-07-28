@@ -24,6 +24,26 @@ data:
   # both halves and /discord becomes the "e-mail us for an invite" page.
   DISCORD_INVITE_PART_ONE: "https://discord.gg/aVU2"
   DISCORD_INVITE_PART_TWO: "2HAmb"
+  # OUTBOUND MAIL -- the relay for order notifications, download links, the
+  # book-asset audit and Django's 500 reports to ADMINS. These mirror the
+  # Prod defaults in pigscanfly/settings.py, and a test pins the two files
+  # to each other; change the relay here (plus a pod restart), not with a
+  # rebuild. The one secret piece, EMAIL_HOST_PASSWORD, stays in
+  # pcfweb-secret -- provisioned out of the colo-scripts vault
+  # (playbooks/cluster-setup.yaml) -- and an empty password just turns SMTP
+  # AUTH off. The full path, DNS included, is docs/email.md.
+  #
+  # To send through SendGrid instead (what alertmanager and the health stack
+  # already use): EMAIL_HOST smtp.sendgrid.net, EMAIL_PORT 587 with TLS on
+  # (or 465 with EMAIL_USE_SSL on and TLS off), EMAIL_HOST_USER apikey, and
+  # the API key as the password. Mind the SPF record in colo-scripts
+  # (playbooks/files/bind-zones/pigscanfly.ca.): the sender's network has to
+  # be listed there or recipients will soft-fail the mail into spam.
+  EMAIL_HOST: "pigscanfly.ca"
+  EMAIL_PORT: "25"
+  EMAIL_USE_TLS: "true"
+  EMAIL_USE_SSL: "false"
+  EMAIL_HOST_USER: "support"
 ---
 apiVersion: apps/v1
 kind: Deployment
