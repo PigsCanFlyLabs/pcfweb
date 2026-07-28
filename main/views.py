@@ -1047,6 +1047,10 @@ class CheckoutView(View, BaseCartView):
         if not cart.products.exists():
             # Stripe rejects a session with no line items anyway; bailing here
             # keeps empty checkouts from leaving orphan PENDING orders behind.
+            messages.error(
+                request,
+                "Your cart is empty. Add something to your cart before "
+                "checking out.")
             return redirect('cart')
         # Stock is re-checked here, not just at add-to-cart: a cart can sit for
         # days, and stock is edited by hand in the admin, so what was

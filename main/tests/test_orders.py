@@ -76,6 +76,13 @@ class CheckoutCreatesOrderTest(OrderTestBase):
             self.assertEqual(params["metadata"], {"order_id": str(order.pk)})
         self.assertEqual(order.stripe_session_id, "cs_after_retry")
 
+    def test_an_empty_cart_checkout_lands_on_an_explanation(self):
+        response = self.client.post("/checkout", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        self.assertContains(response, "Your cart is empty.")
+        self.assertFalse(Order.objects.exists())
+
     def test_a_logged_in_buyers_order_is_attached_to_them(self):
         user = User.objects.create_user(
             username="buyer", email="buyer@example.com",
