@@ -3,13 +3,16 @@
 import re
 from unittest import mock
 
-from django.contrib.auth.models import User
+from django.contrib import messages
+from django.contrib.auth.models import AnonymousUser, User
+from django.contrib.messages.middleware import MessageMiddleware
+from django.contrib.sessions.middleware import SessionMiddleware
 from django.db import IntegrityError, transaction
-from django.test import Client
+from django.test import Client, RequestFactory
 
 from main.models import Cart, CartProduct, Product
 from main.tests.base import CartTestBase
-from main.views import AddToCartView
+from main.views import AddToCartView, CartView
 
 
 class CartOwnershipTest(CartTestBase):
@@ -62,6 +65,25 @@ class CartOwnershipTest(CartTestBase):
         self.client.post("/add-to-cart/100/1")
 
         self.assertFalse(CartProduct.objects.filter(cart=user_cart).exists())
+
+
+class CartMessageLayoutTest(CartTestBase):
+    def test_cart_messages_render_in_the_global_header_clearance_region(self):
+        request = RequestFactory().get("/cart")
+        request.user = AnonymousUser()
+        SessionMiddleware(lambda r: None).process_request(request)
+        request.session.save()
+        MessageMiddleware(lambda r: None).process_request(request)
+        messages.warning(request, "Checkout feedback")
+
+        response = CartView.as_view()(request)
+        html = response.content.decode()
+
+        self.assertIn('class="site-messages"', html)
+        self.assertIn("data-site-messages", html)
+        self.assertLess(
+            html.index('class="site-messages"'),
+            html.index('<div class="cart">'))
 
 
 class CartHttpMethodTest(CartTestBase):
