@@ -36,7 +36,7 @@ BOOKSHOP_EBOOK_URLS = {
         "4dc16509c22353e3?ean=9781098118761"
     ),
 }
-BOOKSHOP_EBOOK_ABSENT_PKS = [100, 101, 104, 105, 106, 107]
+BOOKSHOP_EBOOK_ABSENT_PKS = [100, 101, 104, 105, 106, 107, 108]
 
 # Every column whose contents can reach <g:gtin>. get_gtin() is
 # `print_isbn or ebook_isbn or upc`, so both of those carry a GTIN on their
