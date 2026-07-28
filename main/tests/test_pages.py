@@ -574,7 +574,10 @@ class HomePageCardsTest(TestCase):
 
         logo = section.index("liberated-bread-logo-512.png")
         wording = section.index(
-            html_module.escape(self.LIBERATED_BREAD_TAGLINE))
+            self.LIBERATED_BREAD_TAGLINE)
+        self.assertLess(
+            logo, wording,
+            "the Liberated Bread logo card should precede its wording")
         between = section[logo:wording]
 
         # Nothing else's card sits between them.
@@ -586,7 +589,7 @@ class HomePageCardsTest(TestCase):
         section = self.explore_section()
 
         self.assertIn(
-            f"<span>{html_module.escape(self.LIBERATED_BREAD_TAGLINE)}</span>",
+            f"<span>{self.LIBERATED_BREAD_TAGLINE}</span>",
             section)
         self.assertIn("Liberated Bread <span", section)
         self.assertIn(">Coming Soon</span>", section)
@@ -597,7 +600,7 @@ class HomePageCardsTest(TestCase):
         section = self.explore_section()
 
         self.assertIn(
-            html_module.escape("Liberating your toaster since '26"),
+            "Liberating your toaster since '26",
             section)
 
     def test_the_featured_book_card_links_to_the_seeded_product(self):
@@ -770,10 +773,15 @@ class HomePageCardsTest(TestCase):
 
         logo = section.index("liberated-bread-logo-512.png")
         bread_copy = section.index(
-            html_module.escape(self.LIBERATED_BREAD_TAGLINE))
+            self.LIBERATED_BREAD_TAGLINE)
         self.assertLess(
             logo, bread_copy,
             "the first row should read image-then-text")
+        first_row = section[logo:bread_copy]
+        self.assertNotIn(
+            "second-image", first_row,
+            "the first row should not have another card between the "
+            "Liberated Bread logo and copy")
 
         card = self.featured_book_card()
         book_copy = card.index(self.FEATURED_CARD_COPY)
