@@ -35,6 +35,10 @@ class MailingListSignupForm(forms.Form):
     # submission with it set is answered exactly like a real one so whatever
     # filled it cannot tell the difference.
     website = forms.CharField(max_length=200, required=False)
+    # Where to send the visitor afterwards, so an embedded form can land them
+    # back on its own site. Deliberately a plain CharField: the view has to be
+    # able to ignore a bad target without rejecting the signup itself.
+    next = forms.CharField(required=False)
 
     def clean_email(self) -> str:
         return normalize_email(self.cleaned_data["email"])

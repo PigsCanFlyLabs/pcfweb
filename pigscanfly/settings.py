@@ -16,6 +16,8 @@ from pathlib import Path
 from configurations import Configuration
 from django.core.exceptions import ImproperlyConfigured
 
+from pigscanfly.hostnames import ascii_lowercase
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -54,6 +56,18 @@ def parse_shipping_rates(raw: str) -> List[str]:
     resource_missing that fails every physical checkout.
     """
     return parse_comma_list(raw)
+
+
+def parse_lowercase_comma_list(raw: str) -> List[str]:
+    """Split a comma-separated setting and ASCII-lowercase each entry.
+
+    Hostnames are case-insensitive, so a mixed-case allowlist entry should not
+    silently stop a legitimate redirect from matching. Lower only ASCII A-Z:
+    Python's Unicode lowercasing maps U+212A KELVIN SIGN to ASCII "k", and
+    the allowlist must stay in lockstep with the incoming-host normalizer
+    about preserving non-ASCII lookalikes exactly.
+    """
+    return [ascii_lowercase(item) for item in parse_comma_list(raw)]
 
 
 def parse_invite_half(raw: str) -> str:
@@ -402,6 +416,12 @@ class Base(Configuration):
     # generous because a school or an office is one address to us. 0 disables.
     MAILING_LIST_SIGNUP_RATE_LIMIT = parse_int(
         os.getenv("MAILING_LIST_SIGNUP_RATE_LIMIT"), 20)
+
+    # Absolute hosts the embeddable signup form may redirect back to through
+    # its `next` field. Matched case-insensitively, but still as exact netlocs,
+    # so a host with a port must be listed with that port.
+    MAILING_LIST_ALLOWED_NEXT_HOSTS: List[str] = parse_lowercase_comma_list(
+        os.getenv("MAILING_LIST_ALLOWED_NEXT_HOSTS", ""))
 
     # How many freshly imported addresses the import page will email the
     # "we've updated our list" notice to. Above this it imports and says to

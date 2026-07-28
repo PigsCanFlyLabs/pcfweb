@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from typing import *
 from django.conf import settings
@@ -22,6 +22,7 @@ from django.http import (
     JsonResponse)
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import NoReverseMatch, reverse
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views import View
@@ -41,6 +42,7 @@ from main.models import (
 from main.payments import Payments
 from main.utils import (
     generate_username, get_country_code, get_storable_client_ip)
+from pigscanfly.hostnames import ascii_lowercase
 
 logger = logging.getLogger(__name__)
 
@@ -1241,6 +1243,8 @@ class MailingListSubscribeView(View):
                 'message': error,
             }, status=400)
 
+        self._form = form
+
         if form.is_bot():
             # Answered exactly like a success, minus the subscription: telling
             # a bot it was caught only teaches whoever wrote it.
@@ -1276,13 +1280,63 @@ class MailingListSubscribeView(View):
               "check your email for a link to confirm.")
 
     def respond(self, request):
+        target = self.next_url()
         if self.wants_json(request):
-            return self.json_response({"ok": True, "message": self.ANSWER})
+            payload = {"ok": True, "message": self.ANSWER}
+            if target:
+                payload["next"] = target
+            return self.json_response(payload)
+        if target:
+            return redirect(target)
         return render(request, 'mailing_list_result.html', context={
             'title': 'Subscribe for updates',
             'ok': True,
             'message': self.ANSWER,
         })
+
+    ENCODED_CONTROL = re.compile(r"%(?:0[0-9a-f]|1[0-9a-f]|7f)",
+                                 flags=re.IGNORECASE)
+
+    @staticmethod
+    def normalized_netloc(netloc: str) -> str:
+        # Lower only ASCII A-Z. Python's Unicode lower() maps U+212A KELVIN
+        # SIGN to ASCII "k", so non-ASCII lookalikes must pass through
+        # unchanged instead of collapsing onto an allowlisted ASCII host.
+        return ascii_lowercase(netloc)
+
+    def next_url(self) -> str:
+        form = getattr(self, "_form", None)
+        if form is None:
+            return ""
+        return self.allowed_next(form.cleaned_data.get("next", ""))
+
+    def allowed_next(self, target: str) -> str:
+        target = (target or "").strip()
+        if not target:
+            return ""
+        if any(ord(char) < 32 or ord(char) == 127 for char in target):
+            return ""
+        if self.ENCODED_CONTROL.search(target):
+            return ""
+
+        allowed = {self.normalized_netloc(entry)
+                   for entry in getattr(settings,
+                                        "MAILING_LIST_ALLOWED_NEXT_HOSTS", ())}
+        if not allowed:
+            return ""
+
+        try:
+            parsed = urlparse(target)
+        except ValueError:
+            return ""
+        normalized_netloc = self.normalized_netloc(parsed.netloc)
+        if normalized_netloc not in allowed:
+            return ""
+        normalized_target = parsed._replace(netloc=normalized_netloc).geturl()
+        if not url_has_allowed_host_and_scheme(
+                normalized_target, allowed, require_https=True):
+            return ""
+        return target
 
     # Confirmations one address can be sent per hour, whoever asks. Low: there
     # is no legitimate reason to need a fourth, and this is the ceiling on
