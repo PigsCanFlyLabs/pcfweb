@@ -2,9 +2,9 @@
 
 import html as html_module
 import re
+from datetime import datetime
 from unittest import mock
 
-from django.template import Context, Template
 from django.test import TestCase, override_settings
 
 from main.models import Product
@@ -897,13 +897,51 @@ class FamilyPageTest(TestCase):
         self.assertTemplateUsed(response, "family.html")
 
 
+class FrozenDatetime(datetime):
+    """A datetime whose ``now()`` is pinned to :data:`FROZEN_YEAR`.
+
+    A subclass rather than a Mock so that every other use of the patched
+    symbol keeps behaving like a real datetime; only ``now()`` is stolen.
+    """
+
+    frozen_year = 2000
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(cls.frozen_year, 6, 15, 12, 0, 0, tzinfo=tz)
+
+
+def frozen_at(year):
+    """A ``FrozenDatetime`` subclass reporting ``year`` from ``now()``."""
+    return type("FrozenAt%d" % year, (FrozenDatetime,),
+                {"frozen_year": year})
+
+
 class FooterCopyrightTest(TestCase):
     """The footer copyright range, which every page inherits from base.html.
 
-    Every expectation here is derived from the clock the template itself
-    reads, so no assertion in this class can start failing on a 1 January
-    purely because the wall clock advanced.
+    The point of these tests is that the end of the range *follows a clock*
+    rather than being pinned to a literal. That property is impossible to
+    check against the real clock: today the live year and any freshly
+    hardcoded year are the same number, so an oracle built on the current
+    year passes just as happily against a literal template. Instead the
+    clock the tag actually reads is frozen to two years that are not this
+    year and cannot both be satisfied by any single literal.
+
+    Nothing here compares against a hardcoded *current* year, so no
+    assertion in this class can start failing because a new year began.
     """
+
+    # Deliberately far-future and mutually exclusive: a template frozen at
+    # either one would fail the other.
+    FROZEN_YEARS = (2031, 2043)
+
+    # `{% now %}` is rendered by django.template.defaulttags.NowNode, which
+    # calls `datetime.now(tz=...)` against the `datetime` symbol imported
+    # into that module -- NOT django.utils.timezone.now(), which it only
+    # consults for the tzinfo argument. Patching timezone.now would leave
+    # the tag reading the real clock and quietly prove nothing.
+    NOW_SYMBOL = "django.template.defaulttags.datetime"
 
     def footer_years(self):
         response = self.client.get("/privacy")
@@ -919,9 +957,24 @@ class FooterCopyrightTest(TestCase):
         start, _ = self.footer_years()
         self.assertEqual(start, 2022)
 
-    def test_footer_copyright_ends_at_the_current_year(self):
-        # Compared against the same tag the footer uses, so this tracks the
-        # clock instead of pinning a year that would rot.
-        start, end = self.footer_years()
-        self.assertEqual(end, int(Template('{% now "Y" %}').render(Context())))
-        self.assertGreaterEqual(end, start)
+    def test_footer_copyright_end_year_follows_the_clock(self):
+        """A literal end year cannot track two different frozen clocks.
+
+        If the template is ever changed back to a hardcoded year this
+        fails, whatever year is hardcoded -- including the current one.
+        """
+        for year in self.FROZEN_YEARS:
+            with self.subTest(frozen_year=year):
+                with mock.patch(self.NOW_SYMBOL, frozen_at(year)):
+                    _, end = self.footer_years()
+                self.assertEqual(
+                    end, year,
+                    "footer end year did not follow a clock frozen at "
+                    f"{year}; it is not reading the clock")
+
+    def test_footer_copyright_shows_the_real_year_when_not_frozen(self):
+        """The frozen tests above would also pass on a template hardcoded
+        to 2031, so pin the unfrozen render to the real clock too. Read
+        from the same symbol the tag reads, so it cannot drift or rot."""
+        _, end = self.footer_years()
+        self.assertEqual(end, datetime.now().year)
