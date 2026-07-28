@@ -138,6 +138,13 @@ class ProdConfigurationGuardTest(TestCase):
         self.assertIn("connect_timeout", options)
         self.assertIn("timeout", options["pool"])
 
+    def test_the_mail_connection_is_bounded(self):
+        # Same failure shape as the database: an SMTP host that drops packets
+        # makes send_mail block for the OS TCP timeout. That hang happens
+        # inside the Stripe webhook and during primary startup, so it must be
+        # bounded well under the 60s gunicorn worker timeout.
+        self.assertLess(Prod.EMAIL_TIMEOUT, 60)
+
 
 class ProdSecretPreflightTest(SimpleTestCase):
     """build.sh checks pcfweb-secret before pushing, against a list it has to

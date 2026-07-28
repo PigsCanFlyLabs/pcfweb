@@ -114,11 +114,13 @@ class BookAssetAuditTest(BookAssetRootMixin, TestCase):
         self.assertIn("not a usable digital asset name", problems[0][1])
 
     def test_titles_we_do_not_distribute_are_not_reported(self):
-        """The O'Reilly books are DIGITAL with sells_ebook unset.
+        """sells_ebook off takes a product out of the audit entirely.
 
-        They carry no archive and never will, so reporting them would mean
-        mailing the owner a list of non-problems on every restart -- which is
-        how the one real entry gets skimmed past.
+        That flag means the rights to hand out the file are not ours, so no
+        archive of it should ever be in this image and delivery will withhold
+        the order anyway (and say so, per order). Reporting its absent file as
+        "missing" would mean mailing the owner a non-problem on every restart
+        -- which is how the one real entry gets skimmed past.
         """
         Product.objects.filter(pk=EBOOK_PK).update(sells_ebook=False)
 

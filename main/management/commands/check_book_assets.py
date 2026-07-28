@@ -71,11 +71,14 @@ def audit_digital_assets() -> List[Tuple[Product, str]]:
     """Every digitally-fulfilled product whose archive cannot be served.
 
     Scoped to ``is_digitally_fulfilled()`` -- DIGITAL *and* sells_ebook --
-    because that is exactly the set the webhook will try to deliver. The
-    O'Reilly titles are DIGITAL with sells_ebook unset (we do not hold the
-    distribution rights), carry no asset name and never will, so including
-    them would mean mailing the owner a list of non-problems on every
-    restart, which is how a real one gets skimmed past.
+    because that is exactly the set the webhook will try to deliver. A row
+    that is DIGITAL with sells_ebook unset is the rights interlock's
+    territory, not this audit's: nothing will be sent for it whatever files
+    exist (think an O'Reilly title mis-flipped to DIGITAL -- theirs to
+    distribute, so no archive of it should ever be in this image), and
+    delivery already reports each withheld order loudly (WITHHELD_MESSAGE).
+    Calling its absent file "missing" here would mean mailing the owner a
+    non-problem on every restart, which is how a real one gets skimmed past.
 
     Returns (product, problem) pairs, ordered by pk for a stable report.
     """
@@ -111,9 +114,10 @@ def report_body(problems: List[Tuple[Product, str]]) -> str:
         "",
     ]
     for product, problem in problems:
+        stem = (repr(product.digital_asset_name)
+                if product.digital_asset_name else "(unset)")
         lines += [
-            f"* {product.name} (product #{product.pk}, "
-            f"asset name {product.digital_asset_name or '(unset)'!r})",
+            f"* {product.name} (product #{product.pk}, asset name {stem})",
             f"    {problem}",
         ]
     lines += ["", REMEDY]
