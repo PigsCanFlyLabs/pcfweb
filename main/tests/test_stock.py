@@ -1,8 +1,10 @@
 """Tests for manually managed Product stock."""
 
+from importlib import import_module
 from io import StringIO
 from unittest import mock
 
+from django.apps import apps as django_apps
 from django.contrib import admin
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -400,3 +402,111 @@ class DigitalStockExemptionTest(TestCase):
                 self.assertTrue(product.is_out_of_stock())
                 self.assertFalse(product.is_purchasable())
                 self.assertEqual(product.buy_text(), "Out of Stock")
+
+
+class BookStockBackfillMigrationTest(TestCase):
+    """0017_backfill_book_stock: the print books get a launch stock.
+
+    Driven by calling the migration's own forward function rather than by
+    letting the test runner apply it. The runner builds the test database by
+    migrating an empty one and only then loading ``fixtures``, so by the time
+    these rows exist the migration has long since run against nothing -- the
+    same ordering that makes it a no-op on a genuinely fresh database. Calling
+    the function directly puts it in front of the data it was written for,
+    which is the state every database that already has a catalogue is in.
+
+    Asserts on purchasability rather than on the number, so it still means
+    something if the launch figure is ever revised.
+    """
+
+    fixtures = ["initial_products"]
+
+    MIGRATION = "main.migrations.0017_backfill_book_stock"
+
+    PRINT_BOOK_PKS = (100, 101, 102, 103, 104, 105)
+    EBOOK_PK = 106
+    NOORDER_PK = 107
+
+    def run_migration(self):
+        # The module name starts with a digit, so it cannot be imported with
+        # an import statement.
+        module = import_module(self.MIGRATION)
+        module.backfill_book_stock(django_apps, None)
+
+    def test_the_print_books_start_unpurchasable(self):
+        # The premise. If this ever fails the backfill has become pointless
+        # and the rest of this class is testing nothing.
+        for pk in self.PRINT_BOOK_PKS:
+            with self.subTest(pk=pk):
+                product = Product.objects.get(pk=pk)
+                self.assertEqual(product.stock, 0)
+                self.assertFalse(product.is_purchasable())
+
+    def test_the_backfill_makes_every_print_book_purchasable(self):
+        self.run_migration()
+
+        for pk in self.PRINT_BOOK_PKS:
+            with self.subTest(pk=pk):
+                product = Product.objects.get(pk=pk)
+                self.assertTrue(product.is_purchasable())
+                self.assertFalse(product.is_out_of_stock())
+                self.assertEqual(product.buy_text(), "Add to Cart")
+                self.assertEqual(product.get_availability(), "in_stock")
+                self.assertEqual(product.stock_description(), "")
+
+    def test_a_hand_set_stock_is_never_clobbered(self):
+        # The property that makes this safe to run against production, where
+        # someone may already have typed a real count into the admin.
+        # Deliberately a number the backfill would never write, and one that
+        # is lower than it, so an overwrite shows up as an increase.
+        Product.objects.filter(pk=103).update(stock=7)
+
+        self.run_migration()
+
+        self.assertEqual(Product.objects.get(pk=103).stock, 7)
+
+    def test_re_running_the_backfill_changes_nothing_further(self):
+        # Idempotency: a second application must not stack on the first, and
+        # must not disturb a hand-set value it skipped the first time either.
+        Product.objects.filter(pk=103).update(stock=7)
+
+        self.run_migration()
+        first = {p.pk: p.stock for p in Product.objects.order_by("pk")}
+        self.run_migration()
+        second = {p.pk: p.stock for p in Product.objects.order_by("pk")}
+
+        self.assertEqual(first, second)
+
+    def test_the_digital_ebook_is_left_alone(self):
+        # A download has no unit count to run out of, and is already exempt
+        # from the stock gate -- see DigitalStockExemptionTest. Writing a
+        # number here would be meaningless at best and would read as real
+        # inventory to whoever looked next.
+        self.run_migration()
+
+        ebook = Product.objects.get(pk=self.EBOOK_PK)
+        self.assertEqual(ebook.stock, 0)
+        self.assertTrue(ebook.is_purchasable())
+
+    def test_a_noorder_product_is_left_alone(self):
+        # Not sold through this site, so stock cannot make it purchasable and
+        # setting one would only matter if noorder were later cleared -- at
+        # which point the row would go live carrying a count nobody chose.
+        self.run_migration()
+
+        product = Product.objects.get(pk=self.NOORDER_PK)
+        self.assertEqual(product.stock, 0)
+        self.assertFalse(product.is_purchasable())
+
+    def test_the_reverse_leaves_the_data_alone(self):
+        # Blanket-zeroing on reverse would take the catalogue out of stock and
+        # destroy any hand-set count, so the reverse is a deliberate no-op.
+        module = import_module(self.MIGRATION)
+        Product.objects.filter(pk=103).update(stock=7)
+        self.run_migration()
+        before = {p.pk: p.stock for p in Product.objects.order_by("pk")}
+
+        module.reverse_backfill(django_apps, None)
+
+        after = {p.pk: p.stock for p in Product.objects.order_by("pk")}
+        self.assertEqual(before, after)
