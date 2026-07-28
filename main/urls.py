@@ -1,8 +1,20 @@
 from django.conf import settings
 from django.conf.urls.static import static
+from django.contrib.staticfiles import views as staticfiles_views
+from django.http import Http404
 from django.urls import path
+from django.views.static import serve as static_serve
 
 from main import views
+
+
+def dev_static_serve(request, path):
+    """Serve live source static files, falling back to generated STATIC_ROOT."""
+    try:
+        return staticfiles_views.serve(request, path)
+    except Http404:
+        return static_serve(request, path, document_root=settings.STATIC_ROOT)
+
 
 urlpatterns = [
     # Products
@@ -76,4 +88,4 @@ if settings.MEDIA_URL is not None:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
 if settings.STATIC_URL is not None:
-    urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
+    urlpatterns += static(settings.STATIC_URL, view=dev_static_serve)
