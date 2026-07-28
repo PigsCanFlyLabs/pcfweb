@@ -23,6 +23,15 @@ set -x
 
 ./scripts/checks.sh
 ./scripts/check-image-assets.sh static/assets/images "collected static image assets"
+
+# The seal on the artifact. checks.sh already pre-generated these; this asks
+# the different question -- is every thumbnail the site requests actually a
+# real file in the tree about to be COPYd into the image? Read-only on
+# purpose: a check that generates what it cannot find can never fail, and the
+# whole failure being guarded against was a URL whose file was not where the
+# next request looked for it. Cheap, and it is the last point before the image
+# is sealed and pushed.
+./manage.py pregenerate_thumbnails --check
 # deploy.yaml is the single source of truth for the image tag.
 TAG=$(grep -oE 'holdenk/pcfweb:[A-Za-z0-9._-]+' deploy.yaml | head -1)
 
