@@ -409,6 +409,16 @@ LFS quota is exhausted, where clones still succeed and just hand back pointers
 `book-assets/` is in `.gitignore` and **deliberately not** in `.dockerignore`;
 adding it there ships an image with no books in it.
 
+That build guard only sees the files it is handed, so it cannot know which
+books the catalogue expects. `manage.py check_book_assets` is the other half:
+the primary pod runs it on start, right after `seed_products`, and for every
+product that is `DIGITAL` with `sells_ebook` set it opens
+`<digital_asset_name>.zip` under `BOOK_ASSET_ROOT`. Anything it cannot open is
+logged at `ERROR` **and** emailed to `ADMINS`, because the alternative first
+notice is a customer who has already paid. It never fails startup (pass
+`--fail` if you want the exit code, `--no-email` to keep it to the log), so
+one undeliverable book does not stop the site from serving everything else.
+
 ### Region-specific buy links
 
 Books carry `amazon_link` and `bookshop_link` (shown to everyone) plus
@@ -544,8 +554,8 @@ The Kubernetes objects:
   `Cluster` (3 instances, 10Gi `encrypted-local-path` storage, nightly
   backups to B2), plus manual `Backup` and nightly `ScheduledBackup`.
 - `deploy.yaml` — the app: `web-primary` (1 replica; runs `migrate` +
-  `seed_products` on start), `web` (3 replicas), `web-svc`, and the ingress
-  for `www.pigscanfly.ca`.
+  `seed_products` + `check_book_assets` on start), `web` (3 replicas),
+  `web-svc`, and the ingress for `www.pigscanfly.ca`.
 
 The app reaches Postgres through the operator-created `pcfweb-pg-rw`
 Service; `DBHOST`/`DBNAME`/`DBUSER` are set directly in `deploy.yaml` and

@@ -506,6 +506,17 @@ class Prod(Base):
 
     EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
     EMAIL_HOST = os.getenv("EMAIL_HOST", "pigscanfly.ca")
+    # Django's SMTP backend has no timeout by default, so a mail host that
+    # drops packets (as distinct from refusing the connection) blocks
+    # send_mail for the OS TCP timeout -- minutes. Every send_mail call here
+    # runs somewhere that cannot afford that: inside the Stripe webhook,
+    # where a hang past GUNICORN_TIMEOUT gets the worker killed mid-request
+    # (the same reasoning as the database connect_timeout above and
+    # STRIPE_TIMEOUT), or during primary startup (check_book_assets), where
+    # it would eat into build.sh's 300s rollout budget. Mail that cannot be
+    # sent in ten seconds is mail that is not getting sent; every caller
+    # already catches the failure and records it.
+    EMAIL_TIMEOUT = 10
     EMAIL_USE_TLS = True
     EMAIL_PORT = 25
     EMAIL_USE_SSL = False
