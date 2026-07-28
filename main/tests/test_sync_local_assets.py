@@ -797,9 +797,12 @@ class CallerContractTest(SimpleTestCase):
         self.assertNotIn("cp -af ../pcfweb-assets/images", build)
         self.assertNotIn("ASSET_MAX_BYTES", build)
 
-    def test_run_local_calls_the_sync_in_warn_mode(self):
-        self.assertIn("./scripts/sync-local-assets.sh --warn",
-                      RUN_LOCAL.read_text())
+    def test_run_local_keeps_present_asset_tree_faults_fatal(self):
+        source = RUN_LOCAL.read_text()
+
+        self.assertIn('if [ -d "$source_images" ]; then', source)
+        self.assertIn("./scripts/sync-local-assets.sh", source)
+        self.assertNotIn("./scripts/sync-local-assets.sh --warn", source)
 
     def test_run_local_syncs_after_the_production_guard(self):
         """#27's refusal stays first: no file is copied in a prod shell."""
@@ -814,12 +817,20 @@ class CallerContractTest(SimpleTestCase):
         self.assertLess(source.index("sync-local-assets.sh"),
                         source.index("runserver_plus"))
 
-    def test_run_local_treats_only_exit_three_as_survivable(self):
-        """A crash in the sync script itself must still stop the script."""
+    def test_run_local_only_allows_a_genuinely_absent_asset_tree(self):
+        """Broken present trees are fatal; absent sibling checkouts are loud."""
         source = RUN_LOCAL.read_text()
 
-        self.assertIn('[ "$asset_status" -ne 3 ]', source)
-        self.assertIn('exit "$asset_status"', source)
+        self.assertIn("asset_tree_absent=yes", source)
+        self.assertIn(
+            "pregenerate_thumbnails --allow-absent-asset-tree", source)
+        self.assertIn(
+            "check-local-runtime.sh --allow-absent-asset-tree", source)
+
+    def test_run_local_serves_static_root_instead_of_staticfiles_finders(self):
+        source = RUN_LOCAL.read_text()
+
+        self.assertIn("runserver_plus --nostatic", source)
 
     def test_run_local_checks_the_book_archives_without_requiring_them(self):
         source = RUN_LOCAL.read_text()

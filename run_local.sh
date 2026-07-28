@@ -89,8 +89,7 @@ python manage.py migrate
 python manage.py seed_products
 
 # ---------------------------------------------------------------------------
-# Re-sync the image assets, on every single run, immediately before the server
-# starts so the report is the last thing on screen.
+# Re-sync the image assets on every single run.
 #
 # main/static/assets/images is a derived copy of ../pcfweb-assets/images and is
 # gitignored, so `git pull` never touches it and, before this, only build.sh
@@ -104,16 +103,17 @@ python manage.py seed_products
 # the directory exists, so a guarded copy would fix precisely nothing. The
 # script's rm -rf is the part that matters.
 #
-# --warn downgrades each check to a loud report and lets the server start
-# anyway, because someone working on checkout logic should not be blocked by an
-# unrelated missing cover. build.sh calls the same script with no flag, where
-# all of it is fatal. Exit 3 means "reported, not enforced"; anything else
-# non-zero is a real failure of the script itself and should stop us.
+# Missing pcfweb-assets is the one legitimate local exception: a developer can
+# choose not to clone the sibling checkout and accept broken product images.
+# If that checkout is present, though, every problem in it is a genuine fault
+# and stays fatal.
 # ---------------------------------------------------------------------------
-asset_status=0
-./scripts/sync-local-assets.sh --warn || asset_status=$?
-if [ "$asset_status" -ne 0 ] && [ "$asset_status" -ne 3 ]; then
-  exit "$asset_status"
+asset_tree_absent=no
+source_images="${ASSETS_DIR:-../pcfweb-assets}/images"
+if [ -d "$source_images" ]; then
+  ./scripts/sync-local-assets.sh
+else
+  asset_tree_absent=yes
 fi
 
 # ---------------------------------------------------------------------------
@@ -130,27 +130,20 @@ fi
 # not collected produces 'The source file does not appear to be an image' (which
 # actually means 'not found at STATIC_ROOT'), not a resize.
 #
-# --allow-absent-asset-tree lets the server start even when the sibling
-# pcfweb-assets checkout is missing -- someone working on checkout logic should
-# not be blocked by unrelated missing covers. build.sh omits this flag (strict).
+# --allow-absent-asset-tree is passed only when the sibling pcfweb-assets
+# checkout is actually absent. If the tree exists, a missing, stale, pointer or
+# corrupt cover stays fatal.
 #
 # This is the same flow as build.sh (which calls scripts/checks.sh), minus mypy
 # and tests. Keeping local and deploy in step means a run_local.sh success
 # predicts a build.sh success.
 # ---------------------------------------------------------------------------
 python manage.py collectstatic --no-input
-python manage.py pregenerate_thumbnails --allow-absent-asset-tree
-
-# Verify that collectstatic and pregenerate_thumbnails actually ran and produced
-# the expected files. Fails loudly if the logo or thumbnails are missing, naming
-# what is absent -- a non-vacuity guard that cannot be satisfied by a directory
-# merely existing. Catches regressions where the calls above are removed or
-# reordered.
-#
-# --warn downgrades to loud warnings: someone working on checkout logic should
-# not be blocked by missing covers, but they should be TOLD the covers are
-# missing so they do not read a broken page as a broken implementation.
-./scripts/check-local-runtime.sh --warn
+if [ "$asset_tree_absent" = yes ]; then
+  python manage.py pregenerate_thumbnails --allow-absent-asset-tree
+else
+  python manage.py pregenerate_thumbnails
+fi
 
 # The digital-download archives, from the sibling pcfweb-book-assets checkout.
 # Warn rather than refuse: that repo is Git LFS with a multi-megabyte ZIP per
@@ -172,4 +165,17 @@ if ! ./scripts/check-book-assets.sh \
   set -x
 fi
 
-python manage.py runserver_plus --cert-file cert.pem --key-file key.pem
+# Verify immediately before the server starts so this is the last local-site
+# asset status a human sees. The absent pcfweb-assets path is allowed but loud;
+# every problem in a present asset tree remains fatal.
+if [ "$asset_tree_absent" = yes ]; then
+  ./scripts/check-local-runtime.sh --allow-absent-asset-tree
+else
+  ./scripts/check-local-runtime.sh
+fi
+
+# Let main.urls serve /static/ from STATIC_ROOT. The default staticfiles
+# handler searches source static directories instead, so it cannot see the
+# generated thumbnails that pregenerate_thumbnails writes into STATIC_ROOT.
+# Any optional addrport argument is passed through to runserver_plus.
+python manage.py runserver_plus --nostatic --cert-file cert.pem --key-file key.pem "$@"

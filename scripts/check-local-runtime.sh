@@ -1,7 +1,7 @@
 #!/bin/bash
 # Verify that run_local.sh's prerequisites are met: collectstatic ran and
-# populated STATIC_ROOT with the committed logo, and pregenerate_thumbnails ran
-# and produced thumbnail files for the book covers.
+# populated STATIC_ROOT with the committed logo and synced covers, and
+# pregenerate_thumbnails ran and produced the files the templates request.
 #
 # This is a non-vacuity guard: it must fail LOUDLY when the preconditions are
 # not met, naming what is actually missing. A guard that passes over a tree it
@@ -13,144 +13,87 @@
 #   1  a check failed (named on stderr)
 #   2  usage error
 #
-# Usage: scripts/check-local-runtime.sh [--warn]
+# Usage: scripts/check-local-runtime.sh [--allow-absent-asset-tree]
 #
-# With --warn, problems are reported loudly but the exit code is 0, so the
-# caller can let the server start anyway. Without it (the default), the first
-# problem exits 1.
+# --allow-absent-asset-tree is the same narrow exception as the management
+# command's flag: it only downgrades a wholly absent cover tree, which means the
+# sibling pcfweb-assets checkout is not present. Anything in a present tree that
+# is missing, corrupt, stale, uncollected or unthumbnailed is still fatal.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-mode=fatal
+allow_absent_asset_tree=no
 case "${1:-}" in
   "") ;;
-  --warn) mode=warn ;;
+  --allow-absent-asset-tree) allow_absent_asset_tree=yes ;;
   *)
-    echo "usage: ${0##*/} [--warn]" >&2
+    echo "usage: ${0##*/} [--allow-absent-asset-tree]" >&2
     exit 2
     ;;
 esac
+if [ "$#" -gt 1 ]; then
+  echo "usage: ${0##*/} [--allow-absent-asset-tree]" >&2
+  exit 2
+fi
 
-STATIC_ROOT="${STATIC_ROOT:-staticfiles}"
-problems=0
+STATIC_ROOT=$(python - <<'PY'
+import os
 
-problem() {
-  local headline="$1"
-  local severity="ERROR"
-  if [ "$mode" = warn ]; then
-    severity="WARNING"
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "pigscanfly.settings")
+os.environ.setdefault(
+    "DJANGO_CONFIGURATION", os.environ.get("ENVIRONMENT", "Dev"))
+
+import configurations.importer
+configurations.importer.install()
+
+from django.conf import settings
+
+print(settings.STATIC_ROOT)
+PY
+)
+COVER_ROOT="$STATIC_ROOT/assets/images"
+BANNER="!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+
+cover_tree_absent=yes
+if [ -d "$COVER_ROOT" ]; then
+  if find "$COVER_ROOT" -type f | grep -q .; then
+    cover_tree_absent=no
   fi
+fi
 
+if [ "$allow_absent_asset_tree" = yes ] && [ "$cover_tree_absent" = yes ]; then
   echo >&2
-  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
-  echo "!! ${severity}: ${headline}" >&2
-  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
-  cat >&2
+  echo "$BANNER" >&2
+  echo "!! WARNING: the pcfweb-assets checkout is absent." >&2
+  echo "$BANNER" >&2
+  echo "No product cover files were collected under:" >&2
+  echo "  $COVER_ROOT" >&2
   echo >&2
+  echo "The site will start, but pages using these files will render with broken images:" >&2
+  python - <<'PY' >&2
+import yaml
 
-  problems=$((problems + 1))
-  if [ "$mode" = fatal ]; then
-    exit 1
-  fi
-}
+with open("main/fixtures/initial_products.yaml", "rb") as fh:
+    entries = yaml.safe_load(fh) or []
 
-# --- 1. collectstatic must have run and copied the logo --------------------
-# logo-cropped.png is the masthead logo and is committed in the repo (not from
-# the sibling pcfweb-assets). If it is missing from STATIC_ROOT, collectstatic
-# did not run.
-#
-# This is the discriminator: if the logo is missing but book covers are fine,
-# collectstatic ran and sync-local-assets.sh did not; if the logo is fine but
-# covers are missing, sync-local-assets.sh ran and collectstatic did not. Here
-# we are checking the latter: that collectstatic ran.
-LOGO="$STATIC_ROOT/assets/logo-cropped.png"
-if [ ! -f "$LOGO" ]; then
-  problem "collectstatic has not run or STATIC_ROOT is missing" <<EOF
-Expected the committed logo at:
-  $LOGO
-
-That file is committed in main/static/assets/logo-cropped.png and is copied to
-STATIC_ROOT by 'python manage.py collectstatic'. Templates resolve static
-assets through STATIC_ROOT, so without it the masthead renders broken.
-
-If STATIC_ROOT ($STATIC_ROOT) exists but is empty, collectstatic did not run.
-If STATIC_ROOT does not exist at all, run_local.sh's migrate + seed_products
-step failed and the server will not start anyway.
-EOF
-elif [ ! -s "$LOGO" ]; then
-  problem "logo exists but is empty" <<EOF
-$LOGO is zero bytes. collectstatic copied it, but the source was empty.
-EOF
-else
-  # Verify it is actually an image, not a Git LFS pointer or random text.
-  # PNG magic: \x89PNG\r\n\x1a\n (bytes 0-7)
-  if ! head -c 8 "$LOGO" | grep -q $'^\x89PNG\r\n\x1a\n'; then
-    problem "logo is not a PNG image" <<EOF
-$LOGO exists but does not start with the PNG magic bytes. It may be a Git LFS
-pointer stub (130 bytes of 'version https://git-lfs.github.com/spec/v1') or
-corrupt.
-
-First 100 bytes:
-$(head -c 100 "$LOGO" | od -A x -t x1z -v | head -5)
-EOF
-  fi
+names = sorted({
+    str((entry.get("fields") or {}).get("image_name"))
+    for entry in entries
+    if isinstance(entry, dict)
+    and entry.get("model") == "main.product"
+    and (entry.get("fields") or {}).get("image_name")
+})
+for name in names:
+    print(f"  assets/images/{name}")
+PY
+  echo >&2
 fi
 
-# --- 2. pregenerate_thumbnails must have produced thumbnail files ----------
-# Book covers are synced from pcfweb-assets and then thumbnailed into
-# STATIC_ROOT. If STATIC_ROOT has zero .jpg files under assets/images/, either
-# sync-local-assets.sh did not run (so no covers were copied) or
-# pregenerate_thumbnails did not run (so covers exist but were never resized).
-#
-# This check distinguishes "no thumbnails at all" from "covers exist but
-# thumbnails do not": if covers are in main/static/assets/images but none in
-# STATIC_ROOT, pregenerate_thumbnails did not run.
-if [ -d "$STATIC_ROOT/assets/images" ]; then
-  thumbnail_count=$(find "$STATIC_ROOT/assets/images" -type f \( -name '*.jpg' -o -name '*.png' \) | wc -l | tr -d ' ')
-  if [ "$thumbnail_count" -eq 0 ]; then
-    # Check if source covers exist in main/static/assets/images
-    if [ -d "main/static/assets/images/book_covers" ]; then
-      source_count=$(find main/static/assets/images/book_covers -type f \( -name '*.jpg' -o -name '*.png' \) | wc -l | tr -d ' ')
-      if [ "$source_count" -gt 0 ]; then
-        problem "pregenerate_thumbnails did not run" <<EOF
-Found $source_count cover image(s) in main/static/assets/images/book_covers, but
-zero image files in $STATIC_ROOT/assets/images.
-
-sync-local-assets.sh populated the source tree, but 'python manage.py
-pregenerate_thumbnails' did not run to materialize them into STATIC_ROOT. Book
-cover thumbnails will 404.
-EOF
-      else
-        problem "no book covers synced from pcfweb-assets" <<EOF
-main/static/assets/images/book_covers exists but contains no images.
-sync-local-assets.sh either did not run or the sibling pcfweb-assets checkout
-is empty/missing.
-EOF
-      fi
-    else
-      problem "no book covers synced from pcfweb-assets" <<EOF
-main/static/assets/images/book_covers does not exist. sync-local-assets.sh
-either did not run or the sibling pcfweb-assets checkout is missing.
-EOF
-    fi
-  fi
-else
-  problem "STATIC_ROOT assets missing" <<EOF
-$STATIC_ROOT/assets/images does not exist. collectstatic did not run, or
-STATIC_ROOT is a completely empty directory.
-EOF
+args=(pregenerate_thumbnails --check)
+if [ "$allow_absent_asset_tree" = yes ]; then
+  args+=(--allow-absent-asset-tree)
 fi
 
-# --- 3. verdict ------------------------------------------------------------
-if [ "$problems" -gt 0 ]; then
-  if [ "$mode" = warn ]; then
-    echo "!! ${problems} runtime check(s) failed (see above). Starting anyway." >&2
-    echo "!! Pages referencing these assets will render broken." >&2
-    echo >&2
-    exit 0
-  fi
-  # fatal mode already exited at the first problem, so unreachable
-fi
-
-echo "Runtime checks passed: logo and thumbnails are in $STATIC_ROOT"
+python manage.py "${args[@]}"
+echo "Runtime checks passed: generated static thumbnails are in $STATIC_ROOT"
