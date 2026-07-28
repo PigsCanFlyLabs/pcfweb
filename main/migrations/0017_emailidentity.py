@@ -19,7 +19,7 @@ def reserve_existing_emails(apps, schema_editor):
 class Migration(migrations.Migration):
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
-        ("main", "0012_product_bookshop_ebook_link"),
+        ("main", "0016_alter_mailinglistdelivery_subscription"),
     ]
 
     operations = [

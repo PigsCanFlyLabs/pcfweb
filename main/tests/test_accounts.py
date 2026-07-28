@@ -7,6 +7,7 @@ the interesting cases are all the ones a browser would normally prevent.
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
 from django.test import TestCase, override_settings
+from unittest import mock
 
 from main.models import EmailIdentity
 
@@ -99,6 +100,23 @@ class SignupValidationTest(TestCase):
             # that case-insensitive uniqueness lives in the database too.
             EmailIdentity.objects.bulk_create([
                 EmailIdentity(normalized_email="PERSON@example.com")])
+
+    def test_signup_retries_a_username_collision_without_claiming_email_in_use(self):
+        User.objects.create(username="person", email="taken@example.net")
+
+        with mock.patch(
+                "main.views.generate_username",
+                side_effect=["person", "person-alt"]):
+            response = self.client.post(
+                "/signup",
+                {"email": "person@example.org",
+                 "password": "hunter2hunter2"})
+
+        self.assertRedirects(response, "/")
+        user = User.objects.get(email="person@example.org")
+        self.assertEqual(user.username, "person-alt")
+        self.assertEqual(
+            user.email_identity.normalized_email, "person@example.org")
 
 
 @override_settings(THUMBNAIL_DEBUG=False)

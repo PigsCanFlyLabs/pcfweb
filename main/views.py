@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from urllib.parse import quote
@@ -6,18 +7,21 @@ from typing import *
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.admin.views.decorators import staff_member_required
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.contrib.staticfiles import finders
 from django.contrib.staticfiles.storage import staticfiles_storage
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import (
-    FileResponse, Http404, HttpResponse, HttpResponseBadRequest)
+    FileResponse, Http404, HttpResponse, HttpResponseBadRequest,
+    JsonResponse)
 from django.shortcuts import get_object_or_404, redirect, render
-from django.urls import reverse
+from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views import View
@@ -25,15 +29,18 @@ from django.views.decorators.csrf import csrf_exempt
 
 import stripe
 
-from main import captcha
+from main import captcha, mailing
 from main.digital import (
     BadSignature, DigitalAssetError, SignatureExpired, link_lifetime_days,
     open_asset, parse_download_token)
+from main.forms import (
+    MailingListImportForm, MailingListSendForm, MailingListSignupForm)
 from main.models import (
-    Cart, CartProduct, EmailIdentity, Order, Product,
-    normalize_email_identity)
+    Cart, CartProduct, EmailIdentity, MailingListMessage, Order, Product,
+    SuppressedAddress, normalize_email_identity, send_batch_size)
 from main.payments import Payments
-from main.utils import generate_username, get_country_code
+from main.utils import (
+    generate_username, get_country_code, get_storable_client_ip)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +63,48 @@ LIBERATED_BREAD_URL = "https://www.liberatedbread.com/"
 # fixture gives all three SKUs means the worst case is a card that falls back
 # to the books listing, which is visible rather than wrong.
 FEATURED_BOOK_TITLE = "Distributed Computing 4 Kids (and Executives)"
+
+
+def _integrity_error_text(error: IntegrityError) -> str:
+    parts = [str(error)]
+    cause = getattr(error, "__cause__", None)
+    if cause is not None:
+        parts.append(str(cause))
+    return " ".join(parts)
+
+
+def _constraint_name(error: IntegrityError) -> Optional[str]:
+    cause = getattr(error, "__cause__", None)
+    diag = getattr(cause, "diag", None)
+    return getattr(diag, "constraint_name", None)
+
+
+def _is_email_identity_conflict(error: IntegrityError) -> bool:
+    if _constraint_name(error) == "unique_normalized_email":
+        return True
+    return "unique_normalized_email" in _integrity_error_text(error)
+
+
+def _is_username_conflict(error: IntegrityError) -> bool:
+    if _constraint_name(error) == "auth_user_username_key":
+        return True
+    text = _integrity_error_text(error)
+    return ("auth_user.username" in text
+            or "auth_user_username_key" in text)
+
+
+def _create_signup_user(email: str, password: str) -> User:
+    for _ in range(5):
+        username = generate_username(email)
+        try:
+            with transaction.atomic():
+                return User.objects.create_user(
+                    email=email, username=username, password=password)
+        except IntegrityError as error:
+            if _is_username_conflict(error):
+                continue
+            raise
+    raise IntegrityError("Could not allocate a unique username.")
 
 
 # Create your views here.
@@ -454,7 +503,10 @@ class ServicesView(View):
 
 class SubscribeView(View):
     def get(self, request):
-        return render(request, 'subscribe_page.html', context={'title': 'Subscribe for updates'})
+        return render(request, 'subscribe_page.html', context={
+            'title': 'Subscribe for updates',
+            'areas': mailing.interest_choices(request),
+        })
 
 
 class BookByIsbnView(View):
@@ -626,21 +678,20 @@ class SignupView(View):
         if User.objects.filter(email__iexact=email).exists():
             return redirect(reverse('signup') + '?in_use=true')
 
-        try:
-            # Reserve the address first. The functional unique constraint is
-            # the arbiter when concurrent requests both pass the advisory
-            # auth.User check above; the losing transaction creates no User.
-            with transaction.atomic():
+        # Reserve the address first. The functional unique constraint is
+        # the arbiter when concurrent requests both pass the advisory
+        # auth.User check above; the losing transaction creates no User.
+        with transaction.atomic():
+            try:
                 identity = EmailIdentity.objects.create(
                     normalized_email=email)
-                username = generate_username(email)
-                user = User.objects.create(email=email, username=username)
-                user.set_password(password)
-                user.save()
-                identity.user = user
-                identity.save(update_fields=["user"])
-        except IntegrityError:
-            return redirect(reverse('signup') + '?in_use=true')
+            except IntegrityError as error:
+                if _is_email_identity_conflict(error):
+                    return redirect(reverse('signup') + '?in_use=true')
+                raise
+            user = _create_signup_user(email, password)
+            identity.user = user
+            identity.save(update_fields=["user"])
 
         # No cart is created here: get_cart() owns that, and creating one
         # unconditionally on a OneToOneField is an unprotected insert.
@@ -1148,3 +1199,376 @@ class LogoutView(View):
     def get(self, request):
         logout(request)
         return redirect('login')
+
+@method_decorator(csrf_exempt, name='dispatch')
+class MailingListSubscribeView(View):
+    """The signup endpoint. CSRF exempt on purpose.
+
+    The whole point is that a plain <form> pasted onto another site can post
+    here, and such a form has no token to send. Nothing here reads the session
+    or acts on behalf of a logged-in user, so there is no authority for a
+    forged request to borrow: the worst it can do is create an unconfirmed
+    subscription, which does nothing until that address clicks the link.
+
+    Everything after this -- the confirmation email, the activation page, the
+    unsubscribe page -- is django-newsletter's.
+    """
+
+    def submitted(self, request) -> Dict[str, Any]:
+        """The submitted fields, from a form post or a JSON body.
+
+        A JSON body leaves request.POST empty, so without this a fetch()
+        sending JSON -- the obvious thing to write against an endpoint that
+        answers JSON -- would look to us like a submission with no email in
+        it. Cached because a view is instantiated per request and the body
+        can only be read once.
+        """
+        if not hasattr(self, "_submitted"):
+            self._submitted = self._parse_body(request)
+        return self._submitted
+
+    @staticmethod
+    def _parse_body(request) -> Dict[str, Any]:
+        if request.content_type == "application/json":
+            try:
+                data = json.loads(request.body or b"{}")
+            except ValueError:
+                return {}
+            return data if isinstance(data, dict) else {}
+        return request.POST
+
+    def wants_json(self, request) -> bool:
+        return (request.content_type == "application/json"
+                or self.submitted(request).get("format") == "json"
+                or request.GET.get("format") == "json"
+                or "application/json" in request.headers.get("Accept", ""))
+
+    def json_response(self, payload: Dict[str, Any], status: int = 200):
+        response = JsonResponse(payload, status=status)
+        # Read by scripts on other origins. Safe as a wildcard precisely
+        # because this endpoint has no session and no credentials: it does
+        # nothing that depends on who is asking.
+        response["Access-Control-Allow-Origin"] = "*"
+        return response
+
+    def get(self, request):
+        # Somebody following the action URL by hand, or a form that lost its
+        # method. Send them to the real page rather than 405ing.
+        return redirect('subscribe')
+
+    def options(self, request, *args, **kwargs):
+        # Preflight for a cross-origin fetch() posting JSON. A plain form post
+        # never gets here.
+        response = HttpResponse(status=204)
+        response["Access-Control-Allow-Origin"] = "*"
+        response["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        response["Access-Control-Allow-Headers"] = "Content-Type, Accept"
+        response["Access-Control-Max-Age"] = "86400"
+        return response
+
+    def post(self, request):
+        form = MailingListSignupForm(self.submitted(request))
+        if not form.is_valid():
+            error = "That does not look like an email address."
+            if self.wants_json(request):
+                return self.json_response(
+                    {"ok": False, "error": error,
+                     "errors": form.errors}, status=400)
+            return render(request, 'mailing_list_result.html', context={
+                'title': 'Subscribe for updates',
+                'ok': False,
+                'message': error,
+            }, status=400)
+
+        if form.is_bot():
+            # Answered exactly like a success, minus the subscription: telling
+            # a bot it was caught only teaches whoever wrote it.
+            logger.info("Dropped a honeypotted mailing list signup.")
+            return self.respond(request)
+
+        email = form.cleaned_data["email"]
+        if self.over_rate_limit(request, email):
+            # Checked before anything is written, so a flood cannot fill the
+            # table either. Answered like every other submission.
+            logger.warning(
+                "Dropping a mailing list signup for %s: over the rate limit.",
+                email)
+            return self.respond(request)
+
+        _subscription, to_confirm = mailing.subscribe(
+            email=email,
+            newsletter=mailing.newsletter_for(
+                form.cleaned_data.get("interest", "")),
+            name=form.cleaned_data.get("name", ""),
+            ip=get_storable_client_ip(request),
+            also_all=form.cleaned_data.get("all_updates", False))
+        if to_confirm is not None:
+            mailing.send_activation_email(to_confirm)
+        return self.respond(request)
+
+    # Deliberately the same words whatever happened: a new signup, an address
+    # already subscribed, a suppressed one, a honeypotted one and a
+    # rate-limited one are indistinguishable from outside. Saying which is a
+    # membership oracle on an endpoint anybody can post to, and these lists
+    # include things people would rather not have confirmed about them.
+    ANSWER = ("Almost there — if that address is not already subscribed, "
+              "check your email for a link to confirm.")
+
+    def respond(self, request):
+        if self.wants_json(request):
+            return self.json_response({"ok": True, "message": self.ANSWER})
+        return render(request, 'mailing_list_result.html', context={
+            'title': 'Subscribe for updates',
+            'ok': True,
+            'message': self.ANSWER,
+        })
+
+    # Confirmations one address can be sent per hour, whoever asks. Low: there
+    # is no legitimate reason to need a fourth, and this is the ceiling on
+    # using the endpoint to bury somebody in mail.
+    PER_ADDRESS_LIMIT = 3
+
+    def over_rate_limit(self, request, email: str) -> bool:
+        """Whether this signup has had its hour's worth.
+
+        Counted per *target address* as well as per source, because the source
+        cannot be trusted: X-Forwarded-For is client-supplied and nginx appends
+        to it, so a limit keyed only on the client's idea of its own address is
+        bypassed by sending a different one -- or by sending nonsense, which
+        used to disable this check altogether. The address being signed up is
+        the one thing in the request that cannot be varied while still
+        achieving anything, so it is the key that matters: it is what stops the
+        endpoint being used to bury one person in confirmation mail.
+
+        Deliberately crude: the cache is per worker process, so the real
+        ceiling is this times the worker count. That bounds a flood without
+        needing a shared cache the site does not otherwise run.
+        """
+        limit = getattr(settings, "MAILING_LIST_SIGNUP_RATE_LIMIT", 20)
+        if not limit:
+            return False
+        # An unusable X-Forwarded-For shares one bucket rather than escaping
+        # the count: junk in that header must not be a way out of the limit.
+        source = get_storable_client_ip(request) or "unparseable-source"
+        return (self._over(f"mailing-list-signups:{source}", limit)
+                or self._over(f"mailing-list-address:{email}",
+                              self.PER_ADDRESS_LIMIT))
+
+    @staticmethod
+    def _over(key: str, limit: int) -> bool:
+        try:
+            count = cache.get_or_set(key, 0, 3600)
+            # incr is atomic where the backend supports it; a missing key means
+            # it expired between the two calls, which is a reset, not an error.
+            count = cache.incr(key) if count is not None else 1
+        except ValueError:
+            cache.set(key, 1, 3600)
+            count = 1
+        return count > limit
+
+
+@method_decorator(staff_member_required, name='dispatch')
+class AdminHomeView(View):
+    """One page listing where everything in the admin actually lives.
+
+    The Django admin index only lists model changelists, so the things that
+    are not a changelist -- the subscriber import, the send page, the
+    embeddable form -- are unfindable unless something like this points at
+    them.
+    """
+
+    def get(self, request):
+        return render(request, 'admin/home.html', context={
+            'title': 'Admin',
+            'sections': self.sections(),
+        })
+
+    @staticmethod
+    def link(url_name, label, description, args=None):
+        try:
+            return {"url": reverse(url_name, args=args or []),
+                    "label": label, "description": description}
+        except NoReverseMatch:
+            # A URL that is not wired up (an app removed, a rename) should
+            # cost one missing row, not the whole page.
+            logger.warning("Admin home: no URL named %s.", url_name)
+            return None
+
+    def sections(self):
+        sections = [
+            ("Mailing list", [
+                self.link('admin:newsletter_subscription_changelist',
+                          "Subscribers",
+                          "Every address, which list it is on, and whether it "
+                          "has confirmed."),
+                self.link('mailing-list-import',
+                          "Import subscribers from CSV",
+                          "Mailchimp or Google Forms exports. Checks the "
+                          "suppression list, and can email everyone imported "
+                          "to say the list changed."),
+                self.link('admin:main_suppressedaddress_changelist',
+                          "Suppressed addresses (never email)",
+                          "Addresses no import may add. Bounces, complaints, "
+                          "anyone who asked to be left alone."),
+                self.link('admin:main_mailinglistmessage_changelist',
+                          "Mailings — write and send",
+                          "Write a mailing, then follow the “send…” link on "
+                          "its row. Leave the lists empty to reach every "
+                          "confirmed subscriber once."),
+                self.link('admin:newsletter_newsletter_changelist',
+                          "Interest areas",
+                          "The lists people can subscribe to. Anyone who does "
+                          "not pick one is on the general list."),
+                {"url": staticfiles_storage.url(
+                    'mailing-list/signup-form.html'),
+                 "label": "Embeddable signup form",
+                 "description": "Plain HTML to paste into another site so it "
+                                "can sign people up here. Set its `interest` "
+                                "to one of the slugs above."},
+            ]),
+            ("Store", [
+                self.link('admin:main_order_changelist', "Orders",
+                          "Paid orders to pick, pack and mark fulfilled."),
+                self.link('admin:main_product_changelist', "Products",
+                          "Prices, stock and the links on each product page."),
+            ]),
+            ("Site", [
+                self.link('admin:index', "Django admin",
+                          "Everything else, model by model."),
+                self.link('admin:password_change', "Change your password", ""),
+            ]),
+        ]
+        return [(name, [link for link in links if link])
+                for name, links in sections]
+
+
+@method_decorator(staff_member_required, name='dispatch')
+class MailingListImportView(View):
+    """Upload subscribers, or upload addresses to suppress.
+
+    Staff only and behind the admin's login, because it is the one way into
+    this app to add an address without that address agreeing to it. The
+    suppression check is what keeps a stale export from putting somebody back
+    on a list they left, and the notice is what gives them a way out if it
+    happens anyway.
+    """
+
+    def get(self, request):
+        return self.render_form(request, MailingListImportForm())
+
+    def post(self, request):
+        form = MailingListImportForm(request.POST, request.FILES)
+        if not form.is_valid():
+            return self.render_form(request, form)
+        addresses = form.get_addresses()
+        if form.cleaned_data["mode"] == form.MODE_SUPPRESS:
+            suppressed, removed = mailing.suppress_addresses(
+                addresses, reason=form.cleaned_data.get("reason", ""),
+                user=request.user)
+            messages.success(
+                request,
+                f"Suppressed {suppressed} new address(es) out of "
+                f"{len(addresses)} in the file, and took {removed} live "
+                "subscription(s) off their lists.")
+            return redirect('mailing-list-import')
+
+        result = mailing.import_addresses(
+            addresses, newsletter=form.cleaned_data["newsletter"],
+            notify=form.cleaned_data.get("notify", False), request=request)
+        messages.success(request, result.summary())
+        if result.suppressed:
+            messages.warning(
+                request,
+                "Skipped as suppressed: " + ", ".join(result.suppressed[:20])
+                + ("…" if len(result.suppressed) > 20 else ""))
+        if result.notice_skipped:
+            messages.warning(
+                request,
+                "That is too many addresses to email from this page. Write a "
+                "mailing and send it instead, so it goes out in batches.")
+        return redirect('mailing-list-import')
+
+    def render_form(self, request, form):
+        return render(request, 'admin/mailing_list_import.html', context={
+            'title': 'Import mailing list subscribers',
+            'form': form,
+            'suppressed_count': SuppressedAddress.objects.count(),
+        })
+
+
+@method_decorator(staff_member_required, name='dispatch')
+class MailingListSendView(View):
+    """Send a mailing, to everyone or to the lists it names.
+
+    django-newsletter can send a message to one newsletter; this exists for
+    sending one mailing across several of them without anybody getting two
+    copies.
+
+    Sending is done a batch at a time because this runs inside a request with
+    a worker timeout on it: a list long enough to outlive that timeout would
+    otherwise be half-sent with no record of how far it got. Each batch claims
+    a delivery per recipient, so clicking send again continues rather than
+    starting over.
+    """
+
+    def get(self, request, pk):
+        message = get_object_or_404(MailingListMessage, pk=pk)
+        return self.render_page(request, message, MailingListSendForm())
+
+    def post(self, request, pk):
+        message = get_object_or_404(MailingListMessage, pk=pk)
+        form = MailingListSendForm(request.POST)
+        if not form.is_valid():
+            return self.render_page(request, message, form)
+
+        if "send_test" in request.POST:
+            address = (form.cleaned_data.get("test_address")
+                       or request.user.email)
+            if not address:
+                form.add_error(
+                    "test_address",
+                    "Your account has no email address, so say where the "
+                    "test should go.")
+                return self.render_page(request, message, form)
+            try:
+                message.send_test(address, request)
+            except Exception as e:
+                logger.exception("Test send of message %s failed.", message.pk)
+                messages.error(request, f"Could not send the test: {e}")
+            else:
+                messages.success(request, f"Test sent to {address}.")
+            return redirect('mailing-list-send', pk=message.pk)
+
+        if "send_batch" in request.POST:
+            if not message.pending_recipients().exists():
+                messages.info(
+                    request, "Everyone on that list already has this one.")
+                return redirect('mailing-list-send', pk=message.pk)
+            sent, failed = message.send_batch(request=request)
+            remaining = message.pending_count()
+            note = f"Sent {sent}."
+            if failed:
+                note += (f" {failed} could not be delivered; see the "
+                         "deliveries below.")
+            if remaining:
+                note += f" {remaining} still to go — click send again."
+            messages.success(request, note)
+            return redirect('mailing-list-send', pk=message.pk)
+
+        return self.render_page(request, message, form)
+
+    def render_page(self, request, message, form):
+        groups = list(message.interests.all())
+        return render(request, 'admin/mailing_list_send.html', context={
+            'title': f'Send: {message.subject}',
+            'message': message,
+            'form': form,
+            # The page describes the audience with the model's own method, so
+            # what it says cannot drift from what recipients() does.
+            'groups': groups,
+            'recipient_count': message.recipient_count(),
+            'pending_count': message.pending_count(),
+            'sent_count': message.sent_count(),
+            'failed_count': message.failed_count(),
+            'batch_size': send_batch_size(),
+        })
