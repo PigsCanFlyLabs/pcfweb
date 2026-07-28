@@ -56,11 +56,15 @@ P6 = (
 )
 STANDARD_COPY = "\n\n".join((P1, P2, P3, P4, P5, P6))
 STANDARD_PARAGRAPHS = (P1, P2, P3, P4, P5, P6)
+EBOOK_DELIVERY_NOTE = (
+    "Delivered by email as a DRM-free ZIP containing both the EPUB and the "
+    "PDF."
+)
 STANDARD_EBOOK_COPY = (
-    f"{STANDARD_COPY}\n\n{Product.DIGITAL_DELIVERY_NOTE}"
+    f"{STANDARD_COPY}\n\n{EBOOK_DELIVERY_NOTE}"
 )
 STANDARD_EBOOK_PARAGRAPHS = STANDARD_PARAGRAPHS + (
-    Product.DIGITAL_DELIVERY_NOTE,
+    EBOOK_DELIVERY_NOTE,
 )
 
 # The Executive Edition keeps the new standard copy and appends the row's
@@ -315,6 +319,8 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         # apostrophe-free fragment, which is how a vacuous assertion gets in.
         escaped_note = escape(Product.SIGNED_ON_REQUEST_NOTE)
         self.assertNotEqual(escaped_note, Product.SIGNED_ON_REQUEST_NOTE)
+        escaped_delivery_note = escape(EBOOK_DELIVERY_NOTE)
+        self.assertNotEqual(EBOOK_DELIVERY_NOTE, Product.SIGNED_ON_REQUEST_NOTE)
         for pk in (104, 105):
             with self.subTest(pk=pk):
                 product = Product.objects.get(pk=pk)
@@ -327,8 +333,8 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         self.assertNotIn(escaped_note, ebook.get_display_text())
         self.assertNotIn(Product.SIGNED_ON_REQUEST_NOTE,
                          ebook.get_feed_description())
-        self.assertIn(Product.DIGITAL_DELIVERY_NOTE, ebook.get_display_text())
-        self.assertIn(Product.DIGITAL_DELIVERY_NOTE,
+        self.assertIn(escaped_delivery_note, ebook.get_display_text())
+        self.assertIn(EBOOK_DELIVERY_NOTE,
                       ebook.get_feed_description())
 
     def test_the_ebooks_isbn_is_left_unset_rather_than_placeheld(self):
