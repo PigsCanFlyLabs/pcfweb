@@ -27,6 +27,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views import View
+from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 
 import stripe
@@ -845,6 +846,7 @@ class GoogleProductFeed(View):
 
 
 
+@method_decorator(never_cache, name="dispatch")
 class CartView(View, BaseCartView):
     def get(self, request):
         cart = self.get_cart(request)

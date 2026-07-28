@@ -116,6 +116,21 @@ class CartHttpMethodTest(CartTestBase):
         self.assertNotContains(response, 'href="/remove-from-cart')
 
 
+class CartCacheControlTest(CartTestBase):
+    """The cart is per-session state and must never be shared by a cache."""
+
+    def test_the_cart_page_is_marked_uncacheable(self):
+        self.client.post("/add-to-cart/106/1", {"chosen_amount": "5.00"})
+
+        response = self.client.get("/cart")
+
+        self.assertEqual(response.status_code, 200)
+        cache_control = response["Cache-Control"]
+        self.assertIn("private", cache_control)
+        self.assertIn("no-store", cache_control)
+        self.assertIn("no-cache", cache_control)
+
+
 class AddToCartWithoutJavascriptTest(CartTestBase):
     """The buy form must work with JavaScript entirely disabled.
 
