@@ -1,0 +1,18 @@
+Hi{% if name %} {{ name }}{% endif %},
+
+We've tidied up the Pigs Can Fly Labs mailing list, and you are on
+"{{ interest }}" -- because you signed up for it at some point, or asked to
+be kept in the loop.
+
+If that is still what you want, there is nothing to do; the next thing you
+get from us will be actual news.
+
+If you would rather not hear from us, unsubscribe here and we'll stop:
+
+  {{ unsubscribe_url }}
+
+Every email we send has that link in it, so you can change your mind at any
+point.
+
+-- 
+Pigs Can Fly Labs

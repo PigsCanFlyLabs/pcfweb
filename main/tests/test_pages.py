@@ -321,6 +321,10 @@ class HomePageCardsTest(TestCase):
         "Distributed Computing 4 Kids and Executives: "
         "Executives may require more help")
 
+    # The rendered form of a Liberated Bread link. One capture group, the
+    # destination, so findall returns the URLs themselves.
+    LIBERATED_BREAD_HREF = r'<a href="(https://[^"]*liberatedbread[^"]*)"'
+
     def homepage(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
@@ -347,6 +351,34 @@ class HomePageCardsTest(TestCase):
         self.assertIsNotNone(card, "featured-book card missing from #explore")
         assert card is not None  # for mypy
         return card.group(1)
+
+    def liberated_bread_cards(self):
+        """The two #explore cards that link to Liberated Bread, as
+        (logo_card, text_card).
+
+        Each is located with findall and required to appear exactly once,
+        because "how many cards" is the thing this scoping exists to check.
+        A copy-pasted card is the mistake this grid is most likely to
+        acquire, and it does not change the set of destinations on the page
+        -- only the number of cards carrying them.
+
+        Matched non-greedily to the first </div>, which is correct only
+        because neither card holds a nested div -- if one ever does, this
+        helper has to grow a real parser rather than silently returning a
+        fragment. Same caveat as featured_book_card.
+        """
+        section = self.explore_section()
+        cards = []
+        for name, pattern in (
+                ("logo", r'<div class="liberated-bread">(.*?)</div>'),
+                ("text", r'<div class="types">(.*?)</div>')):
+            found = re.findall(pattern, section, re.DOTALL)
+            self.assertEqual(
+                len(found), 1,
+                f"expected exactly one Liberated Bread {name} card in "
+                f"#explore, found {len(found)}")
+            cards.append(found[0])
+        return cards
 
     def test_the_homepage_no_longer_advertises_fmt2_network_services(self):
         # The offering is discontinued. History belongs on /about, not on a
@@ -378,20 +410,28 @@ class HomePageCardsTest(TestCase):
         Two hardcoded copies of this URL is how the homepage and /family end
         up pointing at different hosts after one of them is updated.
         """
-        home_links = re.findall(
-            r'<a href="(https://[^"]*liberatedbread[^"]*)"',
-            self.explore_section())
         family_links = re.findall(
-            r'<a href="(https://[^"]*liberatedbread[^"]*)"',
+            self.LIBERATED_BREAD_HREF,
             self.client.get("/family").content.decode())
-
-        # The homepage now carries two of these -- the logo card and the
-        # wording beneath it -- so what matters is that every one of them
-        # agrees, not how many there are. Counting them would only say the
-        # card grid has not changed shape, which is not what this is for.
-        self.assertGreaterEqual(len(home_links), 1)
         self.assertEqual(len(family_links), 1)
-        self.assertEqual(set(home_links), set(family_links))
+
+        # Per card, not across the section. The homepage legitimately carries
+        # two of these -- the logo card and the wording beside it -- and a
+        # count taken over the whole section cannot tell two cards from one
+        # card pasted twice: a duplicate adds a link that is equal to the
+        # others, so both a set comparison and a "one or more" count still
+        # pass. Requiring exactly one card of each kind, each holding exactly
+        # one link, is what makes the duplicate visible; the equality below
+        # is what keeps the two copies of the URL from drifting apart.
+        logo_card, text_card = self.liberated_bread_cards()
+        for name, card in (("logo", logo_card), ("text", text_card)):
+            with self.subTest(card=name):
+                links = re.findall(self.LIBERATED_BREAD_HREF, card)
+                self.assertEqual(
+                    len(links), 1,
+                    f"expected exactly one Liberated Bread link in the "
+                    f"{name} card, found {len(links)}")
+                self.assertEqual(links, family_links)
 
     def test_the_liberated_bread_logo_card_renders_the_512_asset(self):
         """The 512 master, not the 128: it is displayed at 200px, so the

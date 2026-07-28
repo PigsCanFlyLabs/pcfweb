@@ -1,0 +1,44 @@
+# A list with exactly one subscriber on it: the owner.
+#
+#   ./manage.py loaddata mailing_list_test_group
+#
+# Point a mailing at "Test (internal only)" and send it for real -- a real
+# batch, a real delivery row, real SMTP -- and it can only reach
+# holden@pigscanfly.ca. That is the check the "send test" button on the send
+# page cannot make for you: that button renders one preview through the same
+# code, but it writes no delivery row and proves nothing about batching.
+#
+# visible: false is doing two jobs, and both matter. It keeps the list off the
+# public signup form so nobody else can end up on it, AND it keeps the All list
+# out of the audience: MailingListMessage.recipients() adds everyone on All to
+# any mailing that names a *public* list, so without this a "test" send would
+# go to the whole All list -- the opposite of the point.
+#
+# activation_code is pinned so reloading does not invalidate the unsubscribe
+# link in mail already sent to this row. Loading this again resets the row
+# (pk 9001): it is fixture-owned, not something to edit in the admin.
+#
+# subscribe_date is set explicitly. loaddata saves raw, bypassing the
+# Subscription.save() that would otherwise fill it in, and a null one drops
+# the subscriber out of any send that has already started its first batch.
+- model: newsletter.newsletter
+  pk: 9001
+  fields:
+    title: "Test (internal only)"
+    slug: test
+    email: support@pigscanfly.ca
+    sender: "Pigs Can Fly Labs"
+    visible: false
+    enable_unsubscribe: true
+    site: [1]
+- model: newsletter.subscription
+  pk: 9001
+  fields:
+    newsletter: 9001
+    email_field: holden@pigscanfly.ca
+    name_field: Holden
+    subscribed: true
+    unsubscribed: false
+    activation_code: pcfwebinternaltestlistfixture0000000001
+    create_date: 2020-01-01 00:00:00+00:00
+    subscribe_date: 2020-01-01 00:00:00+00:00
