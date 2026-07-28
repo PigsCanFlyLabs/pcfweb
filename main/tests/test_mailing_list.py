@@ -12,13 +12,17 @@ somebody off the list.
 
 import io
 import json
+import re
 from unittest import mock
+from urllib.parse import urlparse
 
 from django.contrib.auth.models import User
 from django.core import mail
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
+from django.http import QueryDict
 from django.test import Client, TestCase, override_settings
+from django.urls import resolve
 
 from newsletter.models import Newsletter, Subscription
 
@@ -896,13 +900,61 @@ class SeededListsTest(MailingListTestBase):
 
 
 class SubscribePageTest(MailingListTestBase):
-    def test_the_general_list_is_the_preselected_option(self):
-        # The rule is that not choosing means the general list, and a select
-        # box submits its first option when nobody touches it.
-        response = self.client.get("/subscribe")
+    def action_from(self, response):
+        markup = response.content.decode("utf-8")
+        match = re.search(r'<form[^>]+action="([^"]+)"', markup)
+        self.assertIsNotNone(match)
+        return match.group(1)
 
-        self.assertContains(response, 'value="general" selected')
-        self.assertNotContains(response, 'value="all" selected')
+    def test_the_form_action_posts_to_a_live_signup_route(self):
+        response = self.client.get("/subscribe")
+        action = self.action_from(response)
+        path = urlparse(action).path or action
+
+        self.assertEqual(resolve(path).view_name, "mailing-list-subscribe-all")
+        posted = self.client.post(path, {"email": "all@example.com",
+                                         "interest": "all"})
+        self.assertNotEqual(posted.status_code, 404)
+
+    def test_the_subscribe_page_signs_people_up_for_all(self):
+        response = self.client.get("/subscribe")
+        action = self.action_from(response)
+        path = urlparse(action).path or action
+
+        self.assertContains(response, 'type="hidden" name="interest" value="all"')
+        self.assertNotContains(response, 'name="all_updates"')
+
+        self.client.post(path, {"email": "all@example.com", "interest": "all"})
+
+        self.assertEqual(Subscription.objects.get().newsletter, self.everything)
+
+    def test_the_subscribe_page_receiver_forces_all_despite_tampering(self):
+        response = self.client.get("/subscribe")
+        path = urlparse(self.action_from(response)).path
+
+        tampered_posts = [
+            {"email": "stripped@example.com"},
+            {"email": "blank@example.com", "interest": ""},
+            {"email": "changed@example.com", "interest": "dc4k"},
+        ]
+        for payload in tampered_posts:
+            with self.subTest(payload=payload):
+                Subscription.objects.all().delete()
+
+                self.client.post(path, payload)
+
+                self.assertEqual(
+                    Subscription.objects.get().newsletter, self.everything)
+
+        repeated = QueryDict("", mutable=True)
+        repeated.update({"email": "repeated@example.com"})
+        repeated.setlist("interest", ["general", "dc4k"])
+        Subscription.objects.all().delete()
+
+        self.client.post(path, repeated)
+
+        self.assertEqual(
+            Subscription.objects.get().newsletter, self.everything)
 
     def test_a_hidden_list_is_not_offered(self):
         self.dc4k.visible = False
@@ -911,6 +963,24 @@ class SubscribePageTest(MailingListTestBase):
         response = self.client.get("/subscribe")
 
         self.assertNotContains(response, 'value="dc4k"')
+
+    def test_the_other_pages_keep_the_general_signup_form(self):
+        for i, path in enumerate(["/", "/services", "/about", "/family"]):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                form_path = urlparse(self.action_from(response)).path
+
+                self.assertEqual(
+                    resolve(form_path).view_name, "mailing-list-subscribe")
+                self.assertNotContains(
+                    response, 'type="hidden" name="interest" value="all"')
+                self.assertContains(response, 'name="all_updates"')
+
+                Subscription.objects.all().delete()
+                self.client.post(form_path, {"email": f"general{i}@example.com"})
+
+                self.assertEqual(
+                    Subscription.objects.get().newsletter, self.general)
 
 
 class StaticSnippetTest(TestCase):
