@@ -465,6 +465,7 @@ class SubscribeView(View):
             'title': 'Subscribe for updates',
             'areas': mailing.interest_choices(request),
             'forced_interest': mailing.ALL_SLUG,
+            'signup_action': reverse('mailing-list-subscribe-all'),
         })
 
 
@@ -1163,6 +1164,8 @@ class MailingListSubscribeView(View):
     unsubscribe page -- is django-newsletter's.
     """
 
+    forced_interest = None
+
     def submitted(self, request) -> Dict[str, Any]:
         """The submitted fields, from a form post or a JSON body.
 
@@ -1244,10 +1247,10 @@ class MailingListSubscribeView(View):
                 email)
             return self.respond(request)
 
+        interest = self.forced_interest or form.cleaned_data.get("interest", "")
         _subscription, to_confirm = mailing.subscribe(
             email=email,
-            newsletter=mailing.newsletter_for(
-                form.cleaned_data.get("interest", "")),
+            newsletter=mailing.newsletter_for(interest),
             name=form.cleaned_data.get("name", ""),
             ip=get_storable_client_ip(request),
             also_all=form.cleaned_data.get("all_updates", False))
@@ -1314,6 +1317,10 @@ class MailingListSubscribeView(View):
             cache.set(key, 1, 3600)
             count = 1
         return count > limit
+
+
+class MailingListSubscribeAllView(MailingListSubscribeView):
+    forced_interest = mailing.ALL_SLUG
 
 
 @method_decorator(staff_member_required, name='dispatch')

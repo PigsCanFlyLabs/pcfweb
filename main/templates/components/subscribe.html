@@ -9,7 +9,7 @@
                 </div>
 		{# No csrf_token: the endpoint is CSRF exempt so the same form  #}
 		{# works pasted onto another site. See MailingListSubscribeView. #}
-		<form method="post" action="{% url 'mailing-list-subscribe' %}">
+		<form method="post" action="{{ signup_action|default:'/mailing-list/subscribe' }}">
 		  <label for="id_email_field">E-mail:</label>
 		  <input type="email" name="email" required id="id_email_field" autocomplete="email">
 		  {% if forced_interest %}
