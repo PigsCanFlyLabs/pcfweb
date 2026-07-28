@@ -30,6 +30,22 @@
 # keys present here to .update(), so an absent key is never written.
 # print_asin, default_asin, external_product_id and stock stay admin/runtime-
 # owned and must not appear in this file at all.
+#
+# Cross-links (`x_links`, `ebook_x_links`) are many-to-many and are written by
+# a second pass in seed_products, not by the create/update that handles every
+# other key here -- neither of those can carry an M2M at all. Two rules follow
+# from how that pass works, and breaking either one stops the primary pod
+# booting under `set -e`:
+#
+#   1. Every pk named must exist. Forward references are fine (104 names 106
+#      below, which is read later); references to nothing are not.
+#   2. `x_links` is SYMMETRICAL, so any two rows that both declare it must
+#      list each other. 104 lists 105 and 106, so 105 and 106 each list 104.
+#      A one-sided declaration seeds and then unseeds itself depending on
+#      fixture order, so seed_products rejects it rather than guessing.
+#
+# `ebook_x_links` is directional and takes no such pairing: a print row points
+# at the e-book row, and the e-book does not point back at the paperback.
 - model: main.product
   pk: 100
   fields:
@@ -62,6 +78,12 @@
     image_name: "book_covers/learning_spark_1ed.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # A 2015 book about Spark 1.x, superseded by a 2nd edition that is a
+    # different book by different authors. Advisory only: this stays on sale
+    # and stays listed, and the flag adds nothing but a sentence saying the
+    # edition may be dated. `noorder` is what stops a sale, and it is not set
+    # here and must not be added -- people buy this one deliberately.
+    out_of_date: true
     # On O'Reilly's learning platform, so the Safari trial link is a
     # true statement for this title. Explicit rather than inferred from
     # the ISBN -- see Product.on_oreilly_safari.
@@ -134,6 +156,9 @@
     image_name: "book_covers/kubeflow_for_ml.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # Kubeflow moved on considerably after this was written. Same advisory-
+    # only meaning as pk 100: still for sale, still listed, still in the feed.
+    out_of_date: true
     # On O'Reilly's learning platform, so the Safari trial link is a
     # true statement for this title. Explicit rather than inferred from
     # the ISBN -- see Product.on_oreilly_safari.
@@ -221,6 +246,14 @@
     tax_code: "txcd_35010000"
     delivery_type: "PHYSICAL"
     sells_ebook: false
+    # The three DC4K SKUs are one book in three formats, so all three name
+    # the other two. Symmetrical, so 105 and 106 each list 104 in turn.
+    x_links: [105, 106]
+    # Directional: this paperback's e-book is pk 106. Renders a button to pk
+    # 106's own product page -- not an add-to-cart on this page, which could
+    # only either sell a paperback as a download or put a product the visitor
+    # never named into their cart.
+    ebook_x_links: [106]
 - model: main.product
   pk: 105
   fields:
@@ -256,6 +289,13 @@
     tax_code: "txcd_35010000"
     delivery_type: "PHYSICAL"
     sells_ebook: false
+    x_links: [104, 106]
+    # There is no separate Executive e-book, so the executive edition points
+    # at the same pk 106 the standard paperback does. That is a real answer
+    # to "where is the e-book?" rather than a missing one; the button says
+    # which product it lands on, so nobody is told they are getting an
+    # executive-edition download.
+    ebook_x_links: [106]
 - model: main.product
   pk: 106
   fields:
@@ -289,6 +329,13 @@
     # <stem>.zip under settings.BOOK_ASSET_ROOT; must match the archive
     # committed to the pcfweb-book-assets repo.
     digital_asset_name: "distributed_computing_4_kids"
+    x_links: [104, 105]
+    # No ebook_x_links, and this blank is the correct one -- do not "complete
+    # the set" by adding [104, 105] here. The field is directional and means
+    # "the e-book you can buy instead of this"; pointing it back at the two
+    # paperbacks would render "Get the e-book: ...(print edition)" buttons on
+    # the e-book's own page. The key is omitted rather than set to [], so the
+    # relation stays admin-editable if a second e-book edition ever exists.
 # "Fast Data Processing with Spark" (Packt, 2013) -- Holden's first book and
 # the first book written about Apache Spark. Listed for the history, not for
 # sale: noorder makes is_purchasable() false, which suppresses the buy button,

@@ -77,6 +77,37 @@
 		    {% endif %}
 		    {% else %}
 		    <span class="price">{{ product.get_display_price }}</span>
+		    {% comment %}
+		       The MSRP strikethrough, and it lives here rather than
+		       anywhere near the running-total script at the bottom of
+		       this file deliberately. That script parseFloats the
+		       rendered get_display_price, which already yields NaN on
+		       a pre-order row because get_display_price() returns
+		       "Pre-order: 30.00" -- a pre-existing bug.
+		       get_msrp_display() returns a bare number and is rendered
+		       as static markup only; nothing here goes into
+		       JavaScript, so the MSRP cannot become the second value
+		       that arrives at parseFloat as NaN.
+
+		       show_msrp() is strictly-greater-than, so an MSRP equal to
+		       or below the price renders nothing at all. Inside the
+		       not-noorder branch on purpose: a title we do not sell has
+		       no price to compare against (its price is 0), and a
+		       struck-through number beside "Not sold here" would
+		       advertise a discount on something nobody can buy.
+		    {% endcomment %}
+		    {% if product.show_msrp %}
+		    <span class="msrp">MSRP <s>{{ product.get_msrp_display }}</s></span>
+		    {% endif %}
+		    {% endif %}
+		    {% if product.out_of_date %}
+		    {% comment %}
+		       Advisory only. This is a sentence and nothing else: the
+		       buy button, the quantity picker and the stock marker are
+		       all rendered from the same flags they always were, and
+		       out_of_date is not one of them.
+		    {% endcomment %}
+		    <p class="out-of-date-notice"><strong>{{ product.OUT_OF_DATE_NOTICE }}</strong></p>
 		    {% endif %}
 		    {% if product.is_pwyw %}
 		    <p><strong>Pay what you want.</strong> That price is a
@@ -129,8 +160,49 @@
 			    {% for alt_link_name, alt_link in alt_links %}
 			    <div class="main-border-button"><a href="{{alt_link}}" class="altbtn">{{alt_link_name}}</a></div>
 			    {% endfor %}
+			    {% comment %}
+			       The e-book cross-link button, from the dedicated
+			       ebook_x_links M2M. An <a>, not a second submit:
+			       this page's form posts add-to-cart for THIS
+			       product, so a button that added the e-book would
+			       have to either send this pk (selling a paperback
+			       as a download) or quietly send a pk the visitor
+			       never chose. It navigates to the e-book's own
+			       product page instead, where the add-to-cart sits
+			       under that product's name and price.
+
+			       get_ebook_cross_links() gates on the target's
+			       is_purchasable(), so a linked e-book that is not
+			       for sale renders nothing here rather than a
+			       button onto a page with no way to buy.
+			    {% endcomment %}
+			    {% for ebook_link_name, ebook_link in product.get_ebook_cross_links %}
+			    <div class="main-border-button"><a href="{{ebook_link}}" class="altbtn">{{ebook_link_name}}</a></div>
+			    {% endfor %}
 			</div>
 		    </form>
+		    {% comment %}
+		       Related editions and formats, from x_links. Outside the
+		       form and styled as a plain list rather than as buttons,
+		       because these are navigation and not offers: they are
+		       ungated on is_purchasable() precisely so a title listed
+		       only for the publishing history is still reachable from
+		       its siblings. Bound to a variable first so the queryset
+		       is evaluated once, rather than once for the emptiness
+		       test and a second time for the loop.
+		    {% endcomment %}
+		    {% with cross_links=product.get_cross_links %}
+		    {% if cross_links %}
+		    <div class="cross-links">
+			<h6>Other editions and formats</h6>
+			<ul>
+			    {% for cross_link_name, cross_link in cross_links %}
+			    <li><a href="{{cross_link}}">{{cross_link_name}}</a></li>
+			    {% endfor %}
+			</ul>
+		    </div>
+		    {% endif %}
+		    {% endwith %}
 		</div>
 	    </div>
 	</div>

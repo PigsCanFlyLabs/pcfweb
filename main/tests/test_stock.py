@@ -4,6 +4,7 @@ from io import StringIO
 from unittest import mock
 
 from django.contrib import admin
+from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection
@@ -306,6 +307,15 @@ class ProductStockTest(TestCase):
     def test_product_admin_form_includes_editable_stock(self):
         product_admin = admin.site._registry[Product]
         request = RequestFactory().get("/admin/main/product/100/change/")
+        # RequestFactory does not run AuthenticationMiddleware, so the request
+        # it builds carries no `user`. That was harmless until Product gained
+        # the cross-link M2Ms in 0013: the admin wraps every relation field in
+        # a RelatedFieldWidgetWrapper, and constructing one calls
+        # has_add_permission(request), which reads request.user. A real admin
+        # request always has one, so attaching it restores the fidelity the
+        # bare factory was standing in for rather than papering over anything.
+        request.user = User.objects.create_superuser(
+            "admin-form-test", "admin@example.com", "unused-password")
 
         form = product_admin.get_form(request)
 
