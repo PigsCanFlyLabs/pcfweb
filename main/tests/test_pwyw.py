@@ -124,12 +124,29 @@ class PwywCheckoutTest(TestCase):
         self.assertNotIn("adjustable_quantity", item)
         self.assertEqual(params["mode"], "payment")
 
+    def test_fixed_price_lines_keep_adjustable_quantity_and_count(self):
+        first = self._fixed()
+        second = Product.objects.create(
+            name="Poster", external_product_id="prod_poster", price=2000)
+
+        params = self._checkout(self._cart((first, 1), (second, 1)))
+
+        by_price = {item["price"]: item for item in params["line_items"]}
+        self.assertEqual(len(by_price), 2)
+        self.assertEqual(
+            by_price[f"price_{first.pk}"]["adjustable_quantity"],
+            {"enabled": True})
+        self.assertEqual(
+            by_price[f"price_{second.pk}"]["adjustable_quantity"],
+            {"enabled": True})
+
     def test_a_mixed_cart_is_refused_before_stripe_checkout(self):
         pwyw, fixed = self._pwyw(), self._fixed()
         message, create = self._checkout_error(
             self._cart((pwyw, 1), (fixed, 1)))
 
         self.assertIn("only line in its checkout", message)
+        self.assertIn(fixed.name, message)
         create.assert_not_called()
 
     def test_a_pwyw_line_with_quantity_above_one_is_refused(self):

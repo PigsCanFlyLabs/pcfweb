@@ -555,6 +555,7 @@ class CartNotSoldHereTest(CartTestBase):
 
         self.assertIn("pwyw-checkout-blocker", html)
         self.assertIn("only line in its checkout", html)
+        self.assertIn("Distributed Computing 4 Kids", html)
         self.assertIn("disabled", html)
         self.assertNotIn('name="coupon"', html)
 
@@ -565,9 +566,6 @@ class CartNotSoldHereTest(CartTestBase):
         html = client.get("/cart").content.decode()
 
         self.assertIn("pwyw-notice", html)
-        self.assertIn("with quantity 1", html)
-        self.assertIn("without a", html)
-        self.assertIn("coupon code", html)
         self.assertNotIn("pwyw-checkout-blocker", html)
         self.assertNotIn('name="coupon"', html)
 

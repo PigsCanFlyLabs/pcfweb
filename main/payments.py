@@ -145,14 +145,18 @@ class Payments:
         if any(cart_product.quantity != 1 for cart_product in pwyw_lines):
             return (
                 "Stripe requires pay-what-you-want items to be checked out "
-                "one at a time. Change that item's quantity to 1 and then "
-                "start a separate checkout for anything else."
+                "one at a time. Remove that item from the cart and add it "
+                "again once."
             )
         if len(products) != 1:
+            other_names = ", ".join(
+                cart_product.product.name for cart_product in products
+                if not cart_product.product.is_pwyw
+            )
             return (
                 "Stripe requires a pay-what-you-want item to be the only "
-                "line in its checkout. Remove the other items and buy them "
-                "separately."
+                "line in its checkout. Remove these other items and buy "
+                f"them separately: {other_names}."
             )
         if coupon is not None:
             return (
@@ -195,18 +199,6 @@ class Payments:
         product_modes = [cart_product.product.mode for cart_product in products]
         if all(m == Product.Modes.PAYMENT for m in product_modes):
             mode = "payment"
-
-        if mode == "subscription" and any(
-                cart_product.product.is_pwyw for cart_product in products):
-            # custom_unit_amount is payment-mode only, and the session mode is
-            # a property of the whole cart: one subscription line would drag a
-            # pay-what-you-want line into subscription mode, which Stripe
-            # rejects. Refuse with something diagnosable instead.
-            raise ValueError(
-                "This cart mixes a pay-what-you-want product with a "
-                "subscription, so the whole session would have to be created "
-                "in subscription mode -- which Stripe's custom_unit_amount "
-                "does not support. They have to be bought separately.")
 
         # Shipping is about whether anything actually has to be posted, not
         # about how it is billed. Asking the buyer for a mailing address so

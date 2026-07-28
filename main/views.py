@@ -786,7 +786,7 @@ class CheckoutView(View, BaseCartView):
             return redirect('cart')
         pwyw_checkout_blocker = Payments.pwyw_checkout_blocker(
             cart, coupon=coupon)
-        if pwyw_checkout_blocker:
+        if pwyw_checkout_blocker is not None:
             logger.info(
                 "Blocked checkout for cart %s: %s",
                 cart.pk, pwyw_checkout_blocker)

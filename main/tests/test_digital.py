@@ -459,6 +459,28 @@ class DigitalDeliveryTest(BookAssetRootMixin, OrderTestBase):
         return self.place_order(
             product_pk=EBOOK_PK, quantity=1, session_id=session_id)
 
+    def manual_order(self, *items, session_id="cs_manual"):
+        order = Order.objects.create(
+            status=Order.Status.PENDING,
+            currency="usd",
+            amount_total=sum(product.price * quantity for product, quantity in items),
+            stripe_session_id=session_id,
+        )
+        OrderItem.objects.bulk_create([
+            OrderItem(
+                order=order,
+                product=product,
+                product_name=product.name,
+                unit_amount=product.price,
+                currency="usd",
+                quantity=quantity,
+                snapshot_quantity=quantity,
+                price_id=f"price_manual_{index}",
+            )
+            for index, (product, quantity) in enumerate(items, start=1)
+        ])
+        return order
+
     def test_paying_for_the_ebook_emails_a_working_download_link(self):
         order = self.buy_the_ebook()
 
@@ -599,13 +621,11 @@ class DigitalDeliveryTest(BookAssetRootMixin, OrderTestBase):
         self.assertEqual(len(self.order_emails()), 1)
 
     def test_a_mixed_order_ships_the_print_copy_and_emails_the_ebook(self):
-        self.client.post(f"/add-to-cart/{EBOOK_PK}/1")
-        self.client.post("/add-to-cart/104/1")
-        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
-            create.return_value = mock.Mock(
-                url="https://checkout.example/s", id="cs_mixed")
-            self.client.post("/checkout")
-        order = Order.objects.get(stripe_session_id="cs_mixed")
+        order = self.manual_order(
+            (Product.objects.get(pk=EBOOK_PK), 1),
+            (Product.objects.get(pk=104), 1),
+            session_id="cs_mixed",
+        )
 
         self.deliver(self.event_body(order))
 
@@ -663,6 +683,28 @@ class WithheldDigitalDeliveryTest(BookAssetRootMixin, OrderTestBase):
         # The mis-set-dropdown scenario: DIGITAL, but no distribution rights.
         Product.objects.filter(pk=EBOOK_PK).update(sells_ebook=False)
 
+    def manual_order(self, *items, session_id="cs_manual"):
+        order = Order.objects.create(
+            status=Order.Status.PENDING,
+            currency="usd",
+            amount_total=sum(product.price * quantity for product, quantity in items),
+            stripe_session_id=session_id,
+        )
+        OrderItem.objects.bulk_create([
+            OrderItem(
+                order=order,
+                product=product,
+                product_name=product.name,
+                unit_amount=product.price,
+                currency="usd",
+                quantity=quantity,
+                snapshot_quantity=quantity,
+                price_id=f"price_manual_{index}",
+            )
+            for index, (product, quantity) in enumerate(items, start=1)
+        ])
+        return order
+
     def test_a_withheld_book_sends_nothing_and_is_recorded(self):
         self.withhold_the_ebook()
         order = self.place_order(product_pk=EBOOK_PK, quantity=1)
@@ -715,13 +757,11 @@ class WithheldDigitalDeliveryTest(BookAssetRootMixin, OrderTestBase):
         # One product we may not distribute must not swallow the one we may.
         Product.objects.filter(pk=100).update(
             delivery_type=Product.DeliveryTypes.DIGITAL, sells_ebook=False)
-        self.client.post(f"/add-to-cart/{EBOOK_PK}/1")
-        self.client.post("/add-to-cart/100/1")
-        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
-            create.return_value = mock.Mock(
-                url="https://checkout.example/s", id="cs_partial")
-            self.client.post("/checkout")
-        order = Order.objects.get(stripe_session_id="cs_partial")
+        order = self.manual_order(
+            (Product.objects.get(pk=EBOOK_PK), 1),
+            (Product.objects.get(pk=100), 1),
+            session_id="cs_partial",
+        )
 
         with self.assertLogs("main.models", level="ERROR"):
             self.deliver(self.event_body(order))
@@ -752,13 +792,11 @@ class WithheldDigitalDeliveryTest(BookAssetRootMixin, OrderTestBase):
     def test_the_refusal_names_every_withheld_product(self):
         Product.objects.filter(pk__in=[100, EBOOK_PK]).update(
             delivery_type=Product.DeliveryTypes.DIGITAL, sells_ebook=False)
-        self.client.post(f"/add-to-cart/{EBOOK_PK}/1")
-        self.client.post("/add-to-cart/100/1")
-        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
-            create.return_value = mock.Mock(
-                url="https://checkout.example/s", id="cs_both")
-            self.client.post("/checkout")
-        order = Order.objects.get(stripe_session_id="cs_both")
+        order = self.manual_order(
+            (Product.objects.get(pk=EBOOK_PK), 1),
+            (Product.objects.get(pk=100), 1),
+            session_id="cs_both",
+        )
 
         with self.assertLogs("main.models", level="ERROR"):
             self.deliver(self.event_body(order))
