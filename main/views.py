@@ -1118,9 +1118,16 @@ class CheckoutSuccessView(View, BaseCartView):
     """Where Stripe sends the customer after a completed Checkout session.
 
     Has to stay a GET -- Stripe redirects the browser here -- so it is
-    reachable cross-site. It is therefore deliberately *not* the source of
-    payment truth: the order shown is whatever the webhook already recorded,
-    and its status is displayed as-is rather than asserted to be paid.
+    reachable cross-site. The mere arrival of a redirect proves nothing:
+    this URL can be hit cross-site with any session_id.
+
+    The order shown is whatever the webhook already recorded. When the
+    webhook has not yet run (or never will -- the customer closed the tab,
+    the webhook is delayed, or the delivery was missed), a server-side
+    reconciliation asks Stripe for the real payment status. That path is
+    the fallback, not the primary source of truth: a customer who finishes
+    on another device or pays by a delayed method never loads this page,
+    and the webhook remains the only thing that can catch those cases.
     """
 
     def get(self, request):
@@ -1135,10 +1142,66 @@ class CheckoutSuccessView(View, BaseCartView):
                 stripe_session_id=session_id).prefetch_related('items').first()
         if order is not None:
             self.get_cart(request).clear()
+            if order.status == Order.Status.PENDING:
+                self._reconcile_with_stripe(order, session_id)
         return render(request, 'checkout_success.html', context={
             'title': 'Success! - Checkout',
             'order': order,
         })
+
+    def _reconcile_with_stripe(self, order: Order, session_id: str) -> None:
+        """Ask Stripe for the real payment status, server-side.
+
+        Only called when the webhook has not yet marked this order paid.
+        Never raises and never redirects: this is a best-effort fallback
+        inside a page the customer is already looking at. A timeout or error
+        leaves the order as the webhook left it, and the page still renders.
+
+        The Stripe lookup is gated on two cheap checks first -- the order
+        must be PENDING and the session_id must have resolved to a local
+        order -- so a scanner hitting the URL with random session_ids never
+        reaches Stripe's API.
+        """
+        try:
+            session = stripe.checkout.Session.retrieve(session_id)
+        except Exception as e:
+            logger.warning(
+                "Checkout success page could not retrieve Stripe session "
+                "%s for order #%s: %s", session_id, order.pk, e)
+            return
+
+        payment_status = session.get("payment_status")
+        if payment_status not in StripeWebhookView.PAID_PAYMENT_STATUSES:
+            logger.info(
+                "Checkout success page: Stripe session %s for order #%s "
+                "reports payment_status %r, which is not a paid status; "
+                "leaving the order PENDING.",
+                session_id, order.pk, payment_status)
+            return
+
+        webhook = StripeWebhookView()
+        fields = webhook.paid_fields(session)
+        with transaction.atomic():
+            Order.objects.select_for_update().filter(pk=order.pk).first()
+            updated = Order.objects.filter(
+                pk=order.pk, status=Order.Status.PENDING).update(**fields)
+
+        if not updated:
+            order.refresh_from_db()
+            if order.status == Order.Status.PAID:
+                logger.info(
+                    "Checkout success page: order #%s was already PAID "
+                    "(likely raced with the webhook); running fulfilment.",
+                    order.pk)
+                webhook.fulfil_order(order)
+            else:
+                logger.info(
+                    "Checkout success page: order #%s is past PENDING; "
+                    "not overwriting.", order.pk)
+            return
+
+        order.refresh_from_db()
+        webhook.fulfil_order(order)
 
 
 @method_decorator(csrf_exempt, name='dispatch')

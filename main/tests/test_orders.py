@@ -1,16 +1,22 @@
 """Tests for order creation and the checkout success page."""
 
+import contextlib
+import threading
+import traceback
 from unittest import mock
 
 import stripe
 from django.contrib.auth.models import User
 from django.core import mail
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection as django_connection, transaction
 from django.template.loader import render_to_string
-from django.test import RequestFactory
+from django.test import Client, RequestFactory, TransactionTestCase, override_settings
 
 from main.models import Cart, CartProduct, Order, OrderItem, Product
-from main.tests.base import OrderTestBase
+from main.tests.base import (
+    ORDER_TEST_SETTINGS, OrderTestBase, OrderTestMixin,
+    OWNER_EMAIL, stripe_signature, WEBHOOK_URL)
+from main.views import StripeWebhookView
 
 
 class CheckoutCreatesOrderTest(OrderTestBase):
@@ -299,6 +305,206 @@ class CheckoutSuccessPageTest(OrderTestBase):
         self.assertNotContains(response, "Order #")
 
 
+class CheckoutSuccessReconciliationTest(OrderTestBase):
+    """The success page asks Stripe when the webhook has not yet run.
+
+    Every test here mocks only stripe.checkout.Session.retrieve and never
+    delivers a webhook, so the order's initial state is always what the
+    checkout left behind -- PENDING, with no fulfilment markers set.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # The book asset root for download tests.
+        from pathlib import Path
+        import tempfile, shutil
+        from django.test import override_settings
+        from main.tests.base import write_book_archive, EBOOK_STEM
+        self._asset_root = Path(tempfile.mkdtemp(prefix="pcfweb-books-")).resolve()
+        self.addCleanup(shutil.rmtree, self._asset_root, True)
+        self._settings_patch = override_settings(
+            BOOK_ASSET_ROOT=str(self._asset_root))
+        self._settings_patch.enable()
+        self.addCleanup(self._settings_patch.disable)
+        write_book_archive(self._asset_root, EBOOK_STEM)
+
+    def _mock_stripe_session(self, order, **overrides):
+        """Return a patch object for stripe.checkout.Session.retrieve."""
+        session = self.session_payload(order, **overrides)
+        return mock.patch(
+            "stripe.checkout.Session.retrieve",
+            return_value=session)
+
+    def test_when_the_webhook_never_runs_the_page_asks_stripe_and_fulfils(self):
+        """The common case this feature exists for: a late or missing webhook."""
+        order = self.place_order(product_pk=100, quantity=1)
+        self.assertEqual(order.status, Order.Status.PENDING)
+        self.assertEqual(len(mail.outbox), 0)
+
+        with self._mock_stripe_session(order):
+            response = self.client.get(
+                f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertIsNotNone(order.paid_at)
+        self.assertIsNotNone(order.notified_at)
+        self.assertEqual(len(self.order_emails()), 1)
+
+    def test_stripe_reports_unpaid_order_stays_pending(self):
+        """A session Stripe says is unpaid must not be treated as paid."""
+        order = self.place_order(product_pk=100, quantity=1)
+
+        with self._mock_stripe_session(order, payment_status="unpaid"):
+            with self.assertLogs("main.views", level="INFO") as log:
+                response = self.client.get(
+                    f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PENDING)
+        self.assertIsNone(order.paid_at)
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertTrue(
+            any("reports payment_status 'unpaid'" in msg for msg in log.output))
+
+    def test_no_payment_required_free_order_reaches_fulfilment(self):
+        """$0 pay-what-you-want: no_payment_required must be in the set."""
+        order = self.place_order(product_pk=106, quantity=1)
+
+        with self._mock_stripe_session(
+                order, payment_status="no_payment_required",
+                amount_total=0, amount_subtotal=0,
+                total_details={"amount_tax": 0, "amount_shipping": 0}):
+            response = self.client.get(
+                f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertIsNotNone(order.notified_at)
+        self.assertIsNotNone(order.digital_delivery_sent_at)
+        self.assertEqual(len(self.order_emails()), 1)
+
+    def test_already_paid_order_does_not_call_stripe(self):
+        """DoS protection: the Stripe call is skipped when already PAID."""
+        order = self.place_order(product_pk=100, quantity=1)
+        self.deliver(self.event_body(order))
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PAID)
+        mail.outbox.clear()
+
+        with mock.patch(
+                "stripe.checkout.Session.retrieve") as retrieve:
+            response = self.client.get(
+                f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        retrieve.assert_not_called()
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_no_session_id_does_not_call_stripe(self):
+        """An empty session_id resolves to no order, so Stripe is never hit."""
+        self.place_order()
+
+        with mock.patch(
+                "stripe.checkout.Session.retrieve") as retrieve:
+            response = self.client.get("/checkout/success")
+
+        self.assertEqual(response.status_code, 200)
+        retrieve.assert_not_called()
+
+    def test_nonexistent_session_id_does_not_call_stripe(self):
+        """Any session_id that resolves to no local order skips Stripe."""
+        self.place_order()
+
+        with mock.patch(
+                "stripe.checkout.Session.retrieve") as retrieve:
+            response = self.client.get(
+                "/checkout/success?session_id=cs_nonexistent")
+
+        self.assertEqual(response.status_code, 200)
+        retrieve.assert_not_called()
+
+    def test_stripe_timeout_still_renders_the_page(self):
+        """The page must render even when Stripe is unreachable."""
+        order = self.place_order(product_pk=100, quantity=1)
+        mail.outbox.clear()
+
+        with mock.patch(
+                "stripe.checkout.Session.retrieve",
+                side_effect=stripe.APIConnectionError("Connection timed out")):
+            with self.assertLogs("main.views", level="WARNING") as log:
+                response = self.client.get(
+                    f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PENDING)
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertTrue(
+            any("could not retrieve Stripe session" in msg
+                for msg in log.output))
+
+    def test_stripe_error_still_renders_the_page(self):
+        """Any Stripe API error leaves the order untouched and the page up."""
+        order = self.place_order(product_pk=100, quantity=1)
+        mail.outbox.clear()
+
+        with mock.patch(
+                "stripe.checkout.Session.retrieve",
+                side_effect=stripe.PermissionError("Invalid API key")):
+            with self.assertLogs("main.views", level="WARNING") as log:
+                response = self.client.get(
+                    f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PENDING)
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertTrue(
+            any("could not retrieve Stripe session" in msg
+                for msg in log.output))
+
+    def test_reconciliation_only_runs_when_order_is_pending(self):
+        """The Stripe call is the third guard: order exists, order is PENDING."""
+        order = self.place_order(product_pk=100, quantity=1)
+        # Mark it cancelled -- not PENDING and not PAID.
+        Order.objects.filter(pk=order.pk).update(status=Order.Status.CANCELLED)
+
+        with mock.patch(
+                "stripe.checkout.Session.retrieve") as retrieve:
+            response = self.client.get(
+                f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        retrieve.assert_not_called()
+
+    def test_cart_still_cleared_after_successful_reconciliation(self):
+        """The existing cart-clearing behaviour is preserved."""
+        order = self.place_order(product_pk=100, quantity=1)
+        self.assertTrue(CartProduct.objects.exists())
+
+        with self._mock_stripe_session(order):
+            self.client.get(
+                f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertFalse(CartProduct.objects.exists())
+
+    def test_cart_not_cleared_for_unknown_session(self):
+        """A stranger cannot clear the cart with a random session_id."""
+        self.place_order()
+        self.assertTrue(CartProduct.objects.exists())
+
+        with mock.patch(
+                "stripe.checkout.Session.retrieve") as retrieve:
+            self.client.get("/checkout/success?session_id=cs_unknown")
+
+        self.assertTrue(CartProduct.objects.exists())
+        retrieve.assert_not_called()
+
+
 class OrderModelTest(OrderTestBase):
     def test_the_snapshot_subtotal_sums_the_lines(self):
         order = Order.objects.create()
@@ -334,3 +540,102 @@ class OrderModelTest(OrderTestBase):
         Order.objects.create()
         self.assertEqual(
             Order.objects.filter(stripe_session_id__isnull=True).count(), 2)
+
+
+
+@override_settings(**ORDER_TEST_SETTINGS)
+class CheckoutSuccessConcurrencyTest(OrderTestMixin, TransactionTestCase):
+    """A webhook delivery and a success-page reconciliation that overlap.
+
+    The window is real: both paths call Stripe, both check payment_status,
+    both attempt a conditional PENDING->PAID UPDATE, and both then try to
+    fulfil. Only one can win the PAID transition, and only one can claim
+    the fulfilment lease. Every side effect must happen exactly once.
+    """
+
+    @contextlib.contextmanager
+    def as_a_separate_worker_process(self):
+        """Run a request in a separate thread with no shared memory."""
+        view_class = StripeWebhookView
+        saved = {name: value
+                 for name, value in vars(view_class).items()
+                 if type(value) is set}
+        for name in saved:
+            setattr(view_class, name, set())
+        try:
+            yield
+        finally:
+            for name, value in saved.items():
+                setattr(view_class, name, value)
+
+    @staticmethod
+    def customer_emails():
+        return [m for m in mail.outbox if "Your download" in m.subject]
+
+    def test_one_of_each_email_when_webhook_and_page_race(self):
+        """Webhook + success page concurrently: exactly one fulfilment."""
+        from pathlib import Path
+        import tempfile, shutil
+        from main.tests.base import write_book_archive, EBOOK_STEM
+        asset_root = Path(tempfile.mkdtemp(prefix="pcfweb-conc-")).resolve()
+        self.addCleanup(shutil.rmtree, asset_root, True)
+        settings_patch = override_settings(BOOK_ASSET_ROOT=str(asset_root))
+        settings_patch.enable()
+        self.addCleanup(settings_patch.disable)
+        write_book_archive(asset_root, EBOOK_STEM)
+
+        order = self.place_order(product_pk=106, quantity=1)
+        body = self.event_body(order)
+        signature = stripe_signature(body)
+
+        # Both paths see the same Stripe session.
+        session = self.session_payload(order)
+
+        overlapped = []
+        failures = []
+        real_fulfil = StripeWebhookView.fulfil_order
+
+        def success_page_worker():
+            try:
+                with self.as_a_separate_worker_process():
+                    c = Client()
+                    with mock.patch(
+                            "stripe.checkout.Session.retrieve",
+                            return_value=session):
+                        c.get(
+                            f"/checkout/success"
+                            f"?session_id={order.stripe_session_id}")
+            except Exception:
+                failures.append(traceback.format_exc())
+            finally:
+                django_connection.close()
+
+        def fulfil_and_overlap(webhook_view, order_to_fulfil):
+            # Hold the first worker *inside* its fulfilment -- the exact
+            # window where its markers are still null -- and run the whole
+            # of the success page there.
+            if not overlapped:
+                overlapped.append(True)
+                thread = threading.Thread(target=success_page_worker)
+                thread.start()
+                thread.join(timeout=30)
+                self.assertFalse(thread.is_alive(),
+                                 "the success page worker never finished")
+            return real_fulfil(webhook_view, order_to_fulfil)
+
+        with mock.patch.object(
+                __import__('main.views', fromlist=['StripeWebhookView']
+                          ).StripeWebhookView,
+                'fulfil_order', fulfil_and_overlap):
+            self.deliver(body, signature=signature)
+
+        self.assertEqual(failures, [], "the second worker raised")
+        self.assertTrue(overlapped, "the workers never actually overlapped")
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PAID)
+        # Exactly one owner email.
+        self.assertEqual(len(self.order_emails()), 1)
+        # Exactly one download email.
+        self.assertEqual(len(self.customer_emails()), 1)
+        # The claim is handed back.
+        self.assertIsNone(order.fulfilment_claimed_at)
