@@ -827,7 +827,7 @@ class CallerContractTest(SimpleTestCase):
         self.assertIn(
             "check-local-runtime.sh --allow-absent-asset-tree", source)
 
-    def test_run_local_serves_static_root_instead_of_staticfiles_finders(self):
+    def test_run_local_disables_the_default_staticfiles_interceptor(self):
         source = RUN_LOCAL.read_text()
 
         self.assertIn("runserver_plus --nostatic", source)
