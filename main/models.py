@@ -1149,6 +1149,14 @@ class Order(models.Model):
     # old pod's checkout INSERT during a rolling deploy still succeeds.
     fulfilment_claimed_at = models.DateTimeField(null=True, blank=True)
 
+    # Whether the buyer received their receipt email. Kept separately from
+    # the notification and digital-delivery markers because it is best-effort:
+    # a receipt failure must never block delivery or owner notification.
+    # Nullable (no db_default needed on the timestamp), and the error column
+    # carries a db_default so an old pod's checkout INSERT still succeeds.
+    receipt_sent_at = models.DateTimeField(null=True, blank=True)
+    receipt_error = models.TextField(blank=True, db_default="")
+
     class Meta:
         ordering = ['-created_at']
 
@@ -1718,6 +1726,123 @@ class Order(models.Model):
                 "Order #%s: could not even record the notification failure.",
                 self.pk)
         self.notification_error = message[:2000]
+
+    # ---- buyer receipt ----
+
+    def receipt_subject(self) -> str:
+        return f"Your receipt for order #{self.pk} \u2014 Pigs Can Fly Labs"
+
+    def receipt_body(self) -> str:
+        lines = [
+            f"Order #{self.pk}",
+            f"Date: {self.created_at:%B %-d, %Y}",
+            "",
+            "Items",
+            "-----",
+        ]
+        physical_lines = []
+        for item in self.items.all():
+            line = (
+                f"  {item.quantity} x {item.product_name}"
+                f" @ {_display_amount(item.unit_amount)}"
+                f" = {_display_amount(item.total_amount())}"
+            )
+            if item.product is not None and item.product.is_pwyw:
+                line += "   (pay-what-you-want: the amount you chose)"
+            lines.append(line)
+            if item.product is not None and item.product.is_physical_good():
+                physical_lines.append(item)
+
+        lines += [
+            "",
+            f"Subtotal:  {_display_amount(self.amount_subtotal)}",
+        ]
+        if self.amount_tax:
+            lines += [
+                f"Tax:       {_display_amount(self.amount_tax)}",
+                "",
+                "Prices on the site are shown without tax. Tax is added at "
+                "checkout, so the total below is higher than the product "
+                "page displayed.",
+            ]
+        lines += [
+            f"Total:     {_display_amount(self.amount_total)}"
+            f" {self.currency.upper()}",
+            "",
+        ]
+
+        # What happens next
+        lines += ["What happens next", "-----------------"]
+
+        digital = self.digital_items()
+        if digital:
+            lines += [
+                "This order includes digital goods. A download link email "
+                f"{'has been' if self.digital_delivery_sent_at else 'will be'}"
+                " sent to you separately. Each link is good for "
+                f"{link_lifetime_days()} days. Save the files somewhere "
+                "safe \u2014 no DRM, yours to keep.",
+                "",
+            ]
+
+        if physical_lines:
+            lines += [
+                "This order includes physical goods. Shipping times for "
+                "physical goods are currently long \u2014 please expect "
+                "delays. You will receive a shipping confirmation when "
+                "your order is on its way.",
+                "",
+                "Shipping to",
+                "------------",
+            ]
+            address = self.shipping_address_lines()
+            lines += [f"  {line}" for line in address] or [
+                "  (no shipping address on file)"]
+            lines.append("")
+
+        lines += [
+            "If something is wrong with your order, reply to this mail or "
+            f"write to {settings.DEFAULT_FROM_EMAIL} and include your "
+            "order number.",
+        ]
+        return "\n".join(lines)
+
+    def send_receipt(self) -> bool:
+        if not self.customer_email:
+            message = (
+                "no customer email on the order, so the receipt could "
+                "not be sent")
+            logger.warning("Order #%s: %s", self.pk, message)
+            self._record_receipt_failure(message)
+            return False
+        try:
+            send_mail(
+                self.receipt_subject(),
+                self.receipt_body(),
+                settings.DEFAULT_FROM_EMAIL,
+                [self.customer_email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            logger.exception(
+                "Order #%s: failed to send the buyer receipt.", self.pk)
+            self._record_receipt_failure(f"{type(e).__name__}: {e}")
+            return False
+        Order.objects.filter(pk=self.pk).update(
+            receipt_sent_at=timezone.now(), receipt_error="")
+        self.receipt_sent_at = timezone.now()
+        self.receipt_error = ""
+        return True
+
+    def _record_receipt_failure(self, message: str) -> None:
+        try:
+            Order.objects.filter(pk=self.pk).update(
+                receipt_error=message[:2000])
+        except Exception:
+            logger.exception(
+                "Order #%s: could not record the receipt failure.",
+                self.pk)
+        self.receipt_error = message[:2000]
 
 
 class OrderItem(models.Model):
