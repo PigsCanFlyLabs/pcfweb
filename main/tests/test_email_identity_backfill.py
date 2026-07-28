@@ -2,16 +2,25 @@ from io import StringIO
 from unittest import mock
 
 from django.contrib.auth.models import User
+from django.core import mail
 from django.core.management import call_command
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext, override_settings
 
 from main.models import EmailIdentity
 
 
+@override_settings(
+    ADMINS=[("Owner", "owner@example.com")],
+    DEFAULT_FROM_EMAIL="support@pigscanfly.ca",
+)
 class EmailIdentityBackfillCommandTest(TestCase):
-    def run_command(self):
+    def run_command(self, *args):
         out = StringIO()
-        call_command("backfill_email_identities", stdout=out)
+        err = StringIO()
+        call_command("backfill_email_identities", *args, stdout=out, stderr=err)
+        self.last_stderr = err.getvalue()
         return out.getvalue()
 
     def test_backfill_creates_missing_identity_rows(self):
@@ -63,6 +72,26 @@ class EmailIdentityBackfillCommandTest(TestCase):
             user.pk,
         )
 
+    def test_second_run_writes_nothing(self):
+        User.objects.create_user(
+            username="first", email="first@example.com", password="x")
+        User.objects.create_user(
+            username="second", email="second@example.com", password="x")
+
+        first = self.run_command()
+        with CaptureQueriesContext(connection) as captured:
+            second = self.run_command()
+
+        writes = [query["sql"] for query in captured.captured_queries
+                  if query["sql"].lstrip().upper().startswith(
+                      ("INSERT", "UPDATE", "DELETE"))]
+        self.assertIn("created=2", first)
+        self.assertIn("created=0", second)
+        self.assertIn("claimed=0", second)
+        self.assertIn("duplicates=0", second)
+        self.assertIn("errors=0", second)
+        self.assertEqual(writes, [])
+
     def test_backfill_swallow_unexpected_row_errors(self):
         User.objects.create_user(
             username="first", email="first@example.com", password="x")
@@ -88,3 +117,39 @@ class EmailIdentityBackfillCommandTest(TestCase):
         self.assertIn("created=1", output)
         self.assertTrue(EmailIdentity.objects.filter(
             normalized_email="second@example.com").exists())
+
+    def test_top_level_failure_mails_admins_and_can_fail(self):
+        out = StringIO()
+        err = StringIO()
+        with mock.patch(
+                "main.management.commands.backfill_email_identities.backfill_email_identities",
+                side_effect=RuntimeError("boom")):
+            with self.assertRaises(SystemExit) as caught:
+                call_command(
+                    "backfill_email_identities", "--fail",
+                    stdout=out, stderr=err)
+
+        self.assertEqual(caught.exception.code, 1)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(
+            mail.outbox[0].subject,
+            "[pcfweb] EmailIdentity backfill failed on primary startup",
+        )
+        self.assertIn("RuntimeError: boom", mail.outbox[0].body)
+        self.assertIn("did not complete", err.getvalue())
+
+    def test_alert_mail_failure_is_logged_not_raised(self):
+        with mock.patch(
+                "main.management.commands.backfill_email_identities.backfill_email_identities",
+                side_effect=RuntimeError("boom")):
+            with mock.patch(
+                    "main.utils.send_mail",
+                    side_effect=RuntimeError("smtp down")):
+                with self.assertLogs(
+                        "main.management.commands.backfill_email_identities",
+                        level="ERROR") as caught:
+                    output = self.run_command()
+
+        self.assertEqual(output, "")
+        self.assertEqual(mail.outbox, [])
+        self.assertIn("Could not email owner@example.com", "\n".join(caught.output))

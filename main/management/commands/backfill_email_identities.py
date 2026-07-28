@@ -23,8 +23,11 @@ from django.core.management.base import BaseCommand
 from django.db import IntegrityError
 
 from main.models import EmailIdentity, normalize_email_identity
+from main.utils import email_admins
 
 logger = logging.getLogger(__name__)
+
+SUBJECT = "[pcfweb] EmailIdentity backfill failed on primary startup"
 
 
 def backfill_email_identities() -> dict[str, int]:
@@ -85,11 +88,45 @@ class Command(BaseCommand):
         "have one. Best-effort: duplicate-address residue is logged and "
         "skipped rather than aborting startup.")
 
+    def add_arguments(self, parser: Any) -> None:
+        parser.add_argument(
+            "--no-email", action="store_true",
+            help="Report failures to the log and stderr only; do not mail ADMINS.")
+        parser.add_argument(
+            "--fail", action="store_true",
+            help=("Exit non-zero on a command-level failure. Row-level cleanup "
+                  "problems are still logged and skipped."))
+
     def handle(self, *args: Any, **options: Any) -> None:
-        counts = backfill_email_identities()
+        try:
+            counts = backfill_email_identities()
+        except Exception as e:
+            logger.exception("EmailIdentity backfill failed before it could complete.")
+            body = (
+                "The primary startup cleanup that backfills EmailIdentity rows "
+                "did not complete.\n\n"
+                f"Error: {type(e).__name__}: {e}\n\n"
+                "The site can still serve traffic, but users created by old "
+                "replicas during the initial rollout window may remain without "
+                "a reservation row until this command runs cleanly."
+            )
+            self.stderr.write(self.style.ERROR(body))
+            if not options.get("no_email"):
+                self._email(body)
+            if options.get("fail"):
+                raise SystemExit(1)
+            return
+
         self.stdout.write(
             "Backfilled EmailIdentity rows: "
             f"created={counts['created']} "
             f"claimed={counts['claimed']} "
             f"duplicates={counts['duplicates']} "
             f"errors={counts['errors']}")
+
+    def _email(self, body: str) -> None:
+        if email_admins(
+                SUBJECT, body, logger,
+                "about the EmailIdentity backfill failure. Set the "
+                "ORDER_NOTIFICATION_EMAIL env var."):
+            self.stdout.write("Emailed ADMINS.")

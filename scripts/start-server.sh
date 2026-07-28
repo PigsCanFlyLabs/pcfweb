@@ -9,9 +9,10 @@ if [ -n "${PRIMARY:-}" ]; then
   ./manage.py migrate
   ./manage.py seed_products
   # Close any old-replica signup window without making startup depend on
-  # legacy data being perfectly clean. The command itself logs and continues
-  # past duplicate-address residue; this `||` is a second guard against some
-  # unrelated failure under `set -e`.
+  # legacy data being perfectly clean. Row-level residue is already tolerated
+  # inside the command and exits 0; this `||` is only for a command-level
+  # failure under `set -e` (import error, broken query, missing table, ...),
+  # so a busted cleanup still does not stop the primary from booting.
   ./manage.py backfill_email_identities \
     || echo "start-server.sh: backfill_email_identities failed; starting anyway." >&2
   # Now that the catalogue is up to date, check that every product it sells
