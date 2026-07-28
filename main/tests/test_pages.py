@@ -398,6 +398,7 @@ class HomePageCardsTest(TestCase):
     FEATURED_CARD_COPY = (
         "Distributed Computing 4 Kids and Executives: "
         "Executives may require more help")
+    LIBERATED_BREAD_TAGLINE = "Liberating your toaster since '26"
 
     # The rendered form of a Liberated Bread link. One capture group, the
     # destination, so findall returns the URLs themselves.
@@ -573,7 +574,7 @@ class HomePageCardsTest(TestCase):
 
         logo = section.index("liberated-bread-logo-512.png")
         wording = section.index(
-            "The same company as Pigs Can Fly Labs, with its own site")
+            html_module.escape(self.LIBERATED_BREAD_TAGLINE))
         between = section[logo:wording]
 
         # Nothing else's card sits between them.
@@ -585,13 +586,19 @@ class HomePageCardsTest(TestCase):
         section = self.explore_section()
 
         self.assertIn(
-            "<span>The same company as Pigs Can Fly Labs, with its own "
-            "site</span>",
+            f"<span>{html_module.escape(self.LIBERATED_BREAD_TAGLINE)}</span>",
             section)
         self.assertIn("Liberated Bread <span", section)
         self.assertIn(">Coming Soon</span>", section)
         # Still the .types card, so it keeps the grid's shared styling.
         self.assertIn('<div class="types">', section)
+
+    def test_the_liberated_bread_tagline_is_owner_copy(self):
+        section = self.explore_section()
+
+        self.assertIn(
+            html_module.escape("Liberating your toaster since '26"),
+            section)
 
     def test_the_featured_book_card_links_to_the_seeded_product(self):
         section = self.explore_section()
@@ -763,7 +770,7 @@ class HomePageCardsTest(TestCase):
 
         logo = section.index("liberated-bread-logo-512.png")
         bread_copy = section.index(
-            "The same company as Pigs Can Fly Labs, with its own site")
+            html_module.escape(self.LIBERATED_BREAD_TAGLINE))
         self.assertLess(
             logo, bread_copy,
             "the first row should read image-then-text")
