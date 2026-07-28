@@ -71,7 +71,7 @@ spec:
         app: web-primary
     spec:
       containers:
-        - image: holdenk/pcfweb:v0.13.0
+        - image: holdenk/pcfweb:v0.13.2
           name: pcfweb
           env:
           - name: PRIMARY
@@ -136,7 +136,7 @@ metadata:
   labels:
     app: pcfweb
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: pcfweb
@@ -150,7 +150,7 @@ spec:
       # against the old schema until it caught up. Block here instead: the
       # pod does not come up at all until the schema it expects is live.
       initContainers:
-        - image: holdenk/pcfweb:v0.13.0
+        - image: holdenk/pcfweb:v0.13.2
           name: wait-for-migrations
           command: ["/bin/bash", "-c"]
           args:
@@ -183,7 +183,7 @@ spec:
             limits:
               memory: 512Mi
       containers:
-        - image: holdenk/pcfweb:v0.13.0
+        - image: holdenk/pcfweb:v0.13.2
           name: pcfweb
           env:
           - name: DBPASSWORD
