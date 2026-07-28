@@ -116,6 +116,42 @@ if [ "$asset_status" -ne 0 ] && [ "$asset_status" -ne 3 ]; then
   exit "$asset_status"
 fi
 
+# ---------------------------------------------------------------------------
+# Collect static files and pre-generate thumbnails.
+#
+# Templates reference static assets (logo-cropped.png, CSS, JS) and product
+# covers through STATIC_URL, which resolves them via STATIC_ROOT, not via the
+# staticfiles finders. So a file that is committed (like logo-cropped.png) or
+# synced above (like book covers) is still invisible until collectstatic copies
+# it into STATIC_ROOT.
+#
+# Thumbnails are generated into STATIC_ROOT at build time. The thumbnail engine
+# resolves SOURCE files through STATIC_ROOT too, so a cover that exists but was
+# not collected produces 'The source file does not appear to be an image' (which
+# actually means 'not found at STATIC_ROOT'), not a resize.
+#
+# --allow-absent-asset-tree lets the server start even when the sibling
+# pcfweb-assets checkout is missing -- someone working on checkout logic should
+# not be blocked by unrelated missing covers. build.sh omits this flag (strict).
+#
+# This is the same flow as build.sh (which calls scripts/checks.sh), minus mypy
+# and tests. Keeping local and deploy in step means a run_local.sh success
+# predicts a build.sh success.
+# ---------------------------------------------------------------------------
+python manage.py collectstatic --no-input
+python manage.py pregenerate_thumbnails --allow-absent-asset-tree
+
+# Verify that collectstatic and pregenerate_thumbnails actually ran and produced
+# the expected files. Fails loudly if the logo or thumbnails are missing, naming
+# what is absent -- a non-vacuity guard that cannot be satisfied by a directory
+# merely existing. Catches regressions where the calls above are removed or
+# reordered.
+#
+# --warn downgrades to loud warnings: someone working on checkout logic should
+# not be blocked by missing covers, but they should be TOLD the covers are
+# missing so they do not read a broken page as a broken implementation.
+./scripts/check-local-runtime.sh --warn
+
 # The digital-download archives, from the sibling pcfweb-book-assets checkout.
 # Warn rather than refuse: that repo is Git LFS with a multi-megabyte ZIP per
 # book, so a machine that never touches fulfilment legitimately does not have
