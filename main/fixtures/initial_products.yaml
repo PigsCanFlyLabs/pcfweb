@@ -19,6 +19,8 @@
 # They are separate products with separate ISBNs, not one row
 # updated in place -- the 1st edition is still in print and still sold, and
 # overwriting it would have silently repointed every existing link to it.
+# Both rows name their edition, as pk 100 does; neither is the unsuffixed
+# "High Performance Spark".
 #
 # The values belong here, not in the admin. `ebook_asin` used to be in
 # seed_products' SEED_PROTECTED_FIELDS, which made a fixture carrying one exit
@@ -75,7 +77,14 @@
 - model: main.product
   pk: 101
   fields:
-    name: "High Performance Spark"
+    # Carries its edition in the name, following pk 100. Both editions are in
+    # print and both are sold here, so an unsuffixed "High Performance Spark"
+    # sitting next to pk 108 reads as *the* book rather than the older one --
+    # and this row is the cheaper of the two, so it is the one a shopper
+    # scanning on price lands on first. Renaming the row is the whole fix
+    # here: no badge, no cross-link, no delisting. It is still in print and
+    # still purchasable.
+    name: "High Performance Spark (1st edition)"
     description: >-
       Best practices for scaling and optimizing Apache Spark. If you've used
       Spark to solve medium-sized problems but still struggle to realize the
@@ -372,9 +381,9 @@
 - model: main.product
   pk: 108
   fields:
-    # O'Reilly's own catalogue title for this edition, verbatim. pk 101 keeps
-    # the unsuffixed "High Performance Spark", so the two rows are already
-    # distinguishable without renaming the 1st edition.
+    # O'Reilly's own catalogue title for this edition, verbatim. pk 101 was
+    # renamed to "High Performance Spark (1st edition)" when this row landed,
+    # so neither of the two is the unsuffixed one.
     name: "High Performance Spark, 2nd Edition"
     description: >-
       The second edition, rewritten for Spark 4.x. Holden Karau, Adi Polak,

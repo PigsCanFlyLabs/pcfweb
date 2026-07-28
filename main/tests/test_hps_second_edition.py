@@ -147,14 +147,52 @@ class BothEditionsCoexistTest(TestCase):
 
     fixtures = ["initial_products"]
 
-    def test_the_first_edition_row_is_untouched(self):
+    def test_the_first_edition_names_its_edition(self):
+        """The one field on pk 101 that the 2nd edition is allowed to change.
+
+        Deliberately a separate test from the identifier guard below, and
+        deliberately still an assertEqual against the full expected string.
+        The rename is an intentional product decision, so it gets pinned as
+        precisely as the thing it was carved out of -- widening the identifier
+        guard to tolerate "any name" would have thrown away the coverage that
+        catches pk 101 being edited into the 2nd edition wholesale.
+        """
+        self.assertEqual(
+            Product.objects.get(pk=FIRST_EDITION_PK).name,
+            "High Performance Spark (1st edition)")
+
+    def test_the_first_editions_identifiers_are_untouched(self):
+        """Renaming the row must not have moved a single identifier on it.
+
+        This is the guard the rename could have quietly destroyed: every
+        column that identifies *which book* pk 101 is, asserted against the
+        1st edition's own values and against the 2nd edition's, so that
+        neither a copy-across nor an in-place "upgrade" of this row passes.
+        """
         first = Product.objects.get(pk=FIRST_EDITION_PK)
 
-        self.assertEqual(first.name, "High Performance Spark")
         self.assertEqual(first.print_isbn, FIRST_EDITION_PRINT_ISBN)
+        self.assertEqual(first.isbn, FIRST_EDITION_PRINT_ISBN)
         # The 1st edition's own retail EPUB ISBN is still pinned; adding the
         # 2nd edition must not have disturbed it.
         self.assertEqual(first.ebook_isbn, "9781491943151")
+        self.assertEqual(first.image_name,
+                         "book_covers/high_performance_spark.jpg")
+        self.assertEqual(first.price, 4999)
+
+        # And explicitly none of the 2nd edition's identifiers.
+        self.assertNotEqual(first.print_isbn, SECOND_EDITION_PRINT_ISBN)
+        self.assertNotEqual(first.isbn, SECOND_EDITION_PRINT_ISBN)
+        self.assertNotEqual(first.ebook_isbn, SECOND_EDITION_PRINT_ISBN)
+        self.assertNotIn(SECOND_EDITION_ISBN10, first.amazon_link or "")
+
+    def test_the_first_edition_is_still_in_print_and_purchasable(self):
+        """The rename is the whole change: no delisting rode in with it."""
+        first = Product.objects.get(pk=FIRST_EDITION_PK)
+
+        self.assertFalse(first.noorder)
+        self.assertIn("High Performance Spark (1st edition)",
+                      self.client.get("/products").content.decode())
 
     def test_the_second_editions_asin_never_reaches_the_first_editions_row(self):
         """The wrong-book failure, asserted directly.
@@ -193,6 +231,20 @@ class BothEditionsCoexistTest(TestCase):
         html = self.client.get("/products").content.decode()
 
         self.assertIn("High Performance Spark, 2nd Edition", html)
+
+    def test_neither_edition_is_the_unsuffixed_high_performance_spark(self):
+        """What the rename was for.
+
+        Two cards differing only by an absent suffix is the confusion: the
+        unsuffixed one reads as *the* book rather than the older one, and it
+        is also the cheaper of the two. So no row may be named bare.
+        """
+        self.assertFalse(
+            Product.objects.filter(name="High Performance Spark").exists())
+        # Anti-vacuity: both rows are really there, each naming its edition.
+        self.assertEqual(
+            Product.objects.filter(
+                name__startswith="High Performance Spark").count(), 2)
 
 
 class SecondEditionSeedsOnACleanDeployTest(TestCase):
