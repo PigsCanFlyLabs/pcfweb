@@ -27,6 +27,25 @@ def editions_named(text: str) -> set[int]:
 
 
 class StaticPagesTest(TestCase):
+    @staticmethod
+    def main_css_declarations_for(selector):
+        css = (REPO_ROOT / "main" / "static" / "assets"
+               / "css" / "main.css").read_text()
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+        css = re.sub(r"@import[^;]+;", "", css)
+
+        declared = {}
+        for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+            names = {" ".join(part.split())
+                     for part in selectors.split(",")}
+            if selector not in names:
+                continue
+            for part in body.split(";"):
+                if ":" in part:
+                    prop, _, value = part.partition(":")
+                    declared[prop.strip().lower()] = value.strip().lower()
+        return declared
+
     def test_privacy_page_renders_privacy_template(self):
         response = self.client.get("/privacy")
         self.assertEqual(response.status_code, 200)
@@ -36,6 +55,28 @@ class StaticPagesTest(TestCase):
         response = self.client.get("/tos")
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "tos.html")
+
+    def test_queued_messages_clear_the_header_by_token(self):
+        root = self.main_css_declarations_for(":root")
+        messages = self.main_css_declarations_for(".site-messages")
+
+        self.assertNotEqual(
+            messages, {}, "queued messages have no .site-messages CSS rule")
+        self.assertEqual(
+            messages.get("padding-top"),
+            "var(--site-header-clearance, 100px)",
+            "queued messages must clear the nav with the shared header token")
+
+        for token in ("--site-header-default-height",
+                      "--site-header-fixed-height"):
+            self.assertRegex(
+                root.get(token, ""), r"^[1-9][0-9]*px$",
+                f"{token} must stay a non-zero pixel height")
+
+        clearance = root.get("--site-header-clearance", "")
+        self.assertIn("max(", clearance)
+        self.assertIn("var(--site-header-default-height)", clearance)
+        self.assertIn("var(--site-header-fixed-height)", clearance)
 
 
 class ServicesPageMixin:

@@ -938,9 +938,10 @@ class AddToCartView(View, BaseCartView):
                     chosen_amount = parse_pwyw_amount(posted_amount)
                 except PwywAmountError as error:
                     # Same shape as the add-to-cart refusals this replaces:
-                    # say why on the cart, which is the only page in the
-                    # buying flow that renders queued messages, and add
-                    # nothing. The product page has no messages block.
+                    # say why on the cart and add nothing. Base renders
+                    # queued messages everywhere now, but the cart redirect is
+                    # still deliberate: it returns the buyer to the checkout
+                    # surface instead of posting feedback to a product GET.
                     messages.error(request, str(error))
                     return redirect('cart')
 
