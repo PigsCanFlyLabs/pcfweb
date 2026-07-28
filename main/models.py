@@ -7,7 +7,8 @@ from django.db import models, transaction
 from django.templatetags.static import static
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.html import format_html
+from django.utils.html import format_html, linebreaks
+from django.utils.safestring import mark_safe
 
 from main.digital import (
     DigitalAssetError, download_url, link_lifetime_days, open_asset)
@@ -372,14 +373,15 @@ class Product(models.Model):
         """Product copy for the HTML product page, as escaped markup.
 
         Returns a SafeString so the template does not need `autoescape off`
-        around it. The only markup here is the paragraph wrapper this method
-        adds; the description itself is escaped, so a stray angle bracket in
+        around it. Blank lines in the description become paragraph breaks;
+        the description itself is escaped, so a stray angle bracket in
         admin-entered copy renders as text instead of as live HTML.
         """
+        formatted = mark_safe(linebreaks(self.description, autoescape=True))
         if self.print_isbn:
             return format_html(
-                "{}<p>{}</p>", self.description, self.SIGNED_ON_REQUEST_NOTE)
-        return format_html("{}", self.description)
+                "{}<p>{}</p>", formatted, self.SIGNED_ON_REQUEST_NOTE)
+        return format_html("{}", formatted)
 
     def get_feed_description(self) -> str:
         """The same copy as plain text, for the Google product feed.
