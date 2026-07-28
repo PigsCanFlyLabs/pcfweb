@@ -47,6 +47,12 @@ urlpatterns = [
     path('login', views.LoginView.as_view(), name='login'),
     path('logout', views.LogoutView.as_view(), name='logout'),
 
+    # Mailing list. Only the signup lives here and it is CSRF exempt (see the
+    # view), because forms embedded on other sites post to it. Confirming and
+    # unsubscribing are django-newsletter's pages, under /newsletter/.
+    path('mailing-list/subscribe', views.MailingListSubscribeView.as_view(),
+         name='mailing-list-subscribe'),
+
     # General
     path('', views.HomeView.as_view(), name="home"),
     path('about', views.AboutView.as_view(), name="about"),
