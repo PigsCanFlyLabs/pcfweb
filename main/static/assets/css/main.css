@@ -308,7 +308,7 @@ header
 }
 
 .header-area .main-nav {
-    min-height: 80px;
+    min-height: var(--site-header-fixed-height);
     background: transparent;
 }
 
@@ -577,7 +577,7 @@ header
 }
 
 .header-area.header-sticky {
-    min-height: 80px;
+    min-height: var(--site-header-fixed-height);
 }
 
 .header-area .nav {
@@ -617,7 +617,7 @@ header
     .header-area {
         background-color: #f7f7f7;
         padding: 0px 15px;
-        height: 100px;
+        height: var(--site-header-default-height);
         box-shadow: none;
         text-align: center;
     }
@@ -654,7 +654,7 @@ header
     }
 
     .header-area.header-sticky .nav {
-        margin-top: 100px !important;
+        margin-top: var(--site-header-default-height) !important;
     }
 
     .header-area .main-nav .nav li {
