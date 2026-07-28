@@ -400,6 +400,11 @@ class NextRedirectTest(MailingListTestBase):
         self.assertRedirects(
             response, "https://ExAmPlE.cOm/thanks/", fetch_redirect_response=False)
 
+    @override_settings(MAILING_LIST_ALLOWED_NEXT_HOSTS=["kexample.org"])
+    def test_a_kelvin_sign_host_does_not_match_an_ascii_k_allowlist_entry(self):
+        response = self.assert_ignored("https://\u212Aexample.org/phish")
+        self.assertTrue(Subscription.objects.exists())
+
     def test_a_json_caller_is_told_the_next_url_instead_of_being_redirected(self):
         response = self.client.post(
             SUBSCRIBE_URL,
@@ -424,6 +429,17 @@ class NextRedirectTest(MailingListTestBase):
                 "https://allowed.example@evil.com/landing",
                 "https://example.com@evil.com/landing",
                 "https://еxample.com/landing",
+        ]:
+            with self.subTest(target=target):
+                self.assert_ignored(target)
+
+    @override_settings(MAILING_LIST_ALLOWED_NEXT_HOSTS=["siftest.example"])
+    def test_non_ascii_letters_do_not_collapse_onto_ascii_hosts(self):
+        for target in [
+                "https://\u017Fiftest.example/landing",
+                "https://\u0130ftest.example/landing",
+                "https://\u0131ftest.example/landing",
+                "https://\uFF53iftest.example/landing",
         ]:
             with self.subTest(target=target):
                 self.assert_ignored(target)

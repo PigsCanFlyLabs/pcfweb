@@ -42,6 +42,7 @@ from main.models import (
 from main.payments import Payments
 from main.utils import (
     generate_username, get_country_code, get_storable_client_ip)
+from pigscanfly.hostnames import ascii_lowercase
 
 logger = logging.getLogger(__name__)
 
@@ -1285,10 +1286,10 @@ class MailingListSubscribeView(View):
 
     @staticmethod
     def normalized_netloc(netloc: str) -> str:
-        # Hostnames are case-insensitive. `lower()`, not `casefold()`, keeps
-        # this to straightforward case normalisation rather than broader
-        # Unicode folding, so a homograph does not collapse onto ASCII.
-        return netloc.lower()
+        # Lower only ASCII A-Z. Python's Unicode lower() maps U+212A KELVIN
+        # SIGN to ASCII "k", so non-ASCII lookalikes must pass through
+        # unchanged instead of collapsing onto an allowlisted ASCII host.
+        return ascii_lowercase(netloc)
 
     def next_url(self) -> str:
         form = getattr(self, "_form", None)

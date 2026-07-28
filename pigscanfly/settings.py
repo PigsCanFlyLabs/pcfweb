@@ -16,6 +16,8 @@ from pathlib import Path
 from configurations import Configuration
 from django.core.exceptions import ImproperlyConfigured
 
+from pigscanfly.hostnames import ascii_lowercase
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -57,14 +59,15 @@ def parse_shipping_rates(raw: str) -> List[str]:
 
 
 def parse_lowercase_comma_list(raw: str) -> List[str]:
-    """Split a comma-separated setting and lowercase each entry.
+    """Split a comma-separated setting and ASCII-lowercase each entry.
 
     Hostnames are case-insensitive, so a mixed-case allowlist entry should not
-    silently stop a legitimate redirect from matching. `lower()`, not
-    `casefold()`: this is ASCII-style hostname normalisation, not broader
-    Unicode equivalence.
+    silently stop a legitimate redirect from matching. Lower only ASCII A-Z:
+    Python's Unicode lowercasing maps U+212A KELVIN SIGN to ASCII "k", and
+    the allowlist must stay in lockstep with the incoming-host normalizer
+    about preserving non-ASCII lookalikes exactly.
     """
-    return [item.lower() for item in parse_comma_list(raw)]
+    return [ascii_lowercase(item) for item in parse_comma_list(raw)]
 
 
 def parse_invite_half(raw: str) -> str:
