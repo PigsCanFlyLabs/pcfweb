@@ -47,6 +47,10 @@ from pigscanfly.hostnames import ascii_lowercase
 logger = logging.getLogger(__name__)
 
 
+class CartQuantityOverflow(ValueError):
+    """Combining valid cart quantities would exceed the storage column."""
+
+
 # /healthz is served by main.middleware.HealthCheckMiddleware rather than a
 # view here, so it can answer ahead of the HTTPS redirect, the ALLOWED_HOSTS
 # check and the cookie-consent middleware's database query.
@@ -550,6 +554,24 @@ class ProductView(View):
 class BaseCartView():
     """Common base cart view."""
 
+    # What a PositiveBigIntegerField can physically hold. Python ints are
+    # arbitrary precision, so every path which combines cart quantities must
+    # enforce the database column's upper bound before doing the addition.
+    # This is a storage capacity guard, not a purchase limit -- whether there
+    # should be a product-level cap on quantity is a separate, still-open
+    # decision.
+    MAX_QUANTITY = 9223372036854775807
+
+    @classmethod
+    def quantity_sum(cls, existing_quantity: int, added_quantity: int) -> int:
+        """Add two valid quantities without overflowing the database field."""
+        # Write this as subtraction rather than adding first: it remains safe
+        # even if the values eventually come from a fixed-width integer type.
+        if existing_quantity > cls.MAX_QUANTITY - added_quantity:
+            raise CartQuantityOverflow(
+                f"Combined quantity must be at most {cls.MAX_QUANTITY}.")
+        return existing_quantity + added_quantity
+
     def get_cart(self, request) -> Cart:
         """Return the cart belonging to *this* requester.
 
@@ -597,9 +619,11 @@ class BaseCartView():
 
         The whole thing is one transaction: adding a quantity onto the
         surviving row and deleting the row it came from are two statements,
-        and a crash between them would lose the quantity for good. All or
-        nothing means a failed merge leaves the session cart untouched and
-        the next request can just retry it.
+        and a crash between them would lose the quantity for good. Ordinary
+        failures still roll the whole merge back so the next request can retry
+        it; a deterministic quantity overflow is handled in-line by capping the
+        surviving row at MAX_QUANTITY, dropping the duplicate session row and
+        warning the shopper.
         """
         with transaction.atomic():
             # Rows are linked to a cart both by FK and by the M2M; take the
@@ -611,7 +635,20 @@ class BaseCartView():
                 existing = CartProduct.objects.filter(
                     cart=user_cart, product=cart_product.product).first()
                 if existing is not None:
-                    existing.quantity += cart_product.quantity
+                    try:
+                        existing.quantity = self.quantity_sum(
+                            existing.quantity, cart_product.quantity)
+                    except CartQuantityOverflow:
+                        existing.quantity = self.MAX_QUANTITY
+                        existing.save()
+                        messages.warning(
+                            request,
+                            f"We capped {existing.product.name} at "
+                            f"{self.MAX_QUANTITY} because the combined cart "
+                            "quantity would not fit in storage.")
+                        user_cart.products.add(existing)
+                        cart_product.delete()
+                        continue
                     existing.save()
                     user_cart.products.add(existing)
                     cart_product.delete()
@@ -704,13 +741,6 @@ class CartView(View, BaseCartView):
 
 
 class AddToCartView(View, BaseCartView):
-    # What a PositiveBigIntegerField can physically hold. Python ints are
-    # arbitrary precision, so without this a 20-digit quantity parses happily
-    # and then 500s at write time on BIGINT overflow. This is a storage
-    # capacity guard, not a purchase limit -- whether there should be a
-    # product-level cap on quantity is a separate, still-open decision.
-    MAX_QUANTITY = 9223372036854775807
-
     # POST only: a GET here is triggerable cross-site by an <img> tag or a
     # link prefetch, with no CSRF token involved.
     def post(self, request, product_id: int, quantity: int):
@@ -739,7 +769,11 @@ class AddToCartView(View, BaseCartView):
         if not created:
             # Adding a product that's already in the cart adds to what's
             # there rather than silently discarding the new quantity.
-            cart_product.quantity += quantity
+            try:
+                cart_product.quantity = self.quantity_sum(
+                    cart_product.quantity, quantity)
+            except CartQuantityOverflow as error:
+                return HttpResponseBadRequest(str(error))
             cart_product.save()
 
         cart.products.add(cart_product)
