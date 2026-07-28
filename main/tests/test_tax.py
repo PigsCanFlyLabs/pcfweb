@@ -194,6 +194,7 @@ class CheckoutTaxTest(TestCase):
     @mock.patch("main.payments.stripe.Price.create")
     def test_create_price_adds_tax_behavior_when_automatic_tax_enabled(self, create_price):
         """Prices minted with automatic_tax enabled must have tax_behavior."""
+        from django.conf import settings
         create_price.return_value = {"id": "price_test123"}
 
         price_id = Payments.create_price("prod_test", 1000)
@@ -201,7 +202,7 @@ class CheckoutTaxTest(TestCase):
         self.assertEqual(price_id, "price_test123")
         create_price.assert_called_once()
         params = create_price.call_args.kwargs
-        self.assertEqual(params["tax_behavior"], "exclusive")
+        self.assertEqual(params["tax_behavior"], settings.STRIPE_TAX_BEHAVIOR)
         self.assertEqual(params["unit_amount"], 1000)
         self.assertEqual(params["product"], "prod_test")
 
