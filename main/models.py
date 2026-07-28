@@ -647,6 +647,21 @@ class Order(models.Model):
     # reconciled_at populated means we reconciled but something was odd.
     reconciliation_error = models.TextField(blank=True)
 
+    # Held by whichever worker is currently running fulfilment for this order,
+    # so the four Gunicorn workers cannot each start it at once. The markers
+    # above are all written *after* their side effect, so on their own they
+    # only serialise deliveries that do not overlap: two workers checking
+    # notified_at while a third is mid-send all see null and all send. This
+    # column is claimed with a single conditional UPDATE, which is atomic on
+    # both Postgres and SQLite, so exactly one worker can hold it.
+    #
+    # It is a lease, not a flag: a worker that dies mid-fulfilment cannot
+    # release it, and a permanently claimed order would never be repaired --
+    # which is the very failure this whole retry path exists to fix. A claim
+    # older than FULFILMENT_LEASE is therefore reclaimable. Nullable, so an
+    # old pod's checkout INSERT during a rolling deploy still succeeds.
+    fulfilment_claimed_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         ordering = ['-created_at']
 
