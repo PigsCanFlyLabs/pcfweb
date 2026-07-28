@@ -10,6 +10,10 @@ runtime fields like ``external_product_id`` and admin-edited fields like
 The fixture file ``main/fixtures/initial_products.yaml`` is still the single
 source of truth for fixture-owned fields; edit it to change product metadata.
 
+"Never overwrites" is meant literally and stays true of ``stock``: the one
+place this command writes it is on a row it is creating, where there is no
+previous value to overwrite.  See the note on SEED_PROTECTED_FIELDS below.
+
 Many-to-many fields take a second pass
 --------------------------------------
 Neither of the two write paths below can carry an M2M. ``Product(pk=pk,
@@ -42,6 +46,7 @@ import yaml
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from main.launch_stock import apply_launch_stock
 from main.models import Product
 
 
@@ -78,6 +83,22 @@ def _is_symmetrical(field_name: str) -> bool:
 # admin entry on every fresh database.  Rows the fixture leaves blank are
 # unaffected -- an omitted key is never passed to .update() below, so an
 # admin-entered ASIN on such a row survives.
+#
+# ``stock`` is a different case from ``ebook_asin`` and must stay here.  An
+# ASIN is a static catalogue fact; stock is live inventory, so making it
+# fixture-owned would mean a title that sold out silently became purchasable
+# again on the next deploy.  The line to keep crisp, because the command does
+# now write stock in one place:
+#
+#     the FIXTURE may not specify stock -- a row carrying the key is rejected
+#     below, before anything is written;
+#     the COMMAND may apply a launch default to a row it is CREATING, which
+#     is a different act entirely -- there is no prior value to lose.
+#
+# The check below is on the fixture's own keys, so it enforces exactly the
+# first half.  The launch default is applied further down, on the create
+# branch only, from main/launch_stock.py -- never from fixture data and never
+# on the update branch.
 SEED_PROTECTED_FIELDS: Set[str] = {
     "default_asin",
     "external_product_id",
@@ -228,7 +249,24 @@ class Command(BaseCommand):
                     else:
                         unchanged += 1
                 else:
-                    to_create.append(Product(pk=pk, **fixture_fields))
+                    product = Product(pk=pk, **fixture_fields)
+                    # CREATE ONLY, and the asymmetry is the whole point. A row
+                    # being created has no inventory yet, so there is nothing
+                    # a launch default can destroy -- it is safe by
+                    # construction here and only here. The update branch above
+                    # deliberately has no equivalent: writing stock there
+                    # would resurrect a title somebody had marked sold out in
+                    # the admin, turning every deploy into a potential
+                    # overselling incident. That is also why `stock` stays in
+                    # SEED_PROTECTED_FIELDS -- see the note there for the
+                    # fixture-versus-command distinction this rests on.
+                    #
+                    # Needed because start-server.sh runs migrate before this
+                    # command, so 0017_backfill_book_stock finds zero rows on
+                    # a fresh database and cannot help. Without this, a new
+                    # environment came up with every print book unpurchasable.
+                    apply_launch_stock(product)
+                    to_create.append(product)
 
             if to_create:
                 # bulk_create() writes the rows without going through

@@ -1,8 +1,10 @@
 """Tests for manually managed Product stock."""
 
+from importlib import import_module
 from io import StringIO
 from unittest import mock
 
+from django.apps import apps as django_apps
 from django.contrib import admin
 from django.contrib.auth.models import User
 from django.core.management import call_command
@@ -10,6 +12,7 @@ from django.core.management.base import CommandError
 from django.db import connection
 from django.test import RequestFactory, TestCase
 
+from main.launch_stock import LAUNCH_STOCK
 from main.models import CartProduct, Order, Product
 
 
@@ -410,3 +413,248 @@ class DigitalStockExemptionTest(TestCase):
                 self.assertTrue(product.is_out_of_stock())
                 self.assertFalse(product.is_purchasable())
                 self.assertEqual(product.buy_text(), "Out of Stock")
+
+
+class BookStockBackfillMigrationTest(TestCase):
+    """0017_backfill_book_stock: the print books get a launch stock.
+
+    Driven by calling the migration's own forward function rather than by
+    letting the test runner apply it. The runner builds the test database by
+    migrating an empty one and only then loading ``fixtures``, so by the time
+    these rows exist the migration has long since run against nothing -- the
+    same ordering that makes it a no-op on a genuinely fresh database. Calling
+    the function directly puts it in front of the data it was written for,
+    which is the state every database that already has a catalogue is in.
+
+    Asserts on purchasability rather than on the number, so it still means
+    something if the launch figure is ever revised.
+    """
+
+    fixtures = ["initial_products"]
+
+    MIGRATION = "main.migrations.0017_backfill_book_stock"
+
+    PRINT_BOOK_PKS = (100, 101, 102, 103, 104, 105)
+    EBOOK_PK = 106
+    NOORDER_PK = 107
+
+    def run_migration(self):
+        # The module name starts with a digit, so it cannot be imported with
+        # an import statement.
+        module = import_module(self.MIGRATION)
+        module.backfill_book_stock(django_apps, None)
+
+    def test_the_print_books_start_unpurchasable(self):
+        # The premise. If this ever fails the backfill has become pointless
+        # and the rest of this class is testing nothing.
+        for pk in self.PRINT_BOOK_PKS:
+            with self.subTest(pk=pk):
+                product = Product.objects.get(pk=pk)
+                self.assertEqual(product.stock, 0)
+                self.assertFalse(product.is_purchasable())
+
+    def test_the_backfill_makes_every_print_book_purchasable(self):
+        self.run_migration()
+
+        for pk in self.PRINT_BOOK_PKS:
+            with self.subTest(pk=pk):
+                product = Product.objects.get(pk=pk)
+                self.assertTrue(product.is_purchasable())
+                self.assertFalse(product.is_out_of_stock())
+                self.assertEqual(product.buy_text(), "Add to Cart")
+                self.assertEqual(product.get_availability(), "in_stock")
+                self.assertEqual(product.stock_description(), "")
+
+    def test_a_hand_set_stock_is_never_clobbered(self):
+        # The property that makes this safe to run against production, where
+        # someone may already have typed a real count into the admin.
+        # Deliberately a number the backfill would never write, and one that
+        # is lower than it, so an overwrite shows up as an increase.
+        Product.objects.filter(pk=103).update(stock=7)
+
+        self.run_migration()
+
+        self.assertEqual(Product.objects.get(pk=103).stock, 7)
+
+    def test_re_running_the_backfill_changes_nothing_further(self):
+        # Idempotency: a second application must not stack on the first, and
+        # must not disturb a hand-set value it skipped the first time either.
+        Product.objects.filter(pk=103).update(stock=7)
+
+        self.run_migration()
+        first = {p.pk: p.stock for p in Product.objects.order_by("pk")}
+        self.run_migration()
+        second = {p.pk: p.stock for p in Product.objects.order_by("pk")}
+
+        self.assertEqual(first, second)
+
+    def test_the_digital_ebook_is_left_alone(self):
+        # A download has no unit count to run out of, and is already exempt
+        # from the stock gate -- see DigitalStockExemptionTest. Writing a
+        # number here would be meaningless at best and would read as real
+        # inventory to whoever looked next.
+        self.run_migration()
+
+        ebook = Product.objects.get(pk=self.EBOOK_PK)
+        self.assertEqual(ebook.stock, 0)
+        self.assertTrue(ebook.is_purchasable())
+
+    def test_a_noorder_product_is_left_alone(self):
+        # Not sold through this site, so stock cannot make it purchasable and
+        # setting one would only matter if noorder were later cleared -- at
+        # which point the row would go live carrying a count nobody chose.
+        self.run_migration()
+
+        product = Product.objects.get(pk=self.NOORDER_PK)
+        self.assertEqual(product.stock, 0)
+        self.assertFalse(product.is_purchasable())
+
+    def test_the_reverse_leaves_the_data_alone(self):
+        # Blanket-zeroing on reverse would take the catalogue out of stock and
+        # destroy any hand-set count, so the reverse is a deliberate no-op.
+        module = import_module(self.MIGRATION)
+        Product.objects.filter(pk=103).update(stock=7)
+        self.run_migration()
+        before = {p.pk: p.stock for p in Product.objects.order_by("pk")}
+
+        module.reverse_backfill(django_apps, None)
+
+        after = {p.pk: p.stock for p in Product.objects.order_by("pk")}
+        self.assertEqual(before, after)
+
+
+class FreshEnvironmentSeedStockTest(TestCase):
+    """The other half: a brand-new database.
+
+    start-server.sh runs ``migrate`` before ``seed_products``, so
+    0017_backfill_book_stock runs against zero rows on a fresh database and
+    cannot help -- it fixes environments that already have a catalogue.
+    Without a launch default at the point of creation, a new environment came
+    up with every print book showing "Out of Stock", which is the exact bug
+    the backfill was written to fix.
+
+    Deliberately declares no ``fixtures``: an empty catalogue that
+    seed_products has to create from scratch is the situation under test, and
+    loading the fixture first would quietly turn every case below into the
+    already-has-rows path.
+    """
+
+    PRINT_BOOK_PKS = (100, 101, 102, 103, 104, 105)
+    EBOOK_PK = 106
+    NOORDER_PK = 107
+
+    def seed(self):
+        call_command("seed_products", stdout=StringIO())
+
+    def test_the_catalogue_starts_empty(self):
+        # The premise: these cases are about creation, not update.
+        self.assertEqual(Product.objects.count(), 0)
+
+    def test_seeding_a_fresh_database_leaves_the_books_purchasable(self):
+        self.seed()
+
+        for pk in self.PRINT_BOOK_PKS:
+            with self.subTest(pk=pk):
+                product = Product.objects.get(pk=pk)
+                self.assertEqual(product.stock, LAUNCH_STOCK)
+                self.assertTrue(product.is_purchasable())
+                self.assertFalse(product.is_out_of_stock())
+                self.assertEqual(product.buy_text(), "Add to Cart")
+
+    def test_seeding_leaves_the_digital_and_noorder_rows_unstocked(self):
+        # Same scope as the migration, from the same shared predicate. A
+        # download has no unit count to run out of, and a noorder row is not
+        # sold here at all; neither should acquire a number.
+        self.seed()
+
+        ebook = Product.objects.get(pk=self.EBOOK_PK)
+        self.assertEqual(ebook.stock, 0)
+        self.assertTrue(ebook.is_purchasable())
+
+        noorder = Product.objects.get(pk=self.NOORDER_PK)
+        self.assertEqual(noorder.stock, 0)
+        self.assertFalse(noorder.is_purchasable())
+
+    def test_a_sold_out_title_is_not_resurrected_by_a_reseed(self):
+        """The property that makes the create-only rule load-bearing.
+
+        If seeding could write stock on the update path, a title taken out of
+        stock in the admin would come back purchasable on the next deploy and
+        we would sell copies we do not have.
+        """
+        self.seed()
+        # Premise: seeding a fresh row does stock it. Without the create-time
+        # default this is 0 and the case below would pass vacuously.
+        self.assertEqual(
+            Product.objects.get(pk=100).stock, LAUNCH_STOCK)
+
+        Product.objects.filter(pk=100).update(stock=0)
+        self.seed()
+
+        sold_out = Product.objects.get(pk=100)
+        self.assertEqual(sold_out.stock, 0)
+        self.assertFalse(sold_out.is_purchasable())
+        self.assertEqual(sold_out.buy_text(), "Out of Stock")
+
+    def test_a_hand_set_count_is_not_reset_by_a_reseed(self):
+        self.seed()
+        Product.objects.filter(pk=103).update(stock=7)
+
+        self.seed()
+
+        self.assertEqual(Product.objects.get(pk=103).stock, 7)
+
+    def test_reseeding_changes_no_stock_at_all(self):
+        self.seed()
+        first = {p.pk: p.stock for p in Product.objects.order_by("pk")}
+
+        self.seed()
+
+        second = {p.pk: p.stock for p in Product.objects.order_by("pk")}
+        self.assertEqual(first, second)
+
+    def test_a_fixture_carrying_stock_is_still_rejected(self):
+        """The distinction this rests on, pinned from the fixture side.
+
+        The FIXTURE may not specify stock; the COMMAND may apply a launch
+        default to a row it is creating. Adding the second must not have
+        quietly bought the first -- a fixture carrying the key still has to
+        fail loudly, because start-server.sh runs this under `set -e` and a
+        deploy resetting live inventory is what the protection prevents.
+        """
+        fixture = [
+            {
+                "model": "main.product",
+                "pk": 100,
+                "fields": {"name": "Learning Spark", "stock": 4},
+            }
+        ]
+        with mock.patch(
+            "main.management.commands.seed_products._load_fixture",
+            return_value=fixture,
+        ):
+            with self.assertRaisesMessage(CommandError, "stock"):
+                self.seed()
+
+        self.assertFalse(Product.objects.filter(pk=100).exists())
+
+    def test_both_paths_agree_on_which_rows_get_stock(self):
+        """Anti-drift: the migration and the seed share one predicate.
+
+        They are two implementations of the same rule -- an UPDATE against
+        existing rows and a field set on an unsaved instance -- so nothing but
+        the shared definition stops them diverging. If they ever do, the
+        digital row acquires a meaningless inventory count on one path and not
+        the other, which is exactly the failure the sharing exists to prevent.
+        """
+        self.seed()
+        from_seed = {p.pk: p.stock for p in Product.objects.order_by("pk")}
+
+        Product.objects.update(stock=0)
+        import_module(
+            "main.migrations.0017_backfill_book_stock"
+        ).backfill_book_stock(django_apps, None)
+        from_migration = {
+            p.pk: p.stock for p in Product.objects.order_by("pk")}
+
+        self.assertEqual(from_seed, from_migration)
