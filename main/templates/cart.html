@@ -102,7 +102,19 @@
                 <div class="alert alert-info pwyw-notice" role="alert">
                     <strong>Heads up:</strong> this cart holds a pay-what-you-want
                     item, so the total below is a suggestion. You choose what you
-                    actually pay for it at checkout.
+                    actually pay for it at checkout. Stripe also requires that item
+                    to be checked out by itself, with quantity 1, and without a
+                    coupon code.
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if pwyw_checkout_blocker %}
+        <div class="row">
+            <div class="col-lg-12">
+                <div class="alert alert-warning pwyw-checkout-blocker" role="alert">
+                    <strong>Checkout blocked:</strong> {{ pwyw_checkout_blocker }}
                 </div>
             </div>
         </div>
@@ -121,8 +133,10 @@
                     </ul>
 		    <form method="POST" action="{% url 'checkout' %}">
                       {% csrf_token %}
+                      {% if not has_pwyw %}
 		      Coupon (optional): <input type="text" name="coupon" />
-                      <button type="submit" class="proceed-btn">Proceed to Checkout</button>
+                      {% endif %}
+                      <button type="submit" class="proceed-btn"{% if pwyw_checkout_blocker %} disabled aria-disabled="true"{% endif %}>Proceed to Checkout</button>
 		    </form>
                 </div>
             </div>

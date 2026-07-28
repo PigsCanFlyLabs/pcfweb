@@ -546,6 +546,31 @@ class CartNotSoldHereTest(CartTestBase):
         self.assertNotIn("Not sold here", html)
         self.assertIn("39.99", html)
 
+    def test_a_mixed_pwyw_cart_warns_that_checkout_is_blocked(self):
+        client = Client()
+        client.post("/add-to-cart/104/1")
+        client.post("/add-to-cart/106/1")
+
+        html = client.get("/cart").content.decode()
+
+        self.assertIn("pwyw-checkout-blocker", html)
+        self.assertIn("only line in its checkout", html)
+        self.assertIn("disabled", html)
+        self.assertNotIn('name="coupon"', html)
+
+    def test_a_single_pwyw_line_explains_the_stripe_rules_without_blocking_checkout(self):
+        client = Client()
+        client.post("/add-to-cart/106/1")
+
+        html = client.get("/cart").content.decode()
+
+        self.assertIn("pwyw-notice", html)
+        self.assertIn("with quantity 1", html)
+        self.assertIn("without a", html)
+        self.assertIn("coupon code", html)
+        self.assertNotIn("pwyw-checkout-blocker", html)
+        self.assertNotIn('name="coupon"', html)
+
     def test_a_noorder_line_does_not_trigger_the_shipping_notice(self):
         """It is not being shipped, so a delivery warning is noise."""
         book = Product.objects.get(pk=107)

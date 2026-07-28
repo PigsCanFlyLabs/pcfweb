@@ -678,6 +678,7 @@ class CartView(View, BaseCartView):
         # showing a number the buyer is not going to be charged.
         has_pwyw = any(cp.product.is_pwyw for cp in cart_products)
         has_unavailable = any(cp.product.noorder for cp in cart_products)
+        pwyw_checkout_blocker = Payments.pwyw_checkout_blocker(cart)
         return render(request, 'cart.html', context={
             'title': 'Cart',
             'products': cart_products,
@@ -685,6 +686,7 @@ class CartView(View, BaseCartView):
             'has_physical': has_physical,
             'has_pwyw': has_pwyw,
             'has_unavailable': has_unavailable,
+            'pwyw_checkout_blocker': pwyw_checkout_blocker,
         })
 
 
@@ -781,6 +783,14 @@ class CheckoutView(View, BaseCartView):
                 request,
                 "Sorry, these are no longer available and need to be removed "
                 "before checking out: " + ", ".join(unavailable) + ".")
+            return redirect('cart')
+        pwyw_checkout_blocker = Payments.pwyw_checkout_blocker(
+            cart, coupon=coupon)
+        if pwyw_checkout_blocker:
+            logger.info(
+                "Blocked checkout for cart %s: %s",
+                cart.pk, pwyw_checkout_blocker)
+            messages.error(request, pwyw_checkout_blocker)
             return redirect('cart')
         user = request.user if request.user.is_authenticated else None
         order = Order.create_from_cart(cart, user=user)
