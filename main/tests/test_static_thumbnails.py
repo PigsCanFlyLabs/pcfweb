@@ -253,6 +253,21 @@ class PregenerateCommandTest(SimpleTestCase):
         self.assertIn("pre-generated thumbnail is missing", str(caught.exception))
 
     def test_check_fails_on_an_lfs_pointer_source(self):
+        """The per-FILE diagnosis, not the footer.
+
+        Asserting on "Git LFS pointer" alone is vacuous here: the footer
+        appended to every aggregate failure already says "unmaterialised Git
+        LFS pointers: run `git lfs install && git lfs pull`" unconditionally,
+        whatever the files turned out to be. So that assertion passed with the
+        sentinel check in _assert_real_image deleted -- and deleting it is not
+        cosmetic. An LFS pointer is also undecodable, so without the sentinel
+        the file falls through to the decoder and is reported as "not a
+        readable image ... something wrote non-image bytes there", which sends
+        an engineer hunting a corrupt file instead of running `git lfs pull`.
+
+        What pins the distinction is the per-file line naming THIS path with
+        its own cause, plus the absence of the decoder's diagnosis.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             for source, _size in iter_expected_thumbnails(str(FIXTURE)):
                 dest = Path(tmp) / source
@@ -260,13 +275,20 @@ class PregenerateCommandTest(SimpleTestCase):
                 dest.write_text(
                     "version https://git-lfs.github.com/spec/v1\n"
                     "oid sha256:abc123\nsize 123456\n")
+            pointer = Path(tmp) / COVER_PREFIX / (
+                "book_covers/scaling_python_with_ray.jpg")
 
             with self.assertRaises(CommandError) as caught:
                 call_command(
                     "pregenerate_thumbnails", "--check", "--static-root", tmp,
                     stdout=StringIO(), stderr=StringIO())
 
-        self.assertIn("Git LFS pointer", str(caught.exception))
+        message = str(caught.exception)
+        self.assertIn(
+            f"thumbnail source is an unmaterialised Git LFS pointer: "
+            f"{pointer}", message)
+        # The diagnosis this regresses to if the sentinel check is removed.
+        self.assertNotIn("is not a readable image", message)
 
     def test_check_fails_on_an_undecodable_source(self):
         """Present, non-empty, not a pointer -- and not an image.
