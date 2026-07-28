@@ -101,6 +101,22 @@ class SignupValidationTest(TestCase):
             EmailIdentity.objects.bulk_create([
                 EmailIdentity(normalized_email="PERSON@example.com")])
 
+    def test_signup_losing_the_email_identity_race_redirects_in_use(self):
+        def reserve_during_validation(email):
+            EmailIdentity.objects.create(normalized_email=email)
+
+        with mock.patch("main.views.validate_email",
+                        side_effect=reserve_during_validation):
+            response = self.client.post(
+                "/signup",
+                {"email": "person@example.com",
+                 "password": "hunter2hunter2"})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("in_use=true", response["Location"])
+        self.assertFalse(User.objects.exists())
+        self.assertEqual(EmailIdentity.objects.count(), 1)
+
     def test_signup_retries_a_username_collision_without_claiming_email_in_use(self):
         User.objects.create(username="person", email="taken@example.net")
 

@@ -8,6 +8,12 @@ export DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE:-"pigscanfly.settings"}
 if [ -n "${PRIMARY:-}" ]; then
   ./manage.py migrate
   ./manage.py seed_products
+  # Close any old-replica signup window without making startup depend on
+  # legacy data being perfectly clean. The command itself logs and continues
+  # past duplicate-address residue; this `||` is a second guard against some
+  # unrelated failure under `set -e`.
+  ./manage.py backfill_email_identities \
+    || echo "start-server.sh: backfill_email_identities failed; starting anyway." >&2
   # Now that the catalogue is up to date, check that every product it sells
   # as a download actually has its archive in this image, and log + email the
   # owner about any that do not. Before this, the first thing to notice a

@@ -137,12 +137,6 @@ metadata:
     app: pcfweb
 spec:
   replicas: 3
-  # The first EmailIdentity rollout has to evict old public pods before the
-  # migration can rely on reservations: an old signup replica never writes an
-  # EmailIdentity row, so leaving it serving after the backfill would reopen
-  # the duplicate-account race for the rest of the rollout window.
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
       app: pcfweb

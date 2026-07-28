@@ -351,16 +351,6 @@ class DeployManifestTest(TestCase):
             "migrate --check",
             " ".join(init_containers[0].get("args", [])))
 
-    def test_the_public_web_deployment_recreates_pods_for_signup_reservations(self):
-        # During the first EmailIdentity rollout, an old web replica would
-        # keep serving the pre-reservation signup code after the backfill ran.
-        # Recreate cuts that window off instead of leaving old and new public
-        # pods live together.
-        web = next(d for d in self.deployments
-                   if d["metadata"]["name"] == "web")
-        self.assertEqual(web["spec"].get("strategy", {}).get("type"),
-                         "Recreate")
-
     def test_containers_declare_resources(self):
         for deployment in self.deployments:
             spec = self.pod_spec(deployment)
