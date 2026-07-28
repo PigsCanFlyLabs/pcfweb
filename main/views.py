@@ -13,7 +13,7 @@ from django.contrib.auth.models import User
 from django.contrib.staticfiles import finders
 from django.contrib.staticfiles.storage import staticfiles_storage
 from django.core.cache import cache
-from django.core.exceptions import SuspiciousOperation, ValidationError
+from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import transaction
 from django.db.models import Q
@@ -43,6 +43,10 @@ from main.utils import (
     generate_username, get_country_code, get_storable_client_ip)
 
 logger = logging.getLogger(__name__)
+
+
+class CartQuantityOverflow(ValueError):
+    """Combining valid cart quantities would exceed the storage column."""
 
 
 # /healthz is served by main.middleware.HealthCheckMiddleware rather than a
@@ -538,6 +542,9 @@ class BaseCartView():
     # What a PositiveBigIntegerField can physically hold. Python ints are
     # arbitrary precision, so every path which combines cart quantities must
     # enforce the database column's upper bound before doing the addition.
+    # This is a storage capacity guard, not a purchase limit -- whether there
+    # should be a product-level cap on quantity is a separate, still-open
+    # decision.
     MAX_QUANTITY = 9223372036854775807
 
     @classmethod
@@ -546,7 +553,7 @@ class BaseCartView():
         # Write this as subtraction rather than adding first: it remains safe
         # even if the values eventually come from a fixed-width integer type.
         if existing_quantity > cls.MAX_QUANTITY - added_quantity:
-            raise SuspiciousOperation(
+            raise CartQuantityOverflow(
                 f"Combined quantity must be at most {cls.MAX_QUANTITY}.")
         return existing_quantity + added_quantity
 
@@ -597,9 +604,11 @@ class BaseCartView():
 
         The whole thing is one transaction: adding a quantity onto the
         surviving row and deleting the row it came from are two statements,
-        and a crash between them would lose the quantity for good. All or
-        nothing means a failed merge leaves the session cart untouched and
-        the next request can just retry it.
+        and a crash between them would lose the quantity for good. Ordinary
+        failures still roll the whole merge back so the next request can retry
+        it; a deterministic quantity overflow is handled in-line by capping the
+        surviving row at MAX_QUANTITY, dropping the duplicate session row and
+        warning the shopper.
         """
         with transaction.atomic():
             # Rows are linked to a cart both by FK and by the M2M; take the
@@ -611,8 +620,19 @@ class BaseCartView():
                 existing = CartProduct.objects.filter(
                     cart=user_cart, product=cart_product.product).first()
                 if existing is not None:
-                    existing.quantity = self.quantity_sum(
-                        existing.quantity, cart_product.quantity)
+                    try:
+                        existing.quantity = self.quantity_sum(
+                            existing.quantity, cart_product.quantity)
+                    except CartQuantityOverflow:
+                        existing.quantity = self.MAX_QUANTITY
+                        existing.save()
+                        messages.warning(
+                            request,
+                            f"We capped {existing.product.name} at "
+                            f"{self.MAX_QUANTITY} because the combined cart "
+                            "quantity would not fit in storage.")
+                        cart_product.delete()
+                        continue
                     existing.save()
                     user_cart.products.add(existing)
                     cart_product.delete()
@@ -736,7 +756,7 @@ class AddToCartView(View, BaseCartView):
             try:
                 cart_product.quantity = self.quantity_sum(
                     cart_product.quantity, quantity)
-            except SuspiciousOperation as error:
+            except CartQuantityOverflow as error:
                 return HttpResponseBadRequest(str(error))
             cart_product.save()
 

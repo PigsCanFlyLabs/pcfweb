@@ -302,13 +302,57 @@ class CartAuthenticationTest(CartTestBase):
 
         response = self.client.get("/cart")
 
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            (f"We capped {product.name} at {AddToCartView.MAX_QUANTITY} "
+             "because the combined cart quantity would not fit in storage."),
+        )
         existing.refresh_from_db()
-        session_line.refresh_from_db()
         self.assertEqual(existing.quantity, AddToCartView.MAX_QUANTITY)
-        self.assertEqual(session_line.quantity, 1)
-        self.assertTrue(Cart.objects.filter(pk=session_cart_id).exists())
-        self.assertEqual(self.client.session["cart_id"], session_cart_id)
+        self.assertFalse(CartProduct.objects.filter(pk=session_line.pk).exists())
+        self.assertFalse(Cart.objects.filter(pk=session_cart_id).exists())
+        self.assertNotIn("cart_id", self.client.session)
+
+        Product.objects.filter(pk=product.pk).update(price=0)
+        with mock.patch("main.views.Payments.checkout") as checkout:
+            checkout.return_value = (
+                "https://checkout.example/session", "cs_merge_recovered")
+            checkout_response = self.client.post("/checkout")
+
+        self.assertRedirects(
+            checkout_response, "https://checkout.example/session",
+            fetch_redirect_response=False)
+
+    def test_login_merge_recovers_and_still_merges_innocent_products(self):
+        user = self.make_user()
+        user_cart = Cart.objects.create(user=user)
+        existing = CartProduct.objects.create(
+            cart=user_cart, product=Product.objects.get(pk=100),
+            quantity=AddToCartView.MAX_QUANTITY, price_id="price_existing")
+        user_cart.products.add(existing)
+
+        self.client.post("/add-to-cart/100/1")
+        self.client.post("/add-to-cart/101/4")
+        session_cart_id = self.client.session["cart_id"]
+        self.client.force_login(user)
+
+        response = self.client.get("/cart")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            (f"We capped {existing.product.name} at "
+             f"{AddToCartView.MAX_QUANTITY} "
+             "because the combined cart quantity would not fit in storage."),
+        )
+        self.assertEqual(
+            sorted((cp.product_id, cp.quantity)
+                   for cp in user_cart.products.order_by("product_id")),
+            [(100, AddToCartView.MAX_QUANTITY), (101, 4)],
+        )
+        self.assertFalse(Cart.objects.filter(pk=session_cart_id).exists())
+        self.assertNotIn("cart_id", self.client.session)
 
     def test_login_merges_distinct_products_into_the_user_cart(self):
         user = self.make_user()
