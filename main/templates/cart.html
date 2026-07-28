@@ -109,6 +109,16 @@
         </div>
         {% endif %}
 
+        {% if pwyw_checkout_blocker %}
+        <div class="row">
+            <div class="col-lg-12">
+                <div class="alert alert-warning pwyw-checkout-blocker" role="alert">
+                    <strong>Checkout blocked:</strong> {{ pwyw_checkout_blocker }}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
         <div class="row">
             <div class="col-lg-4 offset-lg-8">
                 <div class="checkout">
@@ -122,8 +132,10 @@
                     </ul>
 		    <form method="POST" action="{% url 'checkout' %}">
                       {% csrf_token %}
+                      {% if not has_pwyw %}
 		      Coupon (optional): <input type="text" name="coupon" />
-                      <button type="submit" class="proceed-btn">Proceed to Checkout</button>
+                      {% endif %}
+                      <button type="submit" class="proceed-btn"{% if pwyw_checkout_blocker %} disabled aria-disabled="true"{% endif %}>Proceed to Checkout</button>
 		    </form>
                 </div>
             </div>

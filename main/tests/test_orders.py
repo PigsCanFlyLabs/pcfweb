@@ -7,7 +7,7 @@ from django.contrib.auth.models import User
 from django.core import mail
 from django.db import IntegrityError, transaction
 
-from main.models import CartProduct, Order, OrderItem, Product
+from main.models import Cart, CartProduct, Order, OrderItem, Product
 from main.tests.base import OrderTestBase
 
 
@@ -110,6 +110,58 @@ class CheckoutCreatesOrderTest(OrderTestBase):
         self.assertRedirects(response, "/cart")
         create.assert_not_called()
         self.assertFalse(Order.objects.exists())
+
+    def test_a_pwyw_mixed_cart_is_blocked_before_order_creation(self):
+        self.client.get("/cart")
+        cart = Cart.objects.get(cart_id=self.client.session["cart_id"])
+        fixed = CartProduct.objects.create(
+            cart=cart, product=Product.objects.get(pk=104), quantity=1)
+        pwyw = CartProduct.objects.create(
+            cart=cart, product=Product.objects.get(pk=106), quantity=1)
+        cart.products.add(fixed, pwyw)
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            response = self.client.post("/checkout", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        create.assert_not_called()
+        self.assertFalse(Order.objects.exists())
+        self.assertContains(response, "only line in its checkout")
+
+    def test_a_pwyw_coupon_warns_and_checkout_still_proceeds(self):
+        self.client.post("/add-to-cart/106/1")
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.stripe.com/c/pay/cs_couponless",
+                id="cs_couponless")
+            response = self.client.post("/checkout", {"coupon": "coupon_sale"})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"],
+            "https://checkout.stripe.com/c/pay/cs_couponless")
+        order = Order.objects.get(stripe_session_id="cs_couponless")
+        success = self.client.get(
+            f"/checkout/success?session_id={order.stripe_session_id}")
+        self.assertContains(
+            success,
+            "code was removed and checkout will continue without it")
+        self.assertEqual(order.status, Order.Status.PENDING)
+        params = create.call_args.kwargs
+        self.assertNotIn("discounts", params)
+
+    def test_the_coupon_warning_is_visible_on_the_cancel_page_too(self):
+        self.client.post("/add-to-cart/106/1")
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.stripe.com/c/pay/cs_couponless",
+                id="cs_couponless")
+            self.client.post("/checkout", {"coupon": "coupon_sale"})
+
+        response = self.client.get("/checkout/cancel")
+
+        self.assertContains(
+            response,
+            "code was removed and checkout will continue without it")
 
     def test_a_failed_stripe_checkout_does_not_leave_a_pending_order(self):
         # No session was created, so nothing will ever arrive for this order

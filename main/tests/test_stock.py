@@ -241,8 +241,10 @@ class ProductStockTest(TestCase):
             stock=5,
             external_product_id="prod_late",
         )
+        view_payments.pwyw_add_to_cart_blocker.return_value = None
         self.client.post(f"/add-to-cart/{product.pk}/1")
         self.assertTrue(CartProduct.objects.exists())
+        view_payments.pwyw_checkout_blocker.return_value = None
 
         Product.objects.filter(pk=product.pk).update(stock=0)
         response = self.client.post("/checkout")
@@ -258,6 +260,8 @@ class ProductStockTest(TestCase):
             self, payments, view_payments):
         payments.create_product.return_value = "prod_ok"
         payments.create_price.return_value = "price_ok"
+        view_payments.pwyw_add_to_cart_blocker.return_value = None
+        view_payments.pwyw_checkout_blocker.return_value = None
         view_payments.checkout.return_value = (
             "https://checkout.example/session", "cs_ok")
         product = Product.objects.create(

@@ -80,16 +80,16 @@ class PwywPriceTest(TestCase):
 
 
 class PwywCheckoutTest(TestCase):
-    """Part 3: adjustable_quantity and custom_unit_amount cannot coexist."""
+    """Part 3: Stripe-enforced PWYW checkout constraints."""
 
     def setUp(self):
         self.factory = RequestFactory()
 
-    def _cart(self, *products):
+    def _cart(self, *products_with_quantity):
         cart = Cart.objects.create()
-        for product in products:
+        for product, quantity in products_with_quantity:
             cart_product = CartProduct.objects.create(
-                cart=cart, product=product, quantity=1,
+                cart=cart, product=product, quantity=quantity,
                 price_id=f"price_{product.pk}")
             cart.products.add(cart_product)
         return cart
@@ -103,34 +103,76 @@ class PwywCheckoutTest(TestCase):
         return Product.objects.create(
             name="Print", external_product_id="prod_print", price=3000)
 
-    def _checkout(self, cart):
+    def _second_pwyw(self):
+        return Product.objects.create(
+            name="PWYW poster", external_product_id="prod_pwyw_poster",
+            price=2500, is_pwyw=True)
+
+    def _checkout(self, cart, coupon=None):
         with mock.patch("main.payments.stripe.checkout.Session.create") as create:
             create.return_value = mock.Mock(
                 url="https://checkout.example/s", id="cs_x")
-            Payments.checkout(self.factory.get("/checkout"), cart)
+            Payments.checkout(self.factory.get("/checkout"), cart, coupon=coupon)
         return create.call_args.kwargs
+
+    def _checkout_error(self, cart, coupon=None):
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            with self.assertRaises(ValueError) as raised:
+                Payments.checkout(self.factory.get("/checkout"), cart, coupon=coupon)
+        return str(raised.exception), create
 
     def test_a_pwyw_line_carries_no_adjustable_quantity(self):
         # Stripe rejects the combination outright, so with this the e-book
         # simply cannot be bought.
-        params = self._checkout(self._cart(self._pwyw()))
+        params = self._checkout(self._cart((self._pwyw(), 1)))
 
         item, = params["line_items"]
         self.assertNotIn("adjustable_quantity", item)
         self.assertEqual(params["mode"], "payment")
 
-    def test_a_mixed_cart_keeps_adjustable_quantity_on_the_fixed_line_only(self):
-        pwyw, fixed = self._pwyw(), self._fixed()
+    def test_fixed_price_lines_keep_adjustable_quantity_and_count(self):
+        first = self._fixed()
+        second = Product.objects.create(
+            name="Poster", external_product_id="prod_poster", price=2000)
 
-        params = self._checkout(self._cart(pwyw, fixed))
+        params = self._checkout(self._cart((first, 1), (second, 1)))
 
         by_price = {item["price"]: item for item in params["line_items"]}
         self.assertEqual(len(by_price), 2)
-        self.assertNotIn(
-            "adjustable_quantity", by_price[f"price_{pwyw.pk}"])
         self.assertEqual(
-            by_price[f"price_{fixed.pk}"]["adjustable_quantity"],
+            by_price[f"price_{first.pk}"]["adjustable_quantity"],
             {"enabled": True})
+        self.assertEqual(
+            by_price[f"price_{second.pk}"]["adjustable_quantity"],
+            {"enabled": True})
+
+    def test_a_mixed_cart_is_refused_before_stripe_checkout(self):
+        pwyw, fixed = self._pwyw(), self._fixed()
+        message, create = self._checkout_error(
+            self._cart((pwyw, 1), (fixed, 1)))
+
+        self.assertIn("only line in its checkout", message)
+        self.assertIn(fixed.name, message)
+        create.assert_not_called()
+
+    def test_a_pwyw_line_with_quantity_above_one_is_refused(self):
+        message, create = self._checkout_error(self._cart((self._pwyw(), 2)))
+
+        self.assertIn("checked out one at a time", message)
+        create.assert_not_called()
+
+    def test_multiple_pwyw_lines_use_the_list_free_refusal_sentence(self):
+        message, create = self._checkout_error(
+            self._cart((self._pwyw(), 1), (self._second_pwyw(), 1)))
+
+        self.assertIn("other pay-what-you-want items", message)
+        self.assertNotIn(": .", message)
+        create.assert_not_called()
+
+    def test_a_pwyw_coupon_is_dropped_before_checkout(self):
+        params = self._checkout(self._cart((self._pwyw(), 1)), coupon="coupon_sale")
+
+        self.assertNotIn("discounts", params)
 
     def test_a_pwyw_product_is_never_routed_into_subscription_mode(self):
         # The session mode is a property of the whole cart, so one
@@ -140,7 +182,7 @@ class PwywCheckoutTest(TestCase):
             name="Support", external_product_id="prod_sub", price=10000,
             mode=Product.Modes.SUBSCRIPTION,
             delivery_type=Product.DeliveryTypes.SERVICE)
-        cart = self._cart(self._pwyw(), subscription)
+        cart = self._cart((self._pwyw(), 1), (subscription, 1))
 
         with mock.patch("main.payments.stripe.checkout.Session.create") as create:
             with self.assertRaises(ValueError) as raised:
