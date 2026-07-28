@@ -12,6 +12,7 @@ from django.utils.html import format_html
 from main.digital import (
     DigitalAssetError, download_url, link_lifetime_days, open_asset)
 from main.payments import Payments
+from main.utils import admin_recipients
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from easy_thumbnails.files import get_thumbnailer
@@ -838,12 +839,7 @@ class Order(models.Model):
         return lines
 
     def notification_recipients(self) -> List[str]:
-        recipients = []
-        for entry in getattr(settings, "ADMINS", None) or []:
-            # Django 5.2 requires 2-tuples, but be forgiving about the bare
-            # string form so a mis-set env var is not a crash in a webhook.
-            recipients.append(entry if isinstance(entry, str) else entry[1])
-        return [r for r in recipients if r]
+        return admin_recipients()
 
     # One page is plenty: a line is a distinct product, and the store sells
     # nowhere near this many different things.

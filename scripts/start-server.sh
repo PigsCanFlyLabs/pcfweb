@@ -8,6 +8,19 @@ export DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE:-"pigscanfly.settings"}
 if [ -n "${PRIMARY:-}" ]; then
   ./manage.py migrate
   ./manage.py seed_products
+  # Now that the catalogue is up to date, check that every product it sells
+  # as a download actually has its archive in this image, and log + email the
+  # owner about any that do not. Before this, the first thing to notice a
+  # missing book file was a customer who had already paid for it.
+  #
+  # Deliberately not fatal, and belt-and-braces about it: the command exits 0
+  # on a missing archive by design (it takes --fail for the callers that do
+  # want an exit code), and this `||` additionally covers it dying for some
+  # unrelated reason under `set -e`. One book we cannot deliver is not a
+  # reason to stop serving the rest of the site -- and this pod is the only
+  # one that runs migrations, so failing here would block a deploy on it.
+  ./manage.py check_book_assets \
+    || echo "start-server.sh: check_book_assets failed; starting anyway." >&2
 fi
 
 # Keep this under the ingress/proxy read timeout and comfortably above
