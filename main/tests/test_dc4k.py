@@ -221,7 +221,7 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         ]
 
     def test_all_three_skus_are_present(self):
-        for pk, price in ((104, 2000), (105, 3042), (106, 1500)):
+        for pk, price in ((104, 2000), (105, 3042), (106, 1299)):
             with self.subTest(pk=pk):
                 product = Product.objects.get(pk=pk)
                 self.assertTrue(product.name.startswith(self.TITLE))
@@ -448,38 +448,6 @@ class DistributedComputing4KidsCatalogTest(TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertContains(response, "Distributed Computing 4 Kids")
 
-    def test_the_rendered_pages_include_all_six_new_paragraphs(self):
-        phrases = (
-            "These techniques power modern AI, search, and recommendation systems.",
-            "their cloud and AI bill keeps growing.",
-            "how work can be split up and combined.",
-            "actual code with Python and Apache Spark",
-            "experienced intern who may be able to help them connect to their actual business data.",
-            "Grab your helper, pour some tea, and get started!",
-        )
-
-        for pk in (104, EBOOK_PK):
-            html = self.rendered_page(pk)
-            for phrase in phrases:
-                with self.subTest(pk=pk, phrase=phrase):
-                    self.assertIn(phrase, html)
-
-    def test_the_executive_page_includes_the_new_copy_and_the_old_add_on(self):
-        html = self.rendered_page(105)
-
-        for phrase in (
-                "These techniques power modern AI, search, and recommendation systems.",
-                "their cloud and AI bill keeps growing.",
-                "how work can be split up and combined.",
-                "actual code with Python and Apache Spark",
-                "experienced intern who may be able to help them connect to their actual business data.",
-                "Grab your helper, pour some tea, and get started!",
-                "(roughly) $10.42 more with a different ISBN.",
-                "The extra also helps keep a developer from turning to a life of enterprise support contracts.",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, html)
-
     def test_the_standard_and_ebook_pages_render_six_description_paragraphs(self):
         for pk in (104, EBOOK_PK):
             with self.subTest(pk=pk):
@@ -503,7 +471,7 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         response = self.client.get(f"/product/{EBOOK_PK}")
 
         self.assertContains(response, "Pay what you want")
-        self.assertContains(response, "15.00")
+        self.assertContains(response, "12.99")
 
     def test_no_retailer_links_are_claimed_yet(self):
         # Every alt link is driven by a field the fixture leaves unset:

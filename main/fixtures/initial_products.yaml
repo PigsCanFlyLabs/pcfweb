@@ -281,13 +281,20 @@
       Both kids and Executives can benefit from having helpers if they choose to pursue the second part, although they'll find them in different places. For kids a librarian or parent who understands computers can be a great helper. Executives should reach out to their data science group or experienced intern who may be able to help them connect to their actual business data.
 
       Big Data and Large Language Models don't have to mean a big headache. Grab your helper, pour some tea, and get started!
+
     # Pay what you want: this is the amount Stripe pre-fills as a suggestion,
     # not a price. The floor is zero, on the owner's explicit instruction.
-    price: 1500
+    #
+    # DC4K is coming to Amazon as an e-book at a fixed $12.99, so the direct
+    # PWYW suggested price is aligned to match.
+    price: 1299
     is_pwyw: true
     # Digital and print-less: only ebook_isbn. `isbn` stays unset on purpose --
     # setting it would put "available signed on request" on a download.
     ebook_isbn: "9781960595980"
+    # Amazon e-book edition forthcoming. ebook_asin is fixture-owned now; set
+    # it here once the Kindle listing exists, and do not invent one before
+    # then or this row could point at somebody else's book.
     image_name: "book_covers/distributed_computing_4_kids.jpg"
     cat: "B"
     brand: "Pigs Can Fly Labs"
