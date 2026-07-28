@@ -1164,7 +1164,11 @@ class MailingListSubscribeView(View):
     unsubscribe page -- is django-newsletter's.
     """
 
-    forced_interest = None
+    # None means "trust the submitted interest". Anything truthy here
+    # overrides the form field server-side; keep the sentinel falsy value as
+    # exactly None so a future empty string cannot silently fall back to user
+    # input and reopen the tampering hole this subclass closes.
+    forced_interest: Optional[str] = None
 
     def submitted(self, request) -> Dict[str, Any]:
         """The submitted fields, from a form post or a JSON body.

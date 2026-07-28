@@ -20,6 +20,7 @@ from django.contrib.auth.models import User
 from django.core import mail
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
+from django.http import QueryDict
 from django.test import Client, TestCase, override_settings
 from django.urls import resolve
 
@@ -836,6 +837,16 @@ class SubscribePageTest(MailingListTestBase):
 
                 self.assertEqual(
                     Subscription.objects.get().newsletter, self.everything)
+
+        repeated = QueryDict("", mutable=True)
+        repeated.update({"email": "repeated@example.com"})
+        repeated.setlist("interest", ["general", "dc4k"])
+        Subscription.objects.all().delete()
+
+        self.client.post(path, repeated)
+
+        self.assertEqual(
+            Subscription.objects.get().newsletter, self.everything)
 
     def test_a_hidden_list_is_not_offered(self):
         self.dc4k.visible = False
