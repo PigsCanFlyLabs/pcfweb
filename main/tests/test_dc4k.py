@@ -62,7 +62,7 @@ STANDARD_PARAGRAPHS = (P1, P2, P3, P4, P5, P6)
 EXECUTIVE_ADD_ON = (
     'This special executive edition is the almost exact same content as '
     'regular Distributed Computing 4 Kids and Executives but it costs '
-    '(roughly) $10.42 more with a different ISBN. You might be saying to '
+    '(roughly) $14.42 more with a different ISBN. You might be saying to '
     'yourself, "Holden, why would I want this special executive edition?" '
     'the answer is to be even more executive, and support creation of books '
     "like these. You're not just reading a book for kids and executives, "
@@ -221,7 +221,7 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         ]
 
     def test_all_three_skus_are_present(self):
-        for pk, price in ((104, 2000), (105, 3042), (106, 1299)):
+        for pk, price in ((104, 2000), (105, 3442), (106, 1299)):
             with self.subTest(pk=pk):
                 product = Product.objects.get(pk=pk)
                 self.assertTrue(product.name.startswith(self.TITLE))
@@ -403,7 +403,7 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         self.assertEqual(executive.description, EXECUTIVE_EDITION_COPY)
         self.assertIn('"Holden, why would I want this special executive '
                       'edition?"', executive.description)
-        self.assertIn("(roughly) $10.42 more", executive.description)
+        self.assertIn("(roughly) $14.42 more", executive.description)
         self.assertIn("almost exact same content", executive.description)
         self.assertIn("The extra also helps keep a developer from turning to "
                       "a life of enterprise support contracts.",
@@ -421,7 +421,7 @@ class DistributedComputing4KidsCatalogTest(TestCase):
 
     def test_the_executive_premium_is_exactly_what_the_copy_claims(self):
         # The copy makes a factual claim about the two prices -- "(roughly)
-        # $10.42 more" -- and nothing else in the suite stops one side of that
+        # $14.42 more" -- and nothing else in the suite stops one side of that
         # from moving without the other. test_all_three_skus_are_present pins
         # the literals, but literals are exactly what a repricing edits, and it
         # would go green again the moment both numbers were updated to a pair
@@ -436,8 +436,8 @@ class DistributedComputing4KidsCatalogTest(TestCase):
 
         premium = executive.price - standard.price
 
-        self.assertEqual(premium, 1042)
-        self.assertIn("$10.42", executive.description)
+        self.assertEqual(premium, 1442)
+        self.assertIn("$14.42", executive.description)
         self.assertIn(f"${premium // 100}.{premium % 100:02d} more",
                       executive.description)
 
