@@ -16,20 +16,11 @@
             <h2>Checkout Successful!</h2>
             <p>You have successfully checked out.</p>
         </div>
-        {# Shown only once success_url carries the Stripe session id (see the #}
-        {# TODO in CheckoutSuccessView). The status displayed here is whatever #}
-        {# the webhook recorded -- loading this page proves nothing. #}
         {% if order %}
         <div class="text-center">
             <p>Order #{{ order.pk }} &mdash; {{ order.get_status_display }}</p>
             <ul style="list-style: none; padding: 0;">
                 {% for item in order.items.all %}
-                {# unit_amount is the amount this line was actually billed at, #}
-                {# which on a pay-what-you-want line is the one the buyer #}
-                {# named on the site. It used to be the snapshot of #}
-                {# Product.price, i.e. the suggestion, which is why the note #}
-                {# below used to have to explain a line that disagreed with #}
-                {# the total. It no longer does. #}
                 <li>{{ item.quantity }} &times; {{ item.product_name }}
                     &mdash; ${{ item.total_display_price }}{% if item.product.is_pwyw %}
                     <br><small class="pwyw-note">Pay what you want: this is the
@@ -37,6 +28,22 @@
                 {% endfor %}
             </ul>
             <p>Total: ${{ order.total_display_price }} {{ order.currency|upper }}</p>
+            <p class="text-muted" style="margin-top: 1.5em;">
+                {% if order.status == 'PENDING' %}
+                    Your payment is being confirmed. You will receive an email
+                    shortly{% if order.has_digital_items %} with your download
+                    link{% elif order.has_physical_items %} when your order
+                    ships{% endif %}.
+                {% else %}
+                    {% if order.has_digital_items %}
+                        Check your email for your download link. The link works
+                        for 7 days &mdash; save a copy.
+                    {% endif %}
+                {% endif %}
+                If you do not hear from us, write to
+                <a href="mailto:support@pigscanfly.ca">support@pigscanfly.ca</a>
+                and we will sort it out.
+            </p>
         </div>
         {% endif %}
     </section>

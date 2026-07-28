@@ -1544,6 +1544,18 @@ class Order(models.Model):
                 if item.product is not None
                 and item.product.delivery_type == Product.DeliveryTypes.DIGITAL]
 
+    @property
+    def has_digital_items(self) -> bool:
+        """Whether this order includes any downloadable line."""
+        return bool(self.digital_items())
+
+    @property
+    def has_physical_items(self) -> bool:
+        """Whether this order includes any physical item to ship."""
+        return any(
+            item.product is not None and item.product.is_physical_good()
+            for item in self.items.select_related('product'))
+
     def deliverable_digital_items(self) -> List["OrderItem"]:
         """Digital lines this site is licensed to deliver itself.
 
