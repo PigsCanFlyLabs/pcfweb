@@ -2,9 +2,12 @@
 
 import html as html_module
 import re
+from datetime import datetime
 from unittest import mock
 
+from django.conf import settings
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from main.models import Product
 from main.tests.base import REPO_ROOT
@@ -1031,3 +1034,126 @@ class FamilyPageTest(TestCase):
         response = self.client.get("/family")
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "family.html")
+
+
+class FrozenDatetime(datetime):
+    """A datetime whose ``now()`` is pinned to :data:`frozen_year`.
+
+    A subclass rather than a Mock so that every other use of the patched
+    symbol keeps behaving like a real datetime; only ``now()`` is stolen.
+
+    ``NowNode`` calls ``datetime.now(tz=tzinfo)``, so the tz it asks for is
+    honoured: the instant is built *in* that zone rather than in UTC and
+    reinterpreted. Midday on 15 June is chosen so the result is roughly six
+    months and twelve hours from the nearest year boundary -- no real zone
+    offset (at most +14/-12 hours) can drag the frozen year to an adjacent
+    one, whatever TIME_ZONE is in force.
+    """
+
+    frozen_year = 2000
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(cls.frozen_year, 6, 15, 12, 0, 0, tzinfo=tz)
+
+
+def frozen_at(year):
+    """A ``FrozenDatetime`` subclass reporting ``year`` from ``now()``."""
+    return type("FrozenAt%d" % year, (FrozenDatetime,),
+                {"frozen_year": year})
+
+
+class FooterCopyrightTest(TestCase):
+    """The footer copyright range, which every page inherits from base.html.
+
+    The point of these tests is that the end of the range *follows a clock*
+    rather than being pinned to a literal. That property is impossible to
+    check against the real clock: today the live year and any freshly
+    hardcoded year are the same number, so an oracle built on the current
+    year passes just as happily against a literal template. Instead the
+    clock the tag actually reads is frozen to two years that are not this
+    year and cannot both be satisfied by any single literal.
+
+    Nothing here compares against a hardcoded *current* year, so no
+    assertion in this class can start failing because a new year began.
+    """
+
+    # Deliberately far-future and mutually exclusive: a template frozen at
+    # either one would fail the other.
+    FROZEN_YEARS = (2031, 2043)
+
+    # Extremes of the real offset range, either side of the project's UTC.
+    # The frozen year must survive all of them.
+    FROZEN_ZONES = ("UTC", "Pacific/Kiritimati", "Etc/GMT+12",
+                    "America/Los_Angeles")
+
+    # `{% now %}` is rendered by django.template.defaulttags.NowNode, which
+    # calls `datetime.now(tz=...)` against the `datetime` symbol imported
+    # into that module -- NOT django.utils.timezone.now(), which it only
+    # consults for the tzinfo argument. Patching timezone.now would leave
+    # the tag reading the real clock and quietly prove nothing.
+    NOW_SYMBOL = "django.template.defaulttags.datetime"
+
+    def django_year(self):
+        """The year *Django's* clock is in, which is what the tag renders.
+
+        Not ``datetime.now().year``: that is the host's local year, and the
+        host need not be on TIME_ZONE. Between 00:00 UTC on 1 January and
+        midnight locally, a machine behind UTC is still in the old year
+        while the footer correctly shows the new one -- a red CI run with
+        no product regression, i.e. the exact bomb this class exists to
+        design out.
+
+        This mirrors NowNode's own tz choice through
+        ``django.utils.timezone``, which is a separate code path from the
+        one under test and is untouched by the patch above -- so it still
+        reports the real year when the template has stopped reading a clock.
+        """
+        if not settings.USE_TZ:
+            return datetime.now().year
+        return timezone.localtime(timezone.now(),
+                                  timezone.get_current_timezone()).year
+
+    def footer_years(self):
+        response = self.client.get("/privacy")
+        self.assertEqual(response.status_code, 200)
+        match = re.search(
+            r"Copyright © (\d{4})-(\d{4}) Pigs Can Fly Labs",
+            response.content.decode())
+        self.assertIsNotNone(match, "footer copyright line missing")
+        assert match is not None  # for mypy
+        return int(match.group(1)), int(match.group(2))
+
+    def test_footer_copyright_starts_at_the_founding_year(self):
+        start, _ = self.footer_years()
+        self.assertEqual(start, 2022)
+
+    def test_footer_copyright_end_year_follows_the_clock(self):
+        """A literal end year cannot track two different frozen clocks.
+
+        If the template is ever changed back to a hardcoded year this
+        fails, whatever year is hardcoded -- including the current one.
+        """
+        for year in self.FROZEN_YEARS:
+            for zone in self.FROZEN_ZONES:
+                with self.subTest(frozen_year=year, time_zone=zone):
+                    with override_settings(TIME_ZONE=zone):
+                        with mock.patch(self.NOW_SYMBOL, frozen_at(year)):
+                            _, end = self.footer_years()
+                    self.assertEqual(
+                        end, year,
+                        "footer end year did not follow a clock frozen at "
+                        f"{year} under TIME_ZONE={zone}; it is not reading "
+                        "the clock")
+
+    def test_footer_copyright_shows_the_real_year_when_not_frozen(self):
+        """The frozen test above would also pass on a template hardcoded to
+        2031, so pin the unfrozen render to the real clock as well.
+
+        The expected year comes from Django's clock in Django's timezone --
+        the same instant and zone the tag reads -- not from the host's local
+        wall clock, so a host behind TIME_ZONE cannot turn New Year's Day
+        into a false failure.
+        """
+        _, end = self.footer_years()
+        self.assertEqual(end, self.django_year())
