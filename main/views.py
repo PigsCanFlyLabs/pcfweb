@@ -310,9 +310,22 @@ class ServicesView(View):
     # Titles cited in the credentials, with the ISBN each one links by. Linked
     # through /book/<isbn> so no fixture primary key ever appears in markup --
     # a pk that moves keeps resolving, to the wrong book.
+    #
+    # Where a label names more than one edition, it links the NEWEST one it
+    # names: that is the edition in print and the one a reader following the
+    # link is best served by. test_cited_editions_land_on_the_edition_they_name
+    # enforces that, and it is a semantic check -- the older
+    # test_each_cited_book_link_reaches_a_page_naming_that_book strips the
+    # bracket off the label before comparing, so it cannot see a label and a
+    # destination that disagree about which edition they mean.
     LEARNING_SPARK = ("Learning Spark (1st edition)", "9781449358624")
+    # Cites both editions and links the 2nd (pk 108, ISBN 9781098145859). It
+    # linked the 1st until pk 101 was renamed to "High Performance Spark
+    # (1st edition)", at which point the label said "1st and 2nd editions"
+    # and the page it reached said it was only the first. The sentence is the
+    # owner's approved copy and does not change; only the target moves.
     HIGH_PERFORMANCE_SPARK = (
-        "High Performance Spark (1st and 2nd editions)", "9781491943205")
+        "High Performance Spark (1st and 2nd editions)", "9781098145859")
     FAST_DATA_PROCESSING = ("Fast Data Processing with Spark", "9781782167068")
     KUBEFLOW = ("Kubeflow for Machine Learning", "9781492050124")
     SCALING_PYTHON_RAY = ("Scaling Python with Ray", "9781098118808")

@@ -18,12 +18,17 @@ class BookByIsbnRedirectTest(TestCase):
     fixtures = ["initial_products"]
 
     # Every book the /services credentials cite, with the pk it must reach.
+    # The High Performance Spark citation names both editions and links the
+    # 2nd, so 9781098145859 is the one actually cited; 9781491943205 stays
+    # listed here because the 1st edition is still in print, still sold, and
+    # still has to resolve for anyone holding a link to it.
     CATALOGUE = {
         "9781449358624": 100,   # Learning Spark (1st edition)
-        "9781491943205": 101,   # High Performance Spark
+        "9781491943205": 101,   # High Performance Spark (1st edition)
         "9781492050124": 102,   # Kubeflow for Machine Learning
         "9781098118808": 103,   # Scaling Python with Ray
         "9781782167068": 107,   # Fast Data Processing with Spark
+        "9781098145859": 108,   # High Performance Spark, 2nd Edition
     }
 
     def test_every_credential_isbn_redirects_to_its_product_page(self):

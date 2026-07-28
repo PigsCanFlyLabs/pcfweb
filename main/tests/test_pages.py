@@ -9,6 +9,19 @@ from django.test import TestCase, override_settings
 from main.models import Product
 from main.tests.base import REPO_ROOT
 
+# An edition ordinal as it appears either in a credential label ("1st and 2nd
+# editions") or in a product name ("(1st edition)", ", 2nd Edition"). The two
+# are worded differently on purpose -- one reads as a sentence, the other is
+# the catalogue title -- so the comparison has to be on the numbers, not on
+# the strings. Requiring the ordinal suffix keeps plain digits elsewhere in a
+# title out of it: "Distributed Computing 4 Kids" names no edition.
+_EDITION_ORDINAL = re.compile(r"(\d+)(?:st|nd|rd|th)\b", re.IGNORECASE)
+
+
+def editions_named(text: str) -> set[int]:
+    """The edition numbers *text* claims, as ints. Empty if it claims none."""
+    return {int(n) for n in _EDITION_ORDINAL.findall(text)}
+
 
 class StaticPagesTest(TestCase):
     def test_privacy_page_renders_privacy_template(self):
@@ -211,7 +224,10 @@ class ServicesPageTest(ServicesPageMixin, TestCase):
         section = self.services_section()
         expected = {
             "Learning Spark (1st edition)": "9781449358624",
-            "High Performance Spark (1st and 2nd editions)": "9781491943205",
+            # The 2nd edition's ISBN: the label names both editions, so it
+            # links the newer one. See the note on
+            # ServicesPageView.HIGH_PERFORMANCE_SPARK.
+            "High Performance Spark (1st and 2nd editions)": "9781098145859",
             "Fast Data Processing with Spark": "9781782167068",
             "Kubeflow for Machine Learning": "9781492050124",
             "Scaling Python with Ray": "9781098118808",
@@ -289,12 +305,71 @@ class ServicesPageBookLinksTest(ServicesPageMixin, TestCase):
                 r'<a href="/book/(\d+)">([^<]+)</a>', section):
             with self.subTest(isbn=isbn):
                 response = self.client.get(f"/book/{isbn}", follow=True)
-                # The credential titles carry an edition suffix the product
-                # name does not, so compare on the part before the bracket.
+                # Compare on the part before the bracket: a credential's
+                # edition suffix is worded for the sentence ("1st and 2nd
+                # editions") and does not match the product's own suffix
+                # ("(1st edition)", ", 2nd Edition") even when both mean the
+                # same book. Stripping it is what makes this check general.
+                #
+                # The cost is that this test cannot see a label and a
+                # destination disagreeing about WHICH edition they mean --
+                # both reduce to the same stem. That is deliberate here and
+                # covered by test_cited_editions_land_on_the_edition_they_name
+                # below; do not try to make this one do both jobs.
                 stem = title.split(" (")[0]
 
                 self.assertEqual(response.status_code, 200)
                 self.assertContains(response, stem)
+
+    def test_cited_editions_land_on_the_edition_they_name(self):
+        """A citation naming an edition must reach that edition's page.
+
+        The stem comparison above is blind to this by construction, so
+        nothing detected it when pk 101 was renamed to "High Performance
+        Spark (1st edition)" and the credential citing "1st and 2nd editions"
+        went on pointing at it: the label promised both editions and the page
+        it reached said it was only the first. The reader is the one who finds
+        out.
+
+        The rule, which matches what the credentials mean: a label naming a
+        single edition must reach that edition, a label naming several must
+        reach the newest one it names (the one in print), and a label naming
+        no edition must not land on an edition-specific page at all.
+        """
+        section = self.services_section()
+        cited = re.findall(r'<a href="/book/(\d+)">([^<]+)</a>', section)
+        # Anti-vacuity: the citations are really there to be checked.
+        self.assertEqual(len(cited), 5)
+
+        saw_an_edition_claim = False
+        for isbn, label in cited:
+            with self.subTest(label=label):
+                response = self.client.get(f"/book/{isbn}")
+                self.assertEqual(response.status_code, 302)
+                pk = int(response["Location"].rsplit("/", 1)[-1])
+                reached_name = Product.objects.get(pk=pk).name
+
+                claimed = editions_named(html_module.unescape(label))
+                reached = editions_named(reached_name)
+
+                if claimed:
+                    saw_an_edition_claim = True
+                    self.assertEqual(
+                        reached, {max(claimed)},
+                        f"{label!r} names edition(s) "
+                        f"{sorted(claimed)} so it must link the newest of "
+                        f"them, edition {max(claimed)}; /book/{isbn} reaches "
+                        f"pk {pk}, {reached_name!r}.")
+                else:
+                    self.assertEqual(
+                        reached, set(),
+                        f"{label!r} names no edition, but /book/{isbn} "
+                        f"reaches pk {pk}, {reached_name!r}, which is "
+                        "specific to one.")
+
+        # Anti-vacuity: at least one citation really does make an edition
+        # claim, so the branch that matters was actually exercised.
+        self.assertTrue(saw_an_edition_claim)
 
 
 @override_settings(THUMBNAIL_DEBUG=False)
