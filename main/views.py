@@ -849,11 +849,11 @@ class GoogleProductFeed(View):
 class CartView(View, BaseCartView):
     def get(self, request):
         cart = self.get_cart(request)
-        # Consumed here as well as at checkout: a buyer who comes to the cart
-        # of their own accord is being shown the combined basket, which is
-        # exactly what the notice is for, so there is no reason to bounce
-        # them off checkout afterwards as well.
-        repriced = request.session.pop(self.PWYW_MERGE_NOTICE_KEY, None)
+        # This view is the only thing that may clear the merge hold, because
+        # it is the only thing that shows the buyer the merged basket. Read it
+        # here; it is deleted at the bottom, after the page has actually
+        # rendered.
+        repriced = request.session.get(self.PWYW_MERGE_NOTICE_KEY)
         if repriced:
             messages.warning(request, self._merge_notice(repriced))
         cart_products = cart.products.select_related("product")
@@ -875,7 +875,7 @@ class CartView(View, BaseCartView):
         # it is what tells a buyer the row is theirs to change.
         has_pwyw = any(cp.product.is_pwyw for cp in cart_products)
         has_unavailable = any(cp.product.noorder for cp in cart_products)
-        return render(request, 'cart.html', context={
+        response = render(request, 'cart.html', context={
             'title': 'Cart',
             'products': cart_products,
             'total_price': total_display_price,
@@ -883,6 +883,15 @@ class CartView(View, BaseCartView):
             'has_pwyw': has_pwyw,
             'has_unavailable': has_unavailable,
         })
+        if repriced:
+            # Cleared here and nowhere else, and only now: render() has
+            # returned, so the merged basket and its notice are in the body
+            # that is about to go back to the buyer. Anything above that
+            # raised, or ever returns a redirect instead of this page, leaves
+            # the key in place and the hold stands -- which is the point. A
+            # buyer who is bounced away from the cart has not seen it.
+            del request.session[self.PWYW_MERGE_NOTICE_KEY]
+        return response
 
 
 class AddToCartView(View, BaseCartView):
@@ -1010,15 +1019,23 @@ class CheckoutView(View, BaseCartView):
         # must not be billed unseen: this is the same rule as showing the
         # rounded figure before charging it, and a merge that silently swaps
         # the amount the buyer was just looking at breaks it by another route.
-        # Bounce to the cart, which renders the combined basket and the
-        # notice; the key is consumed there or here, so the next attempt goes
-        # through.
-        repriced = request.session.pop(self.PWYW_MERGE_NOTICE_KEY, None)
+        #
+        # Read, never removed. Clearing it here made the hold one-shot on the
+        # *attempt to skip it*: a second POST, or a second tab on the same
+        # session, found the key already gone and went straight to Stripe with
+        # the repriced basket still unseen -- the exact thing the hold exists
+        # to stop. CartView owns the clear, because CartView is what shows the
+        # buyer the basket. No number of retries gets past this until it has.
+        #
+        # Not strandable: this redirect goes to the page that clears it, so
+        # the ordinary browser flow resolves in one hop.
+        repriced = request.session.get(self.PWYW_MERGE_NOTICE_KEY)
         if repriced:
             logger.info(
                 "Held checkout for cart %s: merge repriced %s.",
                 cart.pk, ", ".join(repriced))
-            messages.warning(request, self._merge_notice(repriced))
+            # No message queued here on purpose: CartView queues it as it
+            # renders, so repeated POSTs cannot stack up duplicate warnings.
             return redirect('cart')
         if not cart.products.exists():
             # Stripe rejects a session with no line items anyway; bailing here

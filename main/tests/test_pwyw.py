@@ -16,6 +16,7 @@ those bind, and the tests that asserted the refusals assert their absence.
 
 from unittest import mock
 
+from django.conf import settings
 from django.core import mail
 from django.test import Client, RequestFactory, TestCase
 
@@ -1302,6 +1303,13 @@ class PwywMergeIsNotBilledUnseenTest(CartTestBase):
         self.client.force_login(user)
         return user
 
+    def _second_tab(self):
+        """Another client sharing this session cookie, i.e. a second tab."""
+        other = Client()
+        other.cookies[settings.SESSION_COOKIE_NAME] = (
+            self.client.cookies[settings.SESSION_COOKIE_NAME].value)
+        return other
+
     def test_checkout_straight_after_signing_in_goes_to_the_cart_instead(self):
         self._sign_in_over_a_saved_basket(500, "50.00")
 
@@ -1313,8 +1321,68 @@ class PwywMergeIsNotBilledUnseenTest(CartTestBase):
         self.assertFalse(Order.objects.exists())
         self.assertContains(response, "combined with the basket")
 
-    def test_the_second_attempt_goes_through_at_the_session_amount(self):
-        # The hold is one-shot: they have now seen the combined basket.
+    def test_posting_checkout_twice_without_loading_the_cart_is_still_held(self):
+        # The hold used to be consumed by the first POST rather than by the
+        # buyer seeing the basket, so the second one billed the repriced cart
+        # unseen. follow=False on purpose: not following the redirect is
+        # exactly what "never loaded the cart" means.
+        self._sign_in_over_a_saved_basket(500, "50.00")
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            first = self.client.post("/checkout")
+            second = self.client.post("/checkout")
+
+        self.assertEqual(first.status_code, 302)
+        self.assertEqual(first["Location"], "/cart")
+        self.assertEqual(second.status_code, 302)
+        self.assertEqual(second["Location"], "/cart")
+        self.assertEqual(create.call_count, 0)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_no_number_of_attempts_gets_past_the_hold(self):
+        self._sign_in_over_a_saved_basket(500, "50.00")
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            for attempt in range(5):
+                response = self.client.post("/checkout")
+                with self.subTest(attempt=attempt):
+                    self.assertEqual(response["Location"], "/cart")
+
+        self.assertEqual(create.call_count, 0)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_a_second_tab_on_the_same_session_is_also_held(self):
+        # Sharing the session cookie is what a second tab is. Neither tab may
+        # be the one that "uses up" the hold for the other.
+        self._sign_in_over_a_saved_basket(500, "50.00")
+        other = self._second_tab()
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            first = self.client.post("/checkout")
+            second = other.post("/checkout")
+
+        self.assertEqual(first["Location"], "/cart")
+        self.assertEqual(second["Location"], "/cart")
+        self.assertEqual(create.call_count, 0)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_the_second_tab_ordering_does_not_matter(self):
+        # The reverse order: the other tab goes first.
+        self._sign_in_over_a_saved_basket(500, "50.00")
+        other = self._second_tab()
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            first = other.post("/checkout")
+            second = self.client.post("/checkout")
+
+        self.assertEqual(first["Location"], "/cart")
+        self.assertEqual(second["Location"], "/cart")
+        self.assertEqual(create.call_count, 0)
+
+    def test_the_attempt_goes_through_once_the_cart_has_been_loaded(self):
+        # The hold clears on a genuine render of the merged basket, so the
+        # ordinary browser flow -- redirect, page loads, pay -- resolves in
+        # one hop and nobody is stranded.
         self._sign_in_over_a_saved_basket(500, "50.00")
         self.client.post("/checkout", follow=True)
 
@@ -1323,11 +1391,42 @@ class PwywMergeIsNotBilledUnseenTest(CartTestBase):
                 url="https://checkout.example/s", id="cs_merged")
             self.client.post("/checkout")
 
+        self.assertEqual(create.call_count, 1)
         order = Order.objects.get(stripe_session_id="cs_merged")
         item = order.items.get()
         self.assertEqual(item.unit_amount, 5000)
         self.assertEqual(item.quantity, 2)
         self.assertEqual(order.amount_total, 10000)
+
+    def test_a_rendered_cart_clears_the_hold_for_the_other_tab_too(self):
+        # CONTROL -- passes on e4ce4c3 too, where the cart also cleared
+        # the key. Kept so that moving the clear into the post-render
+        # branch cannot quietly make the hold per-tab: once the basket
+        # has genuinely been seen, it has been seen, and the hold is
+        # about the buyer rather than about which tab they used.
+        self._sign_in_over_a_saved_basket(500, "50.00")
+        other = self._second_tab()
+        self.client.get("/cart")
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/s", id="cs_other_tab")
+            response = other.post("/checkout")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(create.call_count, 1)
+
+    def test_the_notice_is_shown_once_not_on_every_cart_load(self):
+        # CONTROL -- passes on e4ce4c3 too. Guards the other direction
+        # from the bug: the fix must not make the hold sticky, or every
+        # later cart load would nag about a merge already dealt with.
+        self._sign_in_over_a_saved_basket(500, "50.00")
+
+        first = self.client.get("/cart")
+        second = self.client.get("/cart")
+
+        self.assertContains(first, "combined with the basket")
+        self.assertNotContains(second, "combined with the basket")
 
     def test_visiting_the_cart_first_also_clears_the_hold(self):
         self._sign_in_over_a_saved_basket(500, "50.00")
