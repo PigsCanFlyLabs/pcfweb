@@ -16,7 +16,7 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase, TestCase
 
-from pigscanfly.settings import Prod, _prod_required_env
+from pigscanfly.settings import Prod, _prod_required_env, parse_email_flag
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -157,6 +157,79 @@ class ProdConfigurationGuardTest(TestCase):
         # bounded well under the 60s gunicorn worker timeout.
         self.assertLess(Prod.EMAIL_TIMEOUT, 60)
 
+    def test_error_reports_are_not_sent_as_root_at_localhost(self):
+        # SERVER_EMAIL is the sender on Django's 500 reports to ADMINS, and
+        # its framework default is root@localhost -- an address relays
+        # reject, making the mail about failures the mail most likely to
+        # fail. It has to ride the same address the rest of the app sends
+        # as.
+        self.assertEqual(Prod.SERVER_EMAIL, Prod.DEFAULT_FROM_EMAIL)
+        self.assertNotEqual(Prod.SERVER_EMAIL, "root@localhost")
+
+    def test_pre_setup_refuses_starttls_and_smtps_together(self):
+        # Django's backend also refuses the pair, but only when a connection
+        # is opened -- at send time, inside the Stripe webhook, where every
+        # caller catches the failure and records it. The rollout is where
+        # this has to surface.
+        env = {
+            "SECRET_KEY": "x" * 60,
+            "STRIPE_LIVE_SECRET_KEY": "sk_live_x",
+            "STRIPE_WEBHOOK_SECRET": "whsec_x",
+            "EMAIL_USE_TLS": "true",
+            "EMAIL_USE_SSL": "true",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(ImproperlyConfigured) as caught:
+                Prod.pre_setup()
+        message = str(caught.exception)
+        self.assertIn("EMAIL_USE_TLS", message)
+        self.assertIn("EMAIL_USE_SSL", message)
+        # Where to go and fix it.
+        self.assertIn("pcfweb-db-config", message)
+
+    def test_pre_setup_accepts_smtps_in_place_of_starttls(self):
+        # Implicit TLS with STARTTLS off: the deployed shape (465, the
+        # submissions port). The guard must let it through.
+        env = {
+            "SECRET_KEY": "x" * 60,
+            "STRIPE_LIVE_SECRET_KEY": "sk_live_x",
+            "STRIPE_WEBHOOK_SECRET": "whsec_x",
+            "EMAIL_USE_TLS": "false",
+            "EMAIL_USE_SSL": "true",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            Prod.pre_setup()
+
+    def test_pre_setup_accepts_starttls_in_place_of_smtps(self):
+        # STARTTLS with implicit TLS off: the 587 fallback the ConfigMap
+        # comment offers if the server has no smtps listener.
+        env = {
+            "SECRET_KEY": "x" * 60,
+            "STRIPE_LIVE_SECRET_KEY": "sk_live_x",
+            "STRIPE_WEBHOOK_SECRET": "whsec_x",
+            "EMAIL_USE_TLS": "true",
+            "EMAIL_USE_SSL": "false",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            Prod.pre_setup()
+
+
+class EmailFlagParsingTest(SimpleTestCase):
+    """The EMAIL_USE_* switches arrive as ConfigMap strings."""
+
+    def test_the_off_spellings(self):
+        # The empty string is deliberately off, unlike STRIPE_AUTOMATIC_TAX:
+        # `EMAIL_USE_SSL: ""` in a manifest reads as "not set", and must not
+        # switch the wire protocol on.
+        for raw in ("", "  ", "0", "false", "False", "NO", " off "):
+            with self.subTest(raw=raw):
+                self.assertFalse(parse_email_flag(raw))
+
+    def test_everything_else_is_on(self):
+        for raw in ("1", "true", "True", "YES", " on "):
+            with self.subTest(raw=raw):
+                self.assertTrue(parse_email_flag(raw))
+
 
 class ProdSecretPreflightTest(SimpleTestCase):
     """build.sh checks pcfweb-secret before pushing, against a list it has to
@@ -285,3 +358,21 @@ class DeployManifestTest(TestCase):
                               + spec.get("containers", [])):
                 with self.subTest(container=container["name"]):
                     self.assertIn("requests", container.get("resources", {}))
+
+    def test_the_mail_relay_in_the_manifest_matches_the_code_defaults(self):
+        # The ConfigMap wins at runtime (envFrom) while the code defaults
+        # are what tests and a bare pod see. If the two drift, the defaults
+        # become documentation that lies -- the same trap the
+        # ProdSecretPreflightTest closes for build.sh.
+        config_map = next(
+            doc for doc in self.docs
+            if doc.get("kind") == "ConfigMap"
+            and doc["metadata"]["name"] == "pcfweb-db-config")
+        data = config_map["data"]
+        self.assertEqual(data["EMAIL_HOST"], Prod.EMAIL_HOST)
+        self.assertEqual(int(data["EMAIL_PORT"]), Prod.EMAIL_PORT)
+        self.assertEqual(
+            parse_email_flag(data["EMAIL_USE_TLS"]), Prod.EMAIL_USE_TLS)
+        self.assertEqual(
+            parse_email_flag(data["EMAIL_USE_SSL"]), Prod.EMAIL_USE_SSL)
+        self.assertEqual(data["EMAIL_HOST_USER"], Prod.EMAIL_HOST_USER)

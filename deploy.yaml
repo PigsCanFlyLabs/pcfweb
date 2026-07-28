@@ -24,6 +24,34 @@ data:
   # both halves and /discord becomes the "e-mail us for an invite" page.
   DISCORD_INVITE_PART_ONE: "https://discord.gg/aVU2"
   DISCORD_INVITE_PART_TWO: "2HAmb"
+  # OUTBOUND MAIL -- the relay for order notifications, download links, the
+  # book-asset audit and Django's 500 reports to ADMINS. These mirror the
+  # Prod defaults in pigscanfly/settings.py, and a test pins the two files
+  # to each other; change the relay here (plus a pod restart), not with a
+  # rebuild. The one secret piece, EMAIL_HOST_PASSWORD, stays in
+  # pcfweb-secret -- provisioned out of the colo-scripts vault
+  # (playbooks/cluster-setup.yaml) -- and an empty password just turns SMTP
+  # AUTH off. The full path, DNS included, is docs/email.md.
+  #
+  # The host is the domain's own mail server by its MX name, deliberately
+  # not the bare apex: pigscanfly.ca resolves to Cloudflare edge IPs, which
+  # do not carry SMTP, so mail pointed there hangs into the timeout on
+  # every send. The domain's live SPF record already authorizes this relay
+  # (its "mx" mechanism); if the relay ever changes, adjust that TXT record
+  # where the DNS is actually served -- Cloudflare, not the retired bind
+  # zone files in colo-scripts.
+  #
+  # 465 is the submissions port -- TLS from the first byte, for exactly
+  # this shape of client: authenticated, handing mail in. Not 25, the
+  # MTA-to-MTA relay port, which networks block outbound and servers often
+  # refuse AUTH on. Should the server turn out not to listen on 465, the
+  # flip is EMAIL_PORT "587" with EMAIL_USE_TLS "true" and EMAIL_USE_SSL
+  # "false" (STARTTLS submission); setting both flags on refuses to boot.
+  EMAIL_HOST: "mail.pigscanfly.ca"
+  EMAIL_PORT: "465"
+  EMAIL_USE_TLS: "false"
+  EMAIL_USE_SSL: "true"
+  EMAIL_HOST_USER: "support"
 ---
 apiVersion: apps/v1
 kind: Deployment
