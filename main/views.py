@@ -38,8 +38,9 @@ from main.digital import (
 from main.forms import (
     MailingListImportForm, MailingListSendForm, MailingListSignupForm)
 from main.models import (
-    Cart, CartProduct, EmailIdentity, MailingListMessage, Order, Product,
-    SuppressedAddress, normalize_email_identity, send_batch_size)
+    PWYW_ROUND_DOWN_BELOW, Cart, CartProduct, EmailIdentity,
+    MailingListMessage, Order, Product, PwywAmountError, SuppressedAddress,
+    normalize_email_identity, parse_pwyw_amount, send_batch_size)
 from main.payments import Payments
 from main.utils import (
     generate_username, get_country_code, get_storable_client_ip)
@@ -594,6 +595,10 @@ class ProductView(View):
             'title': product.name,
             'product': product,
             'alt_links': product.get_alt_links(country=get_country_code(request)),
+            # The round-down threshold reaches the page's JavaScript from the
+            # one constant that defines it, rather than being written out a
+            # second time where it could drift from the server's rule.
+            'pwyw_round_down_below': PWYW_ROUND_DOWN_BELOW,
         })
 
 class BaseCartView():
@@ -606,6 +611,15 @@ class BaseCartView():
     # should be a product-level cap on quantity is a separate, still-open
     # decision.
     MAX_QUANTITY = 9223372036854775807
+
+    @staticmethod
+    def _merge_notice(names) -> str:
+        listed = ", ".join(names)
+        return (
+            f"Your saved basket already held {listed}, so it has been "
+            "combined with the basket you were using: the quantity is the "
+            "total of both, and the amount is the one you chose most "
+            "recently. Please check it before paying.")
 
     @classmethod
     def quantity_sum(cls, existing_quantity: int, added_quantity: int) -> int:
@@ -655,12 +669,69 @@ class BaseCartView():
         self._merge_cart(request, session_cart, user_cart)
         return user_cart
 
+    @staticmethod
+    def _reconcile_pwyw_amount(existing, incoming) -> bool:
+        """Decide which chosen amount survives a merge, and say if it moved.
+
+        `existing` is the row already in the user's saved cart. `incoming` is
+        the row from the anonymous session cart -- the one the buyer has been
+        looking at, and the one they last named an amount on.
+
+        The session row always wins, because its amount is the number the
+        buyer was last shown. Keeping the saved row's amount instead means
+        billing them something they never saw, which is the same surprise at
+        the till that the round-down display exists to prevent.
+
+        The five cases, all of which fall out of one comparison:
+
+          only the session row has an amount   -> that amount, and say so
+          only the saved row has an amount     -> cleared, so the suggestion
+                                                  stands, and say so; the
+                                                  session cart was showing
+                                                  the suggestion, not the
+                                                  saved amount
+          both, and they differ                -> the session one, and say so
+          both, and they agree                 -> unchanged, nothing to say
+          neither                              -> unchanged, nothing to say
+
+        Returns True when the surviving amount is not the one the saved row
+        held, i.e. when the buyer needs telling before anything is billed.
+        """
+        if not existing.product.is_pwyw:
+            return False
+        if existing.chosen_amount == incoming.chosen_amount:
+            # Covers both-None: nothing was named on either side, the
+            # suggestion still stands, and there is nothing to report.
+            return False
+        existing.chosen_amount = incoming.chosen_amount
+        # The hold, recorded on the row whose price just moved. The caller
+        # saves this row either way, so it is persisted with the new amount
+        # in the same statement.
+        existing.pwyw_amount_merged = True
+        # A Stripe Price is immutable and this row's was minted for the old
+        # amount, so it has to go. refresh_pwyw_price() would re-mint at
+        # checkout regardless; clearing it here keeps price_id and
+        # effective_unit_amount() consistent in the meantime.
+        existing.price_id = None
+        return True
+
     def _merge_cart(self, request, session_cart: Cart, user_cart: Cart) -> None:
         """Fold an anonymous session cart into the logged-in user's cart.
 
         Rows for a product the user cart already holds have their quantity
         added on and are dropped; the rest are reparented. Either way we never
         end up with two rows for the same (cart, product).
+
+        Quantities are still summed, including when the two rows carried
+        different pay-what-you-want amounts. Two rows at different amounts are
+        arguably not the same line at all, but this schema cannot hold two
+        rows for one (cart, product) -- there is a unique constraint -- so
+        some rule has to combine them, and dropping the saved row's quantity
+        would throw away something the buyer put there on purpose. Summing is
+        the rule this merge has always used and it is about count, not price.
+        What changes is that the result is no longer billed unseen: any row
+        whose amount moved is recorded below, and CheckoutView refuses to go
+        to Stripe until the buyer has been shown the combined cart.
 
         The whole thing is one transaction: adding a quantity onto the
         surviving row and deleting the row it came from are two statements,
@@ -670,6 +741,7 @@ class BaseCartView():
         surviving row at MAX_QUANTITY, dropping the duplicate session row and
         warning the shopper.
         """
+        repriced = []
         with transaction.atomic():
             # Rows are linked to a cart both by FK and by the M2M; take the
             # union so a row that only made it into one still gets merged.
@@ -680,6 +752,11 @@ class BaseCartView():
                 existing = CartProduct.objects.filter(
                     cart=user_cart, product=cart_product.product).first()
                 if existing is not None:
+                    if self._reconcile_pwyw_amount(existing, cart_product):
+                        # For the log line only. The hold itself is on the
+                        # row, set by _reconcile_pwyw_amount and saved
+                        # below with the amount that caused it.
+                        repriced.append(existing.product.name)
                     try:
                         existing.quantity = self.quantity_sum(
                             existing.quantity, cart_product.quantity)
@@ -706,6 +783,10 @@ class BaseCartView():
         # once the merge has actually committed. If the block above rolled
         # back, the session still points at an intact cart.
         del request.session["cart_id"]
+        if repriced:
+            logger.info(
+                "Merge repriced %s on cart %s; holding checkout until the "
+                "cart has been shown.", ", ".join(repriced), user_cart.pk)
 
 class SignupView(View):
     def get(self, request):
@@ -767,6 +848,13 @@ class GoogleProductFeed(View):
 class CartView(View, BaseCartView):
     def get(self, request):
         cart = self.get_cart(request)
+        # This view is the only thing that may clear the merge hold, because
+        # it is the only thing that shows the buyer the merged basket. Read it
+        # off the cart here; it is cleared at the bottom, once the page has
+        # actually rendered into a body they will receive.
+        repriced = cart.pwyw_merge_notice_names()
+        if repriced:
+            messages.warning(request, self._merge_notice(repriced))
         cart_products = cart.products.select_related("product")
         # A noorder line contributes nothing to the total. Public add-to-cart
         # refuses these and checkout re-checks, so one is only here because it
@@ -780,21 +868,38 @@ class CartView(View, BaseCartView):
         total_display_price = "{0:.2f}".format(total_price / 100)
         has_physical = any(cp.product.is_physical_good() for cp in cart_products
                            if not cp.product.noorder)
-        # The displayed total is the sum of list prices, which for a
-        # pay-what-you-want line is only a suggestion. Say so rather than
-        # showing a number the buyer is not going to be charged.
+        # The total is now the sum of the amounts that will actually be
+        # billed, because a pay-what-you-want line contributes the amount the
+        # buyer named rather than the owner's suggestion. The notice stays:
+        # it is what tells a buyer the row is theirs to change.
         has_pwyw = any(cp.product.is_pwyw for cp in cart_products)
         has_unavailable = any(cp.product.noorder for cp in cart_products)
-        pwyw_checkout_blocker = Payments.pwyw_checkout_blocker(cart)
-        return render(request, 'cart.html', context={
+        response = render(request, 'cart.html', context={
             'title': 'Cart',
             'products': cart_products,
             'total_price': total_display_price,
             'has_physical': has_physical,
             'has_pwyw': has_pwyw,
             'has_unavailable': has_unavailable,
-            'pwyw_checkout_blocker': pwyw_checkout_blocker,
         })
+        # Cleared here and nowhere else, and only for a request that is
+        # actually being sent the basket:
+        #
+        #   HEAD  -- Django dispatches it to this same get(), and the body is
+        #            stripped before it reaches the client. A bodiless
+        #            response has by definition shown the buyer nothing, so it
+        #            must not count as having seen anything.
+        #   non-200 -- likewise nothing to look at.
+        #   an exception above -- render() is eager, so it raises here and
+        #            never reaches this line; the hold stands.
+        #
+        # That is also the answer to whether a /cart GET that redirects away
+        # should clear it: no, and this shape means it cannot, rather than
+        # relying on nobody adding such a branch later.
+        if (repriced and request.method == "GET"
+                and response.status_code == 200):
+            cart.clear_pwyw_merge_notice()
+        return response
 
 
 class AddToCartView(View, BaseCartView):
@@ -820,15 +925,35 @@ class AddToCartView(View, BaseCartView):
         if not product.is_purchasable():
             return HttpResponseBadRequest("Product is not purchasable.")
         cart = self.get_cart(request)
-        pwyw_add_blocker = Payments.pwyw_add_to_cart_blocker(
-            cart, product, quantity)
-        if pwyw_add_blocker is not None:
-            messages.error(request, pwyw_add_blocker)
-            return redirect('cart')
+        # The amount field only exists on a pay-what-you-want product's form,
+        # and is only honoured for one: posting it at anything else changes
+        # nothing, rather than repricing the catalogue.
+        chosen_amount = None
+        if product.is_pwyw:
+            posted_amount = request.POST.get('chosen_amount')
+            if posted_amount is not None:
+                try:
+                    chosen_amount = parse_pwyw_amount(posted_amount)
+                except PwywAmountError as error:
+                    # Same shape as the add-to-cart refusals this replaces:
+                    # say why on the cart, which is the only page in the
+                    # buying flow that renders queued messages, and add
+                    # nothing. The product page has no messages block.
+                    messages.error(request, str(error))
+                    return redirect('cart')
 
         cart_product, created = CartProduct.objects.get_or_create(
-            cart=cart, product=product, defaults={'quantity': quantity})
+            cart=cart, product=product,
+            defaults={'quantity': quantity, 'chosen_amount': chosen_amount})
         if not created:
+            if chosen_amount is not None:
+                # Adding the same pay-what-you-want product again with a new
+                # amount means the new amount, not the first one: the buyer
+                # has just said what they want to pay, on the only form that
+                # asks. Dropping price_id makes the save below mint a Price
+                # for it, because a Stripe Price cannot be repriced.
+                cart_product.chosen_amount = chosen_amount
+                cart_product.price_id = None
             # Adding a product that's already in the cart adds to what's
             # there rather than silently discarding the new quantity.
             try:
@@ -855,6 +980,32 @@ class RemoveFromCartView(View, BaseCartView):
         return redirect('cart')
 
 
+class SetPwywAmountView(View, BaseCartView):
+    """Change what a pay-what-you-want line in the cart is worth.
+
+    POST only, for the same reason as AddToCartView: a GET would be
+    triggerable cross-site with no CSRF token, and this one writes a price.
+    """
+
+    def post(self, request, cart_product_id: int):
+        cart = self.get_cart(request)
+        # Scoped to the requester's own cart, so a row id belonging to
+        # somebody else is a 404 rather than a repricing of their basket.
+        cart_product = get_object_or_404(
+            CartProduct.objects.select_related("product"),
+            pk=cart_product_id, cart=cart)
+        if not cart_product.product.is_pwyw:
+            return HttpResponseBadRequest(
+                "That item does not have an amount to choose.")
+        try:
+            amount = parse_pwyw_amount(request.POST.get('chosen_amount'))
+        except PwywAmountError as error:
+            messages.error(request, str(error))
+            return redirect('cart')
+        cart_product.set_chosen_amount(amount)
+        return redirect('cart')
+
+
 class CheckoutView(View, BaseCartView):
     # POST only. A GET here creates a PENDING order and a Stripe session as a
     # side effect, which an <img> tag or a link prefetch could trigger
@@ -871,6 +1022,28 @@ class CheckoutView(View, BaseCartView):
         back from a webhook to this cart, which will be gone by then.
         """
         cart = self.get_cart(request)
+        # get_cart() may have just merged an anonymous basket into the saved
+        # one and changed a pay-what-you-want amount doing it. That reprice
+        # must not be billed unseen: this is the same rule as showing the
+        # rounded figure before charging it, and a merge that silently swaps
+        # the amount the buyer was just looking at breaks it by another route.
+        #
+        # Read off the cart, and never cleared here. CartView owns the clear,
+        # because CartView is what shows the buyer the basket, and the hold
+        # itself is a column on the repriced row rather than a session key --
+        # so logging out, logging back in, opening a second tab or issuing a
+        # bodiless request cannot separate it from the cart it describes.
+        #
+        # Not strandable: this redirect goes to the page that clears it, so
+        # the ordinary browser flow resolves in one hop.
+        repriced = cart.pwyw_merge_notice_names()
+        if repriced:
+            logger.info(
+                "Held checkout for cart %s: merge repriced %s.",
+                cart.pk, ", ".join(repriced))
+            # No message queued here on purpose: CartView queues it as it
+            # renders, so repeated POSTs cannot stack up duplicate warnings.
+            return redirect('cart')
         if not cart.products.exists():
             # Stripe rejects a session with no line items anyway; bailing here
             # keeps empty checkouts from leaving orphan PENDING orders behind.
@@ -893,18 +1066,17 @@ class CheckoutView(View, BaseCartView):
                 "Sorry, these are no longer available and need to be removed "
                 "before checking out: " + ", ".join(unavailable) + ".")
             return redirect('cart')
-        coupon_warning = Payments.pwyw_coupon_warning(cart, coupon=coupon)
-        if coupon_warning is not None:
-            messages.warning(request, coupon_warning)
-            coupon = None
-        pwyw_checkout_blocker = Payments.pwyw_checkout_blocker(
-            cart, coupon=coupon)
-        if pwyw_checkout_blocker is not None:
-            logger.info(
-                "Blocked checkout for cart %s: %s",
-                cart.pk, pwyw_checkout_blocker)
-            messages.error(request, pwyw_checkout_blocker)
-            return redirect('cart')
+        # Re-price every pay-what-you-want line from the amount its own cart
+        # row holds, here, at the last moment before the order is snapshotted
+        # and the session created.
+        #
+        # This is the security boundary for the whole feature. Nothing posted
+        # to this endpoint is consulted -- `request.POST` is read for the
+        # coupon and for nothing else -- so an amount injected at /checkout,
+        # or a Price minted for an amount that has since been edited, cannot
+        # decide what the buyer is charged. The database row does.
+        for cart_product in cart.products.select_related("product"):
+            cart_product.refresh_pwyw_price()
         user = request.user if request.user.is_authenticated else None
         order = Order.create_from_cart(cart, user=user)
         try:
@@ -920,6 +1092,22 @@ class CheckoutView(View, BaseCartView):
             Order.objects.filter(
                 pk=order.pk, status=Order.Status.PENDING).update(
                     status=Order.Status.CANCELLED)
+            if order.amount_total == 0:
+                # "If Stripe is being difficult with $0" -- the owner's clause,
+                # and a requirement rather than a joke. A zero-total session is
+                # the one shape of this feature with no payment behind it, so a
+                # buyer who hits a Stripe problem here has nothing to retry and
+                # no other way through. A 500 would leave a kid staring at a
+                # stack trace with the book unbought; send them back to the
+                # cart, where the owner's notice carries the mailto, and say to
+                # use it. Every other failure still raises, because those are
+                # payment problems the buyer can act on.
+                messages.error(
+                    request,
+                    "Sorry -- Stripe would not set up this free order. "
+                    "Please e-mail holden@pigscanfly.ca and we can send you a "
+                    "copy directly.")
+                return redirect('cart')
             raise
         order.stripe_session_id = session_id
         order.save(update_fields=['stripe_session_id', 'updated_at'])

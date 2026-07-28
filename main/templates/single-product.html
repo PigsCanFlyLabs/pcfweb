@@ -111,8 +111,8 @@
 		    {% endif %}
 		    {% if product.is_pwyw %}
 		    <p><strong>Pay what you want.</strong> That price is a
-		      suggestion, not a price &mdash; you set your own amount at
-		      checkout, and nothing at all is a valid amount.</p>
+		      suggestion, not a price &mdash; you set your own amount
+		      below, and nothing at all is a valid amount.</p>
 		    {% endif %}
 		    {# get_display_text returns escaped markup (format_html), so #}
 		    {# this needs no autoescape override. #}
@@ -129,6 +129,52 @@
 		    <form id="add-to-cart-form" method="POST"
 			  action="{% url 'add-to-cart' product_id=product.pk quantity=1 %}">
 			{% csrf_token %}
+			{% if product.is_pwyw %}
+			{% comment %}
+			   The amount is collected here, on our own page, rather than
+			   on Stripe's. It is a real field of this real form, so it
+			   works with JavaScript off exactly like the quantity below
+			   it -- and the value it carries stays hostile input until
+			   AddToCartView has put it through parse_pwyw_amount. The
+			   number attributes here are a convenience for the buyer,
+			   never the validation.
+			
+			   Pre-filled with the owner's suggested price, so the default
+			   is the amount they asked for, and labelled so it reads as a
+			   suggestion rather than as a price being quoted.
+			{% endcomment %}
+			<div class="pwyw-amount">
+			    <div class="left-content">
+				<h6><label for="chosen_amount">Your price (USD)</label></h6>
+				<small class="pwyw-hint">Suggested {{ product.pwyw_suggested_amount }} &mdash; pay more, pay
+				  less, or pay nothing at all. It is up to you.</small>
+			    </div>
+			    <div class="right-content">
+				<input type="number" step="0.01" min="0" name="chosen_amount"
+				       id="chosen_amount" value="{{ product.pwyw_suggested_amount }}"
+				       inputmode="decimal" onchange="calculateTotal()"
+				       title="Your price" class="input-text pwyw-input" size="8">
+			    </div>
+			</div>
+			{% comment %}
+			   What the buyer will actually be charged, kept in step with the
+			   field above by calculateTotal(). Rounding must not be a
+			   surprise at the till: typing 0.50 says $0.00 here, before
+			   anything is committed.
+			
+			   Rendered server-side so it is right on first paint, before any
+			   script has run. It is NOT right with JavaScript off once the
+			   buyer edits the field: pwyw_charged_amount is the rounded
+			   *suggestion*, and the server does not learn what they typed
+			   until the form is posted. With no script, this line stays at
+			   the suggestion and the cart is where the real figure appears,
+			   already rounded, before checkout. Do not describe this as a
+			   no-JavaScript guarantee -- it is not one.
+			{% endcomment %}
+			<p class="pwyw-charge">You will be charged:
+			    <strong id="pwyw-charge-amount">${{ product.pwyw_charged_amount }}</strong></p>
+			{% include 'components/pwyw-round-down-notice.html' %}
+			{% endif %}
 			{% if not product.noorder %}
 			<div class="quantity-content">
 			    <div class="left-content">
@@ -238,7 +284,31 @@
 	if (!totalEl || quantityInput.length === 0) {
 	    return null;
 	}
-	let total = (quantityInput.val() * parseFloat("{{ product.get_display_price }}")).toFixed(2);
+	// A pay-what-you-want page has an amount field, and what the buyer
+	// typed into it is the unit price -- so read that rather than the
+	// catalogue suggestion. Deliberately not through
+	// get_display_price(): it returns copy like "Pre-order: 30.00",
+	// which parseFloat already turns into NaN on preorder rows. This
+	// narrows that path rather than widening it, and an empty or
+	// half-typed amount falls back to 0 instead of showing NaN.
+	const amountEl = document.querySelector('input#chosen_amount');
+	let unit = parseFloat("{{ product.get_display_price }}");
+	if (amountEl) {
+	    const typed = parseFloat(amountEl.value);
+	    unit = isNaN(typed) ? 0 : typed;
+	    // The same round-down band the server applies, so the buyer is
+	    // never shown a number they will not be charged. The threshold
+	    // comes from PWYW_ROUND_DOWN_BELOW rather than being written
+	    // twice; models.parse_pwyw_amount is still what decides.
+	    if (unit * 100 < {{ pwyw_round_down_below }}) {
+		unit = 0;
+	    }
+	    const chargeEl = document.querySelector('#pwyw-charge-amount');
+	    if (chargeEl) {
+		chargeEl.innerHTML = `$${unit.toFixed(2)}`;
+	    }
+	}
+	let total = (quantityInput.val() * unit).toFixed(2);
 	totalEl.innerHTML = `Total: $${total}`;
 	return total;
     }

@@ -635,7 +635,10 @@ class CartNotSoldHereTest(CartTestBase):
         self.assertNotIn("Not sold here", html)
         self.assertIn("39.99", html)
 
-    def test_a_mixed_pwyw_cart_warns_that_checkout_is_blocked(self):
+    def test_a_mixed_pwyw_cart_is_no_longer_blocked(self):
+        # Was blocked because Stripe refuses a second line item beside a
+        # custom_unit_amount price. The e-book carries an ordinary fixed price
+        # now, so the cart checks out and the coupon box comes back with it.
         client = Client()
         cart = Cart.objects.create()
         session = client.session
@@ -649,13 +652,15 @@ class CartNotSoldHereTest(CartTestBase):
 
         html = client.get("/cart").content.decode()
 
-        self.assertIn("pwyw-checkout-blocker", html)
-        self.assertIn("only line in its checkout", html)
+        self.assertNotIn("pwyw-checkout-blocker", html)
+        self.assertNotIn("only line in its checkout", html)
+        self.assertIn('name="coupon"', html)
+        # Still both in the cart, and still named.
         self.assertIn("Distributed Computing 4 Kids", html)
-        self.assertIn("disabled", html)
-        self.assertNotIn('name="coupon"', html)
 
-    def test_a_single_pwyw_line_explains_the_stripe_rules_without_blocking_checkout(self):
+    def test_a_single_pwyw_line_still_explains_itself(self):
+        # The notice stays -- it is what tells a buyer the amount is theirs to
+        # set. Only the sentence about Stripe's rules went.
         client = Client()
         client.post("/add-to-cart/106/1")
 
@@ -663,36 +668,39 @@ class CartNotSoldHereTest(CartTestBase):
 
         self.assertIn("pwyw-notice", html)
         self.assertNotIn("pwyw-checkout-blocker", html)
-        self.assertNotIn('name="coupon"', html)
+        self.assertIn('name="coupon"', html)
 
-    def test_adding_a_pwyw_item_to_a_non_empty_cart_is_refused(self):
+    def test_a_pwyw_item_can_join_a_non_empty_cart(self):
         self.client.post("/add-to-cart/104/1")
 
         response = self.client.post("/add-to-cart/106/1", follow=True)
 
         self.assertRedirects(response, "/cart")
-        self.assertContains(response, "only line in its checkout")
-        self.assertContains(response, "Distributed Computing 4 Kids")
-        self.assertEqual(CartProduct.objects.filter(product_id=106).count(), 0)
+        self.assertNotContains(response, "only line in its checkout")
+        self.assertEqual(CartProduct.objects.filter(product_id=106).count(), 1)
+        self.assertEqual(CartProduct.objects.filter(product_id=104).count(), 1)
 
-    def test_adding_anything_to_a_cart_that_already_holds_pwyw_is_refused(self):
+    def test_anything_can_join_a_cart_that_already_holds_pwyw(self):
         self.client.post("/add-to-cart/106/1")
 
         response = self.client.post("/add-to-cart/104/1", follow=True)
 
         self.assertRedirects(response, "/cart")
-        self.assertContains(response, "only line in its checkout")
-        self.assertContains(response, "Distributed Computing 4 Kids")
-        self.assertEqual(CartProduct.objects.filter(product_id=104).count(), 0)
+        self.assertNotContains(response, "only line in its checkout")
+        self.assertEqual(CartProduct.objects.filter(product_id=104).count(), 1)
+        self.assertEqual(CartProduct.objects.filter(product_id=106).count(), 1)
 
-    def test_adding_the_same_pwyw_item_twice_is_refused(self):
+    def test_the_same_pwyw_item_can_be_added_twice(self):
+        # Was refused because Stripe requires quantity 1 on a
+        # custom_unit_amount line. Adding again now adds to the quantity, the
+        # same as any other product.
         self.client.post("/add-to-cart/106/1")
 
         response = self.client.post("/add-to-cart/106/1", follow=True)
 
         self.assertRedirects(response, "/cart")
-        self.assertContains(response, "checked out one at a time")
-        self.assertEqual(CartProduct.objects.get(product_id=106).quantity, 1)
+        self.assertNotContains(response, "checked out one at a time")
+        self.assertEqual(CartProduct.objects.get(product_id=106).quantity, 2)
 
     def test_a_noorder_line_does_not_trigger_the_shipping_notice(self):
         """It is not being shipped, so a delivery warning is noise."""

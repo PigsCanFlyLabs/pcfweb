@@ -54,7 +54,46 @@
                                     CartView.
                                 {% endcomment %}
                                 <td>
-                                    <h6>{% if product.product.noorder %}Not sold here{% else %}${{ product.product.get_display_price }}{% endif %}</h6>
+                                    {% if product.product.noorder %}
+                                    <h6>Not sold here</h6>
+                                    {% elif product.product.is_pwyw %}
+                                    {% comment %}
+                                        The chosen amount belongs to this cart
+                                        row, so this is where it can be
+                                        changed. Its own form and its own
+                                        view, which validates the amount
+                                        server-side exactly as the product
+                                        page does and looks the row up scoped
+                                        to the requester's own cart.
+                                    {% endcomment %}
+                                    <form method="POST" class="pwyw-row-amount"
+                                          action="{% url 'set-pwyw-amount' product.pk %}">
+                                        {% csrf_token %}
+                                        <label for="pwyw-amount-{{ product.pk }}">
+                                            Your price for {{ product.product.name }} (USD)
+                                        </label>
+                                        $<input type="number" step="0.01" min="0"
+                                                name="chosen_amount"
+                                                id="pwyw-amount-{{ product.pk }}"
+                                                value="{{ product.unit_display_price }}"
+                                                inputmode="decimal" size="6"
+                                                class="input-text pwyw-input">
+                                        <button type="submit" class="pwyw-update">Update</button>
+                                        <br><small class="pwyw-hint">Yours to set &mdash;
+                                            suggested ${{ product.product.pwyw_suggested_amount }}.</small>
+                                        {% comment %}
+                                            The value in the field above is
+                                            what the row actually holds, and
+                                            the row already holds the rounded
+                                            amount -- so an entry of 0.50 is
+                                            shown back as 0.00 here, before
+                                            checkout, rather than becoming a
+                                            surprise on the receipt.
+                                        {% endcomment %}
+                                    </form>
+                                    {% else %}
+                                    <h6>${{ product.product.get_display_price }}</h6>
+                                    {% endif %}
                                 </td>
                                 <td>
                                     <h6>{{ product.quantity }}</h6>
@@ -101,20 +140,12 @@
             <div class="col-lg-12">
                 <div class="alert alert-info pwyw-notice" role="alert">
                     <strong>Heads up:</strong> this cart holds a pay-what-you-want
-                    item, so the total below is a suggestion. You choose what you
-                    actually pay for it at checkout, and nothing at all is a
-                    valid amount.
+                    item. The amount beside it is yours to set &mdash; change it
+                    right here, pay above or below the suggestion, and nothing at
+                    all is a valid amount. The total below is what you will
+                    actually be charged.
                 </div>
-            </div>
-        </div>
-        {% endif %}
-
-        {% if pwyw_checkout_blocker %}
-        <div class="row">
-            <div class="col-lg-12">
-                <div class="alert alert-warning pwyw-checkout-blocker" role="alert">
-                    <strong>Checkout blocked:</strong> {{ pwyw_checkout_blocker }}
-                </div>
+                {% include 'components/pwyw-round-down-notice.html' %}
             </div>
         </div>
         {% endif %}
@@ -132,10 +163,15 @@
                     </ul>
 		    <form method="POST" action="{% url 'checkout' %}">
                       {% csrf_token %}
-                      {% if not has_pwyw %}
+                      {% comment %}
+                          The coupon box used to be hidden on a
+                          pay-what-you-want cart, because Stripe refuses
+                          discounts on a custom_unit_amount price. These are
+                          ordinary fixed prices now, so a discount is accepted
+                          like anywhere else and the box comes back.
+                      {% endcomment %}
 		      Coupon (optional): <input type="text" name="coupon" />
-                      {% endif %}
-                      <button type="submit" class="proceed-btn"{% if pwyw_checkout_blocker %} disabled aria-disabled="true"{% endif %}>Proceed to Checkout</button>
+                      <button type="submit" class="proceed-btn">Proceed to Checkout</button>
 		    </form>
                 </div>
             </div>

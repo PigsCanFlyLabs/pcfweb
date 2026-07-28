@@ -1,5 +1,4 @@
 import logging
-from types import SimpleNamespace
 
 import stripe
 from django.conf import settings
@@ -60,27 +59,20 @@ class Payments:
 
     @classmethod
     def create_price(cls, product_id: str, price: int, currency: str = "usd",
-                     interval: Optional[Literal["day", "week", "month", "year"]] = None,
-                     pay_what_you_want: bool = False) -> str:
+                     interval: Optional[Literal["day", "week", "month", "year"]] = None) -> str:
+        """Mint an ordinary fixed Price for `price` cents.
+
+        Pay-what-you-want no longer takes a different path. The amount the
+        buyer named is collected on our own product page, validated by
+        main.models.parse_pwyw_amount, and arrives here as a number like any
+        other -- so a pay-what-you-want line is a fixed price that happens to
+        have been chosen by the customer.
+
+        What that buys is everything Stripe's custom_unit_amount forbade: a
+        second line item in the same session, a quantity above one, an
+        adjustable_quantity, a discount, and subscription mode.
+        """
         product_price = None
-        if pay_what_you_want:
-            if interval is not None:
-                # custom_unit_amount is documented as payment-mode only.
-                # Stripe would reject this anyway; refusing here says why.
-                raise ValueError(
-                    "A pay-what-you-want price uses Stripe's "
-                    "custom_unit_amount, which only works for one-off "
-                    "payments, so it cannot be recurring. Set the product's "
-                    "mode to payment or clear is_pwyw.")
-            # No `minimum`: the owner's decision is an explicit floor of zero,
-            # so any amount down to nothing is accepted. `preset` is what the
-            # buyer sees pre-filled, i.e. Product.price as a suggestion. Note
-            # unit_amount must be absent -- the two are mutually exclusive.
-            product_price = stripe.Price.create(
-                currency=currency, product=product_id,
-                custom_unit_amount={"enabled": True, "preset": price},
-            )
-            return product_price['id']
         if interval is None:
             product_price = stripe.Price.create(
                 unit_amount=price, currency=currency, product=product_id
@@ -121,87 +113,14 @@ class Payments:
         return client.checkout.sessions.line_items.list(
             session_id, {"limit": limit})
 
-    @classmethod
-    def _pwyw_cart_message(cls, products) -> Optional[str]:
-        """Why these line items cannot share a checkout with a PWYW line."""
-        from main.models import Product
-        pwyw_lines = [
-            cart_product for cart_product in products
-            if cart_product.product.is_pwyw
-        ]
-        if not pwyw_lines:
-            return None
-        product_modes = [cart_product.product.mode for cart_product in products]
-        mode = "subscription"
-        if all(m == Product.Modes.PAYMENT for m in product_modes):
-            mode = "payment"
-        if mode == "subscription":
-            return (
-                "This cart mixes a pay-what-you-want product with a "
-                "subscription, so the whole session would have to be created "
-                "in subscription mode -- which Stripe's custom_unit_amount "
-                "does not support. They have to be bought separately."
-            )
-        if any(cart_product.quantity != 1 for cart_product in pwyw_lines):
-            return (
-                "Stripe requires pay-what-you-want items to be checked out "
-                "one at a time. Remove that item from the cart and add it "
-                "again once."
-            )
-        if len(products) != 1:
-            other_names = ", ".join(
-                cart_product.product.name for cart_product in products
-                if not cart_product.product.is_pwyw
-            )
-            if other_names:
-                return (
-                    "Stripe requires a pay-what-you-want item to be the only "
-                    "line in its checkout. Remove these other items and buy "
-                    f"them separately: {other_names}."
-                )
-            return (
-                "Stripe requires a pay-what-you-want item to be the only "
-                "line in its checkout. Remove the other pay-what-you-want "
-                "items and buy them separately."
-            )
-        return None
-
-    @classmethod
-    def pwyw_checkout_blocker(cls, cart, coupon=None) -> Optional[str]:
-        """Why this cart cannot be sent to Stripe with a PWYW item, if any."""
-        products = list(cart.products.select_related('product'))
-        return cls._pwyw_cart_message(products)
-
-    @classmethod
-    def pwyw_add_to_cart_blocker(cls, cart, product, quantity) -> Optional[str]:
-        """Why adding *product* x *quantity* would make the cart invalid."""
-        products = list(cart.products.select_related('product'))
-        prospective = []
-        matched = False
-        for cart_product in products:
-            next_quantity = cart_product.quantity
-            if cart_product.product_id == product.pk:
-                next_quantity += quantity
-                matched = True
-            prospective.append(
-                SimpleNamespace(product=cart_product.product, quantity=next_quantity))
-        if not matched:
-            prospective.append(SimpleNamespace(product=product, quantity=quantity))
-        return cls._pwyw_cart_message(prospective)
-
-    @classmethod
-    def pwyw_coupon_warning(cls, cart, coupon=None) -> Optional[str]:
-        """Coupon warning to show while still allowing checkout."""
-        if coupon is None:
-            return None
-        products = list(cart.products.select_related('product'))
-        if any(cart_product.product.is_pwyw for cart_product in products):
-            return (
-                "Coupon and promotion-code discounts do not apply to "
-                "pay-what-you-want items, so the code was removed and "
-                "checkout will continue without it."
-            )
-        return None
+    # A pay-what-you-want line used to be refused in four shapes -- mixed with
+    # any other line, at a quantity above one, alongside a discount, and in
+    # subscription mode -- because Stripe enforces all four on a Price with a
+    # custom_unit_amount. It no longer has one. Verified against the live test
+    # API: a fixed Price at the buyer's chosen amount is accepted in a session
+    # with a second line item, with quantity 3, with adjustable_quantity, with
+    # a coupon, and as a recurring price in subscription mode. The refusals
+    # went with the constraint that caused them.
 
     @classmethod
     def checkout(cls, request, cart, coupon=None, order=None):
@@ -213,24 +132,14 @@ class Payments:
         webhook has no session cookie and so no way to find the cart.
         """
         from main.models import Product
-        if cls.pwyw_coupon_warning(cart, coupon=coupon) is not None:
-            coupon = None
-        pwyw_blocker = cls.pwyw_checkout_blocker(cart, coupon=coupon)
-        if pwyw_blocker is not None:
-            raise ValueError(pwyw_blocker)
         products = list(cart.products.select_related('product'))
         items = []
         for cart_product in products:
             item = {
                 'price': cart_product.price_id,
                 'quantity': cart_product.quantity,
+                'adjustable_quantity': {"enabled": True},
             }
-            # Stripe rejects adjustable_quantity on a line whose Price carries
-            # a custom_unit_amount -- the two are mutually exclusive at session
-            # creation. Setting it unconditionally, as this used to, means a
-            # pay-what-you-want product cannot be checked out at all.
-            if not cart_product.product.is_pwyw:
-                item["adjustable_quantity"] = {"enabled": True}
             items.append(item)
         extras = {}
         if coupon is not None:

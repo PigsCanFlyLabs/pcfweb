@@ -1868,6 +1868,146 @@ Single Product Page
     z-index: 11;
 }
 
+/* Pay-what-you-want amount entry.
+ *
+ * The markup mirrors .quantity-content deliberately -- same left-content /
+ * right-content pair, sitting directly above it in the buy form -- so the two
+ * rows have to line up. These repeat that block's rules rather than extending
+ * the selector, because the two are separate rows with separate spacing and
+ * folding them together would tie one's borders to the other's.
+ */
+.pwyw-amount {
+    margin-top: 30px;
+    padding-top: 30px;
+    border-top: 1px solid #eee;
+    width: 100%;
+    padding-bottom: 15px;
+    /* Contains the floated left-content. .quantity-content gets away without
+     * this because its own border-bottom follows in the flow; this row's
+     * charge line would otherwise ride up beside the label. */
+    overflow: hidden;
+}
+
+.pwyw-amount .left-content {
+    float: left;
+    margin-right: 30px;
+    max-width: 60%;
+}
+
+.pwyw-amount .right-content {
+    text-align: right;
+}
+
+.pwyw-amount .left-content h6 {
+    padding-top: 7px;
+    font-size: 20px;
+    font-weight: 700;
+    color: #aaa;
+    position: relative;
+    z-index: 11;
+}
+
+.pwyw-amount .left-content h6 label {
+    cursor: pointer;
+    margin-bottom: 0;
+}
+
+.pwyw-input {
+    width: 110px;
+    padding: 8px 10px;
+    border: 1px solid #eee;
+    text-align: right;
+    font-size: 16px;
+    color: #2a2a2a;
+}
+
+.pwyw-hint {
+    display: block;
+    margin-top: 6px;
+    font-size: 13px;
+    color: #aaa;
+    line-height: 1.5;
+}
+
+/* What the buyer will actually be charged. Sits between the field and the
+ * owner's note, and is the number the round-down rule produces. */
+.pwyw-charge {
+    margin-top: 10px;
+    margin-bottom: 0;
+    font-size: 16px;
+    color: #2a2a2a;
+}
+
+.pwyw-charge strong {
+    font-weight: 700;
+}
+
+.pwyw-round-down-notice {
+    margin-top: 12px;
+    margin-bottom: 0;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #eee;
+    font-size: 13px;
+    color: #aaa;
+    line-height: 1.6;
+}
+
+.pwyw-round-down-notice a {
+    color: #2a2a2a;
+    text-decoration: underline;
+}
+
+/* The same field again, per row, in the cart table. Tighter: it shares a
+ * narrow cell with the price column rather than a full-width form row. */
+.pwyw-row-amount label {
+    display: block;
+    font-size: 12px;
+    color: #aaa;
+    margin-bottom: 4px;
+}
+
+.pwyw-row-amount .pwyw-input {
+    width: 80px;
+    padding: 4px 6px;
+    font-size: 14px;
+}
+
+.pwyw-row-amount .pwyw-update {
+    margin-left: 6px;
+    padding: 4px 10px;
+    border: 1px solid #eee;
+    background-color: #fff;
+    font-size: 13px;
+    color: #2a2a2a;
+}
+
+.pwyw-row-amount .pwyw-update:hover {
+    border-color: #2a2a2a;
+}
+
+/* The listing-card and receipt labels, which are plain text beside a price. */
+.pwyw-label,
+.pwyw-note {
+    color: #aaa;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+@media (max-width: 767px) {
+    /* Stacking is right on a narrow screen -- the same thing .quantity-content
+     * does -- so drop the float rather than squeezing the two columns. */
+    .pwyw-amount .left-content {
+        float: none;
+        margin-right: 0;
+        max-width: 100%;
+    }
+
+    .pwyw-amount .right-content {
+        text-align: left;
+        margin-top: 10px;
+    }
+}
+
 .total h4 {
     float: left;
     font-size: 20px;
