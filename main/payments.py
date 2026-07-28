@@ -1,4 +1,5 @@
 import logging
+from types import SimpleNamespace
 
 import stripe
 from django.conf import settings
@@ -121,10 +122,9 @@ class Payments:
             session_id, {"limit": limit})
 
     @classmethod
-    def pwyw_checkout_blocker(cls, cart, coupon=None) -> Optional[str]:
-        """Why this cart cannot be sent to Stripe with a PWYW item, if any."""
+    def _pwyw_cart_message(cls, products) -> Optional[str]:
+        """Why these line items cannot share a checkout with a PWYW line."""
         from main.models import Product
-        products = list(cart.products.select_related('product'))
         pwyw_lines = [
             cart_product for cart_product in products
             if cart_product.product.is_pwyw
@@ -153,15 +153,53 @@ class Payments:
                 cart_product.product.name for cart_product in products
                 if not cart_product.product.is_pwyw
             )
+            if other_names:
+                return (
+                    "Stripe requires a pay-what-you-want item to be the only "
+                    "line in its checkout. Remove these other items and buy "
+                    f"them separately: {other_names}."
+                )
             return (
                 "Stripe requires a pay-what-you-want item to be the only "
-                "line in its checkout. Remove these other items and buy "
-                f"them separately: {other_names}."
+                "line in its checkout. Remove the other pay-what-you-want "
+                "items and buy them separately."
             )
-        if coupon is not None:
+        return None
+
+    @classmethod
+    def pwyw_checkout_blocker(cls, cart, coupon=None) -> Optional[str]:
+        """Why this cart cannot be sent to Stripe with a PWYW item, if any."""
+        products = list(cart.products.select_related('product'))
+        return cls._pwyw_cart_message(products)
+
+    @classmethod
+    def pwyw_add_to_cart_blocker(cls, cart, product, quantity) -> Optional[str]:
+        """Why adding *product* x *quantity* would make the cart invalid."""
+        products = list(cart.products.select_related('product'))
+        prospective = []
+        matched = False
+        for cart_product in products:
+            next_quantity = cart_product.quantity
+            if cart_product.product_id == product.pk:
+                next_quantity += quantity
+                matched = True
+            prospective.append(
+                SimpleNamespace(product=cart_product.product, quantity=next_quantity))
+        if not matched:
+            prospective.append(SimpleNamespace(product=product, quantity=quantity))
+        return cls._pwyw_cart_message(prospective)
+
+    @classmethod
+    def pwyw_coupon_warning(cls, cart, coupon=None) -> Optional[str]:
+        """Coupon warning to show while still allowing checkout."""
+        if coupon is None:
+            return None
+        products = list(cart.products.select_related('product'))
+        if any(cart_product.product.is_pwyw for cart_product in products):
             return (
-                "Stripe does not allow coupon or promotion-code discounts on "
-                "pay-what-you-want items. Remove the code and try again."
+                "Coupon and promotion-code discounts do not apply to "
+                "pay-what-you-want items, so the code was removed and "
+                "checkout will continue without it."
             )
         return None
 
@@ -175,6 +213,8 @@ class Payments:
         webhook has no session cookie and so no way to find the cart.
         """
         from main.models import Product
+        if cls.pwyw_coupon_warning(cart, coupon=coupon) is not None:
+            coupon = None
         pwyw_blocker = cls.pwyw_checkout_blocker(cart, coupon=coupon)
         if pwyw_blocker is not None:
             raise ValueError(pwyw_blocker)

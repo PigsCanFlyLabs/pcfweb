@@ -23,7 +23,7 @@ from django.contrib.auth.models import User
 from django.core import mail
 from django.test import TestCase, override_settings
 
-from main.models import Order, Product
+from main.models import Order, OrderItem, Product
 
 
 SHIPPING_NOTICE_TEXT = "shipping times for physical goods are currently long"
@@ -122,6 +122,37 @@ class OrderTestBase(TestCase):
         self.create_call = create
         self.checkout_response = response
         return Order.objects.get(stripe_session_id=session_id)
+
+    def manual_order(self, *items, session_id="cs_manual"):
+        """Build a pending order directly, with the checkout snapshot shape.
+
+        This keeps fulfilment tests honest when the thing under test is what
+        happens *after* an order exists, not whether today's checkout flow can
+        create one. That matters here because Product.is_pwyw is a live admin
+        toggle and fulfilment reads Product flags live too: an order that was
+        ordinary when it was placed can become a mixed PWYW/fixed order later.
+        """
+        order = Order.objects.create(
+            status=Order.Status.PENDING,
+            currency="usd",
+            amount_total=sum(product.price * quantity
+                             for product, quantity in items),
+            stripe_session_id=session_id,
+        )
+        OrderItem.objects.bulk_create([
+            OrderItem(
+                order=order,
+                product=product,
+                product_name=product.name,
+                unit_amount=product.price,
+                currency="usd",
+                quantity=quantity,
+                snapshot_quantity=quantity,
+                price_id=f"price_manual_{index}",
+            )
+            for index, (product, quantity) in enumerate(items, start=1)
+        ])
+        return order
 
     def session_payload(self, order, **overrides):
         """A checkout.session object shaped like Stripe's."""

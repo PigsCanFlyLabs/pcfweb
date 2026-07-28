@@ -548,8 +548,15 @@ class CartNotSoldHereTest(CartTestBase):
 
     def test_a_mixed_pwyw_cart_warns_that_checkout_is_blocked(self):
         client = Client()
-        client.post("/add-to-cart/104/1")
-        client.post("/add-to-cart/106/1")
+        cart = Cart.objects.create()
+        session = client.session
+        session["cart_id"] = cart.cart_id
+        session.save()
+        fixed = Product.objects.get(pk=104)
+        pwyw = Product.objects.get(pk=106)
+        first = CartProduct.objects.create(cart=cart, product=fixed, quantity=1)
+        second = CartProduct.objects.create(cart=cart, product=pwyw, quantity=1)
+        cart.products.add(first, second)
 
         html = client.get("/cart").content.decode()
 
@@ -568,6 +575,35 @@ class CartNotSoldHereTest(CartTestBase):
         self.assertIn("pwyw-notice", html)
         self.assertNotIn("pwyw-checkout-blocker", html)
         self.assertNotIn('name="coupon"', html)
+
+    def test_adding_a_pwyw_item_to_a_non_empty_cart_is_refused(self):
+        self.client.post("/add-to-cart/104/1")
+
+        response = self.client.post("/add-to-cart/106/1", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        self.assertContains(response, "only line in its checkout")
+        self.assertContains(response, "Distributed Computing 4 Kids")
+        self.assertEqual(CartProduct.objects.filter(product_id=106).count(), 0)
+
+    def test_adding_anything_to_a_cart_that_already_holds_pwyw_is_refused(self):
+        self.client.post("/add-to-cart/106/1")
+
+        response = self.client.post("/add-to-cart/104/1", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        self.assertContains(response, "only line in its checkout")
+        self.assertContains(response, "Distributed Computing 4 Kids")
+        self.assertEqual(CartProduct.objects.filter(product_id=104).count(), 0)
+
+    def test_adding_the_same_pwyw_item_twice_is_refused(self):
+        self.client.post("/add-to-cart/106/1")
+
+        response = self.client.post("/add-to-cart/106/1", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        self.assertContains(response, "checked out one at a time")
+        self.assertEqual(CartProduct.objects.get(product_id=106).quantity, 1)
 
     def test_a_noorder_line_does_not_trigger_the_shipping_notice(self):
         """It is not being shipped, so a delivery warning is noise."""

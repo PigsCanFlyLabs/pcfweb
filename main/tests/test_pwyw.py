@@ -102,6 +102,11 @@ class PwywCheckoutTest(TestCase):
         return Product.objects.create(
             name="Print", external_product_id="prod_print", price=3000)
 
+    def _second_pwyw(self):
+        return Product.objects.create(
+            name="PWYW poster", external_product_id="prod_pwyw_poster",
+            price=2500, is_pwyw=True)
+
     def _checkout(self, cart, coupon=None):
         with mock.patch("main.payments.stripe.checkout.Session.create") as create:
             create.return_value = mock.Mock(
@@ -155,12 +160,18 @@ class PwywCheckoutTest(TestCase):
         self.assertIn("checked out one at a time", message)
         create.assert_not_called()
 
-    def test_a_pwyw_line_cannot_be_checked_out_with_a_coupon(self):
+    def test_multiple_pwyw_lines_use_the_list_free_refusal_sentence(self):
         message, create = self._checkout_error(
-            self._cart((self._pwyw(), 1)), coupon="coupon_sale")
+            self._cart((self._pwyw(), 1), (self._second_pwyw(), 1)))
 
-        self.assertIn("does not allow coupon", message)
+        self.assertIn("other pay-what-you-want items", message)
+        self.assertNotIn(": .", message)
         create.assert_not_called()
+
+    def test_a_pwyw_coupon_is_dropped_before_checkout(self):
+        params = self._checkout(self._cart((self._pwyw(), 1)), coupon="coupon_sale")
+
+        self.assertNotIn("discounts", params)
 
     def test_a_pwyw_product_is_never_routed_into_subscription_mode(self):
         # The session mode is a property of the whole cart, so one

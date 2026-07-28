@@ -162,8 +162,13 @@ class DigitalCartPageTest(CartTestBase):
         self.assertNotContains(response, SHIPPING_NOTICE_TEXT)
 
     def test_adding_a_printed_copy_brings_the_shipping_notice_back(self):
-        self.client.post(f"/add-to-cart/{EBOOK_PK}/1")
-        self.client.post("/add-to-cart/104/1")
+        self.client.get("/cart")
+        cart = Cart.objects.get(cart_id=self.client.session["cart_id"])
+        ebook = CartProduct.objects.create(
+            cart=cart, product=Product.objects.get(pk=EBOOK_PK), quantity=1)
+        printed = CartProduct.objects.create(
+            cart=cart, product=Product.objects.get(pk=104), quantity=1)
+        cart.products.add(ebook, printed)
         response = self.client.get("/cart")
 
         self.assertContains(response, SHIPPING_NOTICE_TEXT)
@@ -459,28 +464,6 @@ class DigitalDeliveryTest(BookAssetRootMixin, OrderTestBase):
         return self.place_order(
             product_pk=EBOOK_PK, quantity=1, session_id=session_id)
 
-    def manual_order(self, *items, session_id="cs_manual"):
-        order = Order.objects.create(
-            status=Order.Status.PENDING,
-            currency="usd",
-            amount_total=sum(product.price * quantity for product, quantity in items),
-            stripe_session_id=session_id,
-        )
-        OrderItem.objects.bulk_create([
-            OrderItem(
-                order=order,
-                product=product,
-                product_name=product.name,
-                unit_amount=product.price,
-                currency="usd",
-                quantity=quantity,
-                snapshot_quantity=quantity,
-                price_id=f"price_manual_{index}",
-            )
-            for index, (product, quantity) in enumerate(items, start=1)
-        ])
-        return order
-
     def test_paying_for_the_ebook_emails_a_working_download_link(self):
         order = self.buy_the_ebook()
 
@@ -682,28 +665,6 @@ class WithheldDigitalDeliveryTest(BookAssetRootMixin, OrderTestBase):
     def withhold_the_ebook(self):
         # The mis-set-dropdown scenario: DIGITAL, but no distribution rights.
         Product.objects.filter(pk=EBOOK_PK).update(sells_ebook=False)
-
-    def manual_order(self, *items, session_id="cs_manual"):
-        order = Order.objects.create(
-            status=Order.Status.PENDING,
-            currency="usd",
-            amount_total=sum(product.price * quantity for product, quantity in items),
-            stripe_session_id=session_id,
-        )
-        OrderItem.objects.bulk_create([
-            OrderItem(
-                order=order,
-                product=product,
-                product_name=product.name,
-                unit_amount=product.price,
-                currency="usd",
-                quantity=quantity,
-                snapshot_quantity=quantity,
-                price_id=f"price_manual_{index}",
-            )
-            for index, (product, quantity) in enumerate(items, start=1)
-        ])
-        return order
 
     def test_a_withheld_book_sends_nothing_and_is_recorded(self):
         self.withhold_the_ebook()

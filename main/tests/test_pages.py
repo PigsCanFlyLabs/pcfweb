@@ -746,6 +746,7 @@ class PageSmokeTest(TestCase):
         # cart -- and Payments.checkout returns (url, session_id).
         model_payments.create_product.return_value = "prod_test"
         model_payments.create_price.return_value = "price_test"
+        payments.pwyw_add_to_cart_blocker.return_value = None
         payments.pwyw_checkout_blocker.return_value = None
         payments.checkout.return_value = (
             "https://checkout.example/session", "cs_test_smoke")

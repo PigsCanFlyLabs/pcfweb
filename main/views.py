@@ -720,6 +720,11 @@ class AddToCartView(View, BaseCartView):
         if not product.is_purchasable():
             return HttpResponseBadRequest("Product is not purchasable.")
         cart = self.get_cart(request)
+        pwyw_add_blocker = Payments.pwyw_add_to_cart_blocker(
+            cart, product, quantity)
+        if pwyw_add_blocker is not None:
+            messages.error(request, pwyw_add_blocker)
+            return redirect('cart')
 
         cart_product, created = CartProduct.objects.get_or_create(
             cart=cart, product=product, defaults={'quantity': quantity})
@@ -784,6 +789,10 @@ class CheckoutView(View, BaseCartView):
                 "Sorry, these are no longer available and need to be removed "
                 "before checking out: " + ", ".join(unavailable) + ".")
             return redirect('cart')
+        coupon_warning = Payments.pwyw_coupon_warning(cart, coupon=coupon)
+        if coupon_warning is not None:
+            messages.warning(request, coupon_warning)
+            coupon = None
         pwyw_checkout_blocker = Payments.pwyw_checkout_blocker(
             cart, coupon=coupon)
         if pwyw_checkout_blocker is not None:
