@@ -10,7 +10,7 @@ from django.template.loader import render_to_string
 from django.test import RequestFactory
 
 from main.models import Cart, CartProduct, Order, OrderItem, Product
-from main.tests.base import OrderTestBase
+from main.tests.base import assert_never_cache_response, OrderTestBase
 
 
 class CheckoutCreatesOrderTest(OrderTestBase):
@@ -290,6 +290,22 @@ class CheckoutSuccessPageTest(OrderTestBase):
         self.assertContains(response, f"Order #{order.pk}")
         self.assertContains(response, "Learning Spark")
         self.assertContains(response, "Paid")
+
+    def test_the_success_page_is_marked_uncacheable(self):
+        order = self.place_order()
+        self.deliver(self.event_body(order))
+
+        response = self.client.get(
+            f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        assert_never_cache_response(self, response)
+
+    def test_the_cancel_page_is_marked_uncacheable(self):
+        response = self.client.get("/checkout/cancel")
+
+        self.assertEqual(response.status_code, 200)
+        assert_never_cache_response(self, response)
 
     def test_an_unknown_session_id_just_renders_the_plain_page(self):
         response = self.client.get("/checkout/success?session_id=cs_nope")

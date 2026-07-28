@@ -22,6 +22,7 @@ from main.digital import (
 from main.models import Cart, CartProduct, Order, OrderItem, Product
 from main.payments import Payments
 from main.tests.base import (
+    assert_never_cache_response,
     EBOOK_PK,
     EBOOK_STEM,
     SHIPPING_NOTICE_TEXT,
@@ -374,6 +375,13 @@ class DigitalDownloadViewTest(BookAssetRootMixin, TestCase):
                       response["Content-Disposition"])
         self.assertEqual(
             b"".join(response.streaming_content), self.archive.read_bytes())
+
+    def test_a_valid_link_is_marked_uncacheable(self):
+        response = self._get(self._valid_token())
+
+        self.assertEqual(response.status_code, 200)
+        assert_never_cache_response(self, response)
+        response.close()
 
     def test_a_tampered_token_gets_nothing(self):
         token = self._valid_token()
