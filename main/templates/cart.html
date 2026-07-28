@@ -81,6 +81,15 @@
                                         <button type="submit" class="pwyw-update">Update</button>
                                         <br><small class="pwyw-hint">Yours to set &mdash;
                                             suggested ${{ product.product.pwyw_suggested_amount }}.</small>
+                                        {% comment %}
+                                            The value in the field above is
+                                            what the row actually holds, and
+                                            the row already holds the rounded
+                                            amount -- so an entry of 0.50 is
+                                            shown back as 0.00 here, before
+                                            checkout, rather than becoming a
+                                            surprise on the receipt.
+                                        {% endcomment %}
                                     </form>
                                     {% else %}
                                     <h6>${{ product.product.get_display_price }}</h6>
@@ -136,6 +145,7 @@
                     all is a valid amount. The total below is what you will
                     actually be charged.
                 </div>
+                {% include 'components/pwyw-round-down-notice.html' %}
             </div>
         </div>
         {% endif %}

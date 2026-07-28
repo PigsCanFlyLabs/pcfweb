@@ -38,9 +38,9 @@ from main.digital import (
 from main.forms import (
     MailingListImportForm, MailingListSendForm, MailingListSignupForm)
 from main.models import (
-    Cart, CartProduct, EmailIdentity, MailingListMessage, Order, Product,
-    PwywAmountError, SuppressedAddress, normalize_email_identity,
-    parse_pwyw_amount, send_batch_size)
+    PWYW_ROUND_DOWN_BELOW, Cart, CartProduct, EmailIdentity,
+    MailingListMessage, Order, Product, PwywAmountError, SuppressedAddress,
+    normalize_email_identity, parse_pwyw_amount, send_batch_size)
 from main.payments import Payments
 from main.utils import (
     generate_username, get_country_code, get_storable_client_ip)
@@ -595,6 +595,10 @@ class ProductView(View):
             'title': product.name,
             'product': product,
             'alt_links': product.get_alt_links(country=get_country_code(request)),
+            # The round-down threshold reaches the page's JavaScript from the
+            # one constant that defines it, rather than being written out a
+            # second time where it could drift from the server's rule.
+            'pwyw_round_down_below': PWYW_ROUND_DOWN_BELOW,
         })
 
 class BaseCartView():
@@ -965,6 +969,22 @@ class CheckoutView(View, BaseCartView):
             Order.objects.filter(
                 pk=order.pk, status=Order.Status.PENDING).update(
                     status=Order.Status.CANCELLED)
+            if order.amount_total == 0:
+                # "If Stripe is being difficult with $0" -- the owner's clause,
+                # and a requirement rather than a joke. A zero-total session is
+                # the one shape of this feature with no payment behind it, so a
+                # buyer who hits a Stripe problem here has nothing to retry and
+                # no other way through. A 500 would leave a kid staring at a
+                # stack trace with the book unbought; send them back to the
+                # cart, where the owner's notice carries the mailto, and say to
+                # use it. Every other failure still raises, because those are
+                # payment problems the buyer can act on.
+                messages.error(
+                    request,
+                    "Sorry -- Stripe would not set up this free order. "
+                    "Please e-mail holden@pigscanfly.ca and we can send you a "
+                    "copy directly.")
+                return redirect('cart')
             raise
         order.stripe_session_id = session_id
         order.save(update_fields=['stripe_session_id', 'updated_at'])

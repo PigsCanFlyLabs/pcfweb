@@ -16,11 +16,12 @@ those bind, and the tests that asserted the refusals assert their absence.
 
 from unittest import mock
 
+from django.core import mail
 from django.test import Client, RequestFactory, TestCase
 
 from main.models import (
-    MAX_PWYW_AMOUNT, Cart, CartProduct, Order, Product, PwywAmountError,
-    parse_pwyw_amount)
+    MAX_PWYW_AMOUNT, PWYW_ROUND_DOWN_BELOW, Cart, CartProduct, Order, Product,
+    PwywAmountError, parse_pwyw_amount, round_pwyw_amount)
 from main.payments import Payments
 from main.tests.base import (
     EBOOK_PK, BookAssetRootMixin, CartTestBase, OrderTestBase)
@@ -44,6 +45,52 @@ class PwywAmountParsingTest(TestCase):
         # case to be tolerated, it is the offer.
         self.assertEqual(parse_pwyw_amount("0"), 0)
         self.assertEqual(parse_pwyw_amount("0.00"), 0)
+
+    def test_the_round_down_threshold_is_one_dollar(self):
+        # Pinned so a change to the band has to be deliberate. The value is
+        # load-bearing: Stripe refuses 1..49c outright, so the band must reach
+        # at least 50c for the forbidden range to be unreachable at all.
+        self.assertEqual(PWYW_ROUND_DOWN_BELOW, 100)
+        self.assertGreaterEqual(PWYW_ROUND_DOWN_BELOW, 50)
+
+    def test_a_dollar_is_charged_as_entered(self):
+        # The inclusive edge. One cent lower is a free download, so an
+        # off-by-one here silently gives away a dollar sale.
+        self.assertEqual(parse_pwyw_amount("1.00"), 100)
+
+    def test_ninety_nine_cents_rounds_down_to_nothing(self):
+        self.assertEqual(parse_pwyw_amount("0.99"), 0)
+
+    def test_one_cent_rounds_down_to_nothing(self):
+        self.assertEqual(parse_pwyw_amount("0.01"), 0)
+
+    def test_the_whole_forbidden_band_is_unreachable(self):
+        # Stripe rejects any charge under 50c (amount_too_small). Nothing in
+        # 1..49c may survive parsing, or a buyer reaches a session Stripe will
+        # refuse to create.
+        for cents in range(1, 50):
+            with self.subTest(cents=cents):
+                self.assertEqual(parse_pwyw_amount(f"0.{cents:02d}"), 0)
+
+    def test_nothing_between_a_cent_and_a_dollar_survives(self):
+        for cents in range(1, PWYW_ROUND_DOWN_BELOW):
+            with self.subTest(cents=cents):
+                self.assertEqual(parse_pwyw_amount(f"0.{cents:02d}"), 0)
+
+    def test_amounts_at_or_above_the_band_are_untouched(self):
+        for cents in (100, 101, 150, 1299, 100000):
+            with self.subTest(cents=cents):
+                self.assertEqual(round_pwyw_amount(cents), cents)
+
+    def test_rounding_does_not_rescue_a_refused_amount(self):
+        # The band is a rounding rule, not a coercion. Everything below is
+        # inside or adjacent to the 1..99c range, and every one must still be
+        # an error rather than quietly becoming a free download.
+        for raw in ("-0.50", "0.501", "0.005", "half", "", None, "NaN",
+                    "-Infinity", "0.5x"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(PwywAmountError):
+                    parse_pwyw_amount(raw)
 
     def test_a_leading_dollar_sign_is_tolerated(self):
         self.assertEqual(parse_pwyw_amount("$5.00"), 500)
@@ -115,6 +162,9 @@ class PwywPriceTest(TestCase):
 
     @mock.patch("main.payments.stripe.Price.create")
     def test_a_price_is_fixed_at_the_amount_asked_for(self, create):
+        # CONTROL -- passes on 3090eab too. This is the old
+        # test_a_fixed_price_is_unchanged, kept because a fixed price
+        # staying fixed is still worth pinning; it proves nothing new.
         create.return_value = {"id": "price_fixed"}
 
         Payments.create_price("prod_x", 1500)
@@ -619,7 +669,7 @@ def squashed(response):
 # The card label and the receipt note, quoted once so a test cannot drift
 # away from the template and still pass.
 CARD_LABEL = "Pay what you want &mdash; suggested amount, or nothing at all"
-RECEIPT_NOTE = "Pay what you want: this is the amount you chose."
+RECEIPT_NOTE = "Pay what you want: this is the amount you paid."
 # What the receipt used to say, back when unit_amount was the suggestion. It
 # is a lie now, so it must not survive anywhere.
 STALE_RECEIPT_NOTE = "shown at the suggested amount"
@@ -685,7 +735,8 @@ class PwywAmountFieldIsOnThePageTest(CartTestBase):
         self.assertIn('value="12.99"', body)
 
     def test_the_product_page_still_says_the_price_is_a_suggestion(self):
-        # The copy from #57 must not regress, only stop pointing at Stripe.
+        # CONTROL -- passes on 3090eab too, and that is the point: the
+        # copy from #57 must not regress, only stop pointing at Stripe.
         response = self.client.get(f"/product/{EBOOK_PK}")
 
         body = squashed(response)
@@ -701,6 +752,8 @@ class PwywAmountFieldIsOnThePageTest(CartTestBase):
         self.assertNotIn("you set your own amount at checkout", body)
 
     def test_an_ordinary_product_page_has_no_amount_field(self):
+        # CONTROL -- passes on 3090eab too, where no product has the
+        # field at all. Here to scope the field, not to prove it exists.
         response = self.client.get(f"/product/{PRINT_PK}")
 
         self.assertNotIn('name="chosen_amount"', squashed(response))
@@ -717,11 +770,163 @@ class PwywAmountFieldIsOnThePageTest(CartTestBase):
         self.assertIn('value="4.00"', body)
 
     def test_the_cart_offers_no_amount_field_on_an_ordinary_row(self):
+        # CONTROL -- passes on 3090eab too, for the same reason.
         self.client.post(f"/add-to-cart/{PRINT_PK}/1")
 
         response = self.client.get("/cart")
 
         self.assertNotIn('name="chosen_amount"', squashed(response))
+
+
+# The owner's own wording, byte for byte. Quoted here so that any reword of
+# main/templates/components/pwyw-round-down-notice.html fails the suite rather
+# than shipping. Do not "fix" the punctuation, the ":D", or the hyphen in
+# "e-mail" in either place.
+OWNER_ROUND_DOWN_COPY = (
+    "Every kid should know the joy of distributed systems if they want to "
+    "(anything below a dollar costs more in payment processing so we'll just "
+    "round down to $0. If Stripe is being difficult with $0 please e-mail us "
+    "and we can e-mail you a copy too! :D)")
+OWNER_MAILTO = 'href="mailto:holden@pigscanfly.ca"'
+
+
+class OwnerRoundDownCopyTest(CartTestBase):
+    """The owner's sentence, where the amount can be entered or edited."""
+
+    def test_the_product_page_carries_the_owners_words_verbatim(self):
+        response = self.client.get(f"/product/{EBOOK_PK}")
+
+        # Not squashed: asserted against the raw bytes, which is why the
+        # sentence is kept on one line in the template.
+        self.assertContains(response, OWNER_ROUND_DOWN_COPY, html=False)
+
+    def test_the_cart_carries_the_owners_words_verbatim(self):
+        self.client.post(f"/add-to-cart/{EBOOK_PK}/1")
+
+        response = self.client.get("/cart")
+
+        self.assertContains(response, OWNER_ROUND_DOWN_COPY, html=False)
+
+    def test_the_notice_offers_a_real_mailto(self):
+        # A raw mailto, deliberately: the owner has accepted that it is
+        # scrapeable and does not want a contact form here.
+        response = self.client.get(f"/product/{EBOOK_PK}")
+
+        self.assertContains(response, OWNER_MAILTO)
+        self.assertContains(response, "holden@pigscanfly.ca")
+
+    def test_an_ordinary_product_page_carries_no_round_down_notice(self):
+        # Control: it is scoped to where an amount can be entered.
+        response = self.client.get(f"/product/{PRINT_PK}")
+
+        self.assertNotContains(response, OWNER_ROUND_DOWN_COPY, html=False)
+
+
+class PwywChargedAmountIsShownBeforeCommitTest(CartTestBase):
+    """Rounding must not be a surprise at the till."""
+
+    def test_the_product_page_states_what_will_be_charged(self):
+        response = self.client.get(f"/product/{EBOOK_PK}")
+
+        body = squashed(response)
+        self.assertIn("You will be charged:", body)
+        # The suggestion is 12.99, which is above the band, so it stands.
+        self.assertIn('<strong id="pwyw-charge-amount">$12.99</strong>', body)
+
+    def test_the_page_hands_the_threshold_to_its_javascript(self):
+        # So the running total rounds by the same rule the server does,
+        # instead of the number being written out a second time.
+        response = self.client.get(f"/product/{EBOOK_PK}")
+
+        self.assertContains(
+            response, f"< {PWYW_ROUND_DOWN_BELOW})")
+
+    def test_the_cart_shows_a_rounded_entry_back_as_zero(self):
+        # Entering 0.50 must read as 0.00 before checkout, not after.
+        self.client.post(
+            f"/add-to-cart/{EBOOK_PK}/1", {"chosen_amount": "0.50"})
+
+        response = self.client.get("/cart")
+
+        body = squashed(response)
+        self.assertIn('value="0.00"', body)
+        self.assertNotIn('value="0.50"', body)
+
+    def test_the_cart_total_reflects_the_rounded_amount(self):
+        self.client.post(
+            f"/add-to-cart/{EBOOK_PK}/1", {"chosen_amount": "0.99"})
+
+        response = self.client.get("/cart")
+
+        self.assertEqual(
+            CartProduct.objects.get(product_id=EBOOK_PK).chosen_amount, 0)
+        self.assertContains(response, "0.00")
+
+
+class RoundedDownOrderTest(CartTestBase):
+    """An amount under a dollar becomes a free order, end to end."""
+
+    def _order(self, amount, session_id):
+        self.client.post(
+            f"/add-to-cart/{EBOOK_PK}/1", {"chosen_amount": amount})
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/s", id=session_id)
+            self.client.post("/checkout")
+        self.create_call = create
+        return Order.objects.get(stripe_session_id=session_id)
+
+    def test_fifty_cents_is_snapshotted_as_zero(self):
+        order = self._order("0.50", "cs_rounded")
+
+        self.assertEqual(order.items.get().unit_amount, 0)
+        self.assertEqual(order.amount_total, 0)
+
+    def test_a_dollar_is_snapshotted_as_a_dollar(self):
+        order = self._order("1.00", "cs_dollar")
+
+        self.assertEqual(order.items.get().unit_amount, 100)
+        self.assertEqual(order.amount_total, 100)
+
+    def test_a_suggestion_below_the_band_cannot_reach_stripe(self):
+        # The admin edits Product.price directly, so it never goes through
+        # parse_pwyw_amount. A pay-what-you-want product priced at 25c would
+        # otherwise bill 25c to any buyer who did not name an amount, and
+        # Stripe refuses that outright (amount_too_small) -- a dead checkout
+        # for every one of them. The band is applied on the way out too.
+        Product.objects.filter(pk=EBOOK_PK).update(price=25)
+        self.client.post(f"/add-to-cart/{EBOOK_PK}/1")
+
+        row = CartProduct.objects.get(product_id=EBOOK_PK)
+
+        self.assertIsNone(row.chosen_amount)
+        self.assertEqual(row.effective_unit_amount(), 0)
+
+    def test_a_suggestion_at_the_band_is_left_alone(self):
+        Product.objects.filter(pk=EBOOK_PK).update(price=100)
+        self.client.post(f"/add-to-cart/{EBOOK_PK}/1")
+
+        self.assertEqual(
+            CartProduct.objects.get(
+                product_id=EBOOK_PK).effective_unit_amount(), 100)
+
+    def test_an_ordinary_product_priced_low_is_not_rounded(self):
+        # The band belongs to pay-what-you-want, not to the catalogue. A
+        # cheap fixed-price item is the owner's pricing decision.
+        Product.objects.filter(pk=PRINT_PK).update(price=25)
+        self.client.post(f"/add-to-cart/{PRINT_PK}/1")
+
+        self.assertEqual(
+            CartProduct.objects.get(
+                product_id=PRINT_PK).effective_unit_amount(), 25)
+
+    def test_the_preset_never_leaks_into_a_rounded_order(self):
+        # The original bug, in its round-down form: a 12.99 line above a
+        # 0.00 total.
+        order = self._order("0.25", "cs_nopreset")
+
+        self.assertNotEqual(order.items.get().unit_amount, 1299)
+        self.assertEqual(order.items.get().unit_amount, 0)
 
 
 class PwywReceiptTest(BookAssetRootMixin, OrderTestBase):
@@ -779,15 +984,165 @@ class PwywReceiptTest(BookAssetRootMixin, OrderTestBase):
 
         self.assertNotIn(RECEIPT_NOTE, squashed(response))
 
-    def test_the_owner_email_reports_the_chosen_amount(self):
+    def test_the_owner_email_reports_the_amount_actually_paid(self):
         order = self._paid_for_nothing()
 
         owner_email, = self.order_emails()
 
-        self.assertIn("the amount the buyer chose", owner_email.body)
+        self.assertIn("the amount the buyer paid", owner_email.body)
         self.assertNotIn("see the order total for what was paid",
                          owner_email.body)
         self.assertIn("@ 0.00", owner_email.body)
+
+
+class ZeroOrderStillDeliversTheBookTest(BookAssetRootMixin, OrderTestBase):
+    """A kid who pays nothing still gets the file.
+
+    "The order reached a terminal state" is not the same claim as "the buyer
+    received the book". A zero-total session settles as
+    "no_payment_required" and can never report "paid", so anything in the
+    completion path that keys off "paid" would leave a $0 buyer on a success
+    page with no download and nobody any the wiser -- worse than refusing
+    them. These assert the delivery itself, not the status.
+    """
+
+    @staticmethod
+    def customer_emails():
+        """The download mails, as test_digital.DigitalDeliveryTest counts them."""
+        return [m for m in mail.outbox if "Your download" in m.subject]
+
+    def _buy_at(self, amount, session_id):
+        self.client.post(
+            f"/add-to-cart/{EBOOK_PK}/1", {"chosen_amount": amount})
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/session", id=session_id)
+            self.client.post("/checkout")
+        return Order.objects.get(stripe_session_id=session_id)
+
+    def _settle_free(self, order):
+        return self.deliver(self.event_body(
+            order, payment_status="no_payment_required",
+            amount_total=0, amount_subtotal=0,
+            total_details={"amount_tax": 0, "amount_shipping": 0}))
+
+    def test_a_rounded_down_order_emails_the_download(self):
+        order = self._buy_at("0.75", "cs_free_rounded")
+
+        self._settle_free(order)
+
+        order.refresh_from_db()
+        # The order really is the rounded one, not a 12.99 order that happened
+        # to settle at zero. Without this the test passes on 3090eab, where
+        # the amount is ignored and delivery runs anyway.
+        self.assertEqual(order.items.get().unit_amount, 0)
+        self.assertIsNotNone(order.digital_delivery_sent_at)
+        self.assertEqual(order.digital_delivery_error, "")
+        customer_email, = self.customer_emails()
+        self.assertIn("download", customer_email.body.lower())
+
+    def test_an_explicit_zero_order_emails_the_download(self):
+        order = self._buy_at("0", "cs_free_zero")
+
+        self._settle_free(order)
+
+        order.refresh_from_db()
+        self.assertEqual(order.items.get().unit_amount, 0)
+        self.assertIsNotNone(order.digital_delivery_sent_at)
+        self.assertEqual(len(self.customer_emails()), 1)
+
+    def test_a_paid_order_still_emails_the_download(self):
+        # CONTROL -- passes on 3090eab too, and is meant to. Guards against
+        # over-fitting to the free path: the ordinary case must keep working,
+        # and it settles as "paid" rather than "no_payment_required".
+        order = self._buy_at("5.00", "cs_paid_five")
+
+        self.deliver(self.event_body(order, amount_total=500))
+
+        order.refresh_from_db()
+        self.assertIsNotNone(order.digital_delivery_sent_at)
+        self.assertEqual(len(self.customer_emails()), 1)
+
+    def test_the_free_order_reaches_fulfilment_not_merely_paid_status(self):
+        # Pins the distinction the whole class exists for: PAID alone would
+        # be satisfied by a status write that delivered nothing.
+        order = self._buy_at("0.10", "cs_free_check")
+
+        self._settle_free(order)
+
+        order.refresh_from_db()
+        self.assertEqual(order.items.get().unit_amount, 0)
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertIsNotNone(order.digital_delivery_sent_at)
+        self.assertIsNotNone(order.notified_at)
+
+    def test_the_buyer_receipt_reads_sensibly_for_a_free_order(self):
+        order = self._buy_at("0.50", "cs_free_receipt")
+        self._settle_free(order)
+
+        response = self.client.get(
+            f"/checkout/success?session_id={order.stripe_session_id}")
+
+        body = squashed(response)
+        self.assertIn("Total: $0.00", body)
+        self.assertIn("&mdash; $0.00", body)
+        # The preset must not appear anywhere on the receipt.
+        self.assertNotIn("12.99", body)
+
+    def test_the_owner_email_reads_sensibly_for_a_free_order(self):
+        order = self._buy_at("0.50", "cs_free_owner")
+
+        self._settle_free(order)
+
+        owner_email, = self.order_emails()
+        self.assertIn("@ 0.00", owner_email.body)
+        self.assertIn("Total: 0.00", owner_email.body)
+        self.assertIn("the amount the buyer paid", owner_email.body)
+        self.assertNotIn("12.99", owner_email.body)
+
+
+class ZeroCheckoutFailsGracefullyTest(CartTestBase):
+    """"If Stripe is being difficult with $0" -- the owner's clause.
+
+    A free order has no payment behind it, so a buyer who hits a Stripe
+    problem here has nothing to retry. They must land somewhere that tells
+    them how to get the book, not on a stack trace.
+    """
+
+    def _checkout_with_stripe_down(self, amount):
+        self.client.post(
+            f"/add-to-cart/{EBOOK_PK}/1", {"chosen_amount": amount})
+        with mock.patch("main.payments.stripe.checkout.Session.create",
+                        side_effect=RuntimeError("Stripe is being difficult")):
+            with self.assertLogs("main.views", level="ERROR"):
+                return self.client.post("/checkout", follow=True)
+
+    def test_a_failed_free_checkout_lands_on_the_cart_with_the_mailto(self):
+        response = self._checkout_with_stripe_down("0.50")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertRedirects(response, "/cart")
+        self.assertContains(response, "would not set up this free order")
+        self.assertContains(response, OWNER_MAILTO)
+
+    def test_a_failed_free_checkout_leaves_no_pending_order(self):
+        self._checkout_with_stripe_down("0")
+
+        self.assertFalse(
+            Order.objects.filter(status=Order.Status.PENDING).exists())
+
+    def test_a_failed_paid_checkout_still_raises(self):
+        # CONTROL -- passes on 3090eab too. Unchanged, and deliberately
+        # so: a paid order failing is a payment problem the buyer can act
+        # on, and swallowing it would hide a real outage behind a
+        # friendly sentence. Only the zero-total path is made graceful.
+        self.client.post(
+            f"/add-to-cart/{EBOOK_PK}/1", {"chosen_amount": "5.00"})
+        with mock.patch("main.payments.stripe.checkout.Session.create",
+                        side_effect=RuntimeError("Stripe is down")):
+            with self.assertLogs("main.views", level="ERROR"):
+                with self.assertRaises(RuntimeError):
+                    self.client.post("/checkout")
 
 
 class PwywCopyStaysOutOfTheFeedTest(TestCase):

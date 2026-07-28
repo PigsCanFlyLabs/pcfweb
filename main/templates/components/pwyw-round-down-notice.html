@@ -1,0 +1,26 @@
+{% comment %}
+    The owner's own words about the round-down band, shown wherever the amount
+    can be entered or edited. Up front, as an explanation of what will happen
+    -- not an error after the fact.
+
+    THE SENTENCE BELOW IS OWNER COPY. Do not reword it, re-punctuate it,
+    change its capitalisation or "improve" it. The ":D" stays, and "e-mail"
+    stays hyphenated. main/tests/test_pwyw.py pins it byte for byte so that a
+    well-meaning edit fails the suite instead of shipping.
+
+    It is deliberately on ONE line. Wrapping it would put newlines and
+    indentation inside the rendered string, and the test asserts the exact
+    bytes rather than a whitespace-squashed approximation.
+
+    It lives in an include rather than being copied into single-product.html
+    and cart.html, so there is one copy to keep right.
+
+    The mailto follows the sentence rather than wrapping "e-mail us" inside
+    it, because an <a> in the middle would break the sentence's bytes apart.
+    A raw address is scrapeable and the owner has explicitly accepted that; do
+    not replace it with a contact form.
+{% endcomment %}
+<p class="pwyw-round-down-notice">
+    <small>Every kid should know the joy of distributed systems if they want to (anything below a dollar costs more in payment processing so we'll just round down to $0. If Stripe is being difficult with $0 please e-mail us and we can e-mail you a copy too! :D)</small>
+    <br><small><a href="mailto:holden@pigscanfly.ca" class="pwyw-contact">holden@pigscanfly.ca</a></small>
+</p>

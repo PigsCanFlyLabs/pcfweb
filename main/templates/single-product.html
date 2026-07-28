@@ -156,6 +156,16 @@
 				       title="Your price" class="input-text pwyw-input" size="8">
 			    </div>
 			</div>
+			{% comment %}
+			   What the buyer will actually be charged, kept in step with the
+			   field above by calculateTotal(). Rounding must not be a
+			   surprise at the till: typing 0.50 says $0.00 here, before
+			   anything is committed. Rendered server-side too, so it is
+			   right on first paint and with JavaScript off.
+			{% endcomment %}
+			<p class="pwyw-charge">You will be charged:
+			    <strong id="pwyw-charge-amount">${{ product.pwyw_charged_amount }}</strong></p>
+			{% include 'components/pwyw-round-down-notice.html' %}
 			{% endif %}
 			{% if not product.noorder %}
 			<div class="quantity-content">
@@ -278,6 +288,17 @@
 	if (amountEl) {
 	    const typed = parseFloat(amountEl.value);
 	    unit = isNaN(typed) ? 0 : typed;
+	    // The same round-down band the server applies, so the buyer is
+	    // never shown a number they will not be charged. The threshold
+	    // comes from PWYW_ROUND_DOWN_BELOW rather than being written
+	    // twice; models.parse_pwyw_amount is still what decides.
+	    if (unit * 100 < {{ pwyw_round_down_below }}) {
+		unit = 0;
+	    }
+	    const chargeEl = document.querySelector('#pwyw-charge-amount');
+	    if (chargeEl) {
+		chargeEl.innerHTML = `$${unit.toFixed(2)}`;
+	    }
 	}
 	let total = (quantityInput.val() * unit).toFixed(2);
 	totalEl.innerHTML = `Total: $${total}`;

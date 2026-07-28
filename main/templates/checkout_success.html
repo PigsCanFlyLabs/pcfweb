@@ -33,7 +33,7 @@
                 <li>{{ item.quantity }} &times; {{ item.product_name }}
                     &mdash; ${{ item.total_display_price }}{% if item.product.is_pwyw %}
                     <br><small class="pwyw-note">Pay what you want: this is the
-                    amount you chose.</small>{% endif %}</li>
+                    amount you paid.</small>{% endif %}</li>
                 {% endfor %}
             </ul>
             <p>Total: ${{ order.total_display_price }} {{ order.currency|upper }}</p>

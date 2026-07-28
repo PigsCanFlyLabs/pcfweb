@@ -327,6 +327,16 @@ class Product(models.Model):
         """
         return "{0:.2f}".format(self.price / 100)
 
+    def pwyw_charged_amount(self) -> str:
+        """What the suggested amount would actually be charged at.
+
+        The same number the buyer sees on first paint and with JavaScript
+        off. It goes through round_pwyw_amount, so if an owner ever sets a
+        suggestion below the band this says $0.00 rather than quoting
+        something that will not be billed.
+        """
+        return "{0:.2f}".format(round_pwyw_amount(self.price) / 100)
+
     def get_msrp_display(self) -> str:
         """The MSRP as a bare formatted amount, for the strikethrough.
 
@@ -793,8 +803,18 @@ class CartProduct(models.Model):
         Deliberately not routed through get_display_price(), which returns
         presentation strings like "Pre-order: 30.00" rather than a number.
         """
-        if self.chosen_amount is not None and self.product.is_pwyw:
-            return self.chosen_amount
+        if self.product.is_pwyw:
+            amount = (self.chosen_amount if self.chosen_amount is not None
+                      else self.product.price)
+            # The band is applied here, not only where the buyer's entry is
+            # parsed, so that it holds however the amount arrived. The
+            # fallback is the owner's suggested price, which is edited in the
+            # admin and never goes through parse_pwyw_amount -- a
+            # pay-what-you-want product priced at 25c would otherwise mint a
+            # Price Stripe refuses to put in a session (amount_too_small,
+            # confirmed against the live test API), and every buyer of it
+            # would hit a dead checkout. See PWYW_ROUND_DOWN_BELOW.
+            return round_pwyw_amount(amount)
         return self.product.price
 
     def set_chosen_amount(self, cents: Optional[int]) -> None:
@@ -892,12 +912,41 @@ def _display_amount(cents: Optional[int]) -> str:
 # an extra keystroke is refused rather than billed.
 MAX_PWYW_AMOUNT = 1_000_000
 
+# Under this many cents, a pay-what-you-want amount is rounded down to nothing
+# rather than charged. The owner's rule, and the single place the threshold is
+# written down.
+#
+# Why rounding rather than a minimum, because it is not obvious and it matters:
+# Stripe refuses to charge less than $0.50 USD at all (amount_too_small), but
+# accepts a total of exactly 0 -- both confirmed against the live test API.
+# Rounding the whole 1..99c band down to 0 puts the forbidden 1..49c band out
+# of reach *by construction*. No session is ever created for an amount Stripe
+# would reject, so there is no error path to design and no buyer to bounce.
+# Any implementation that leaves 1..49c reachable puts that failure mode back.
+#
+# This is a rounding rule, not a parser. It runs only after parse_pwyw_amount
+# has accepted the input: garbage is still refused, never coerced to zero.
+PWYW_ROUND_DOWN_BELOW = 100
+
 _NOT_A_NUMBER = ("That is not an amount. Enter dollars and cents, "
                  "for example 12.99.")
 
 
 class PwywAmountError(ValueError):
     """A pay-what-you-want amount that must not be stored or billed."""
+
+
+def round_pwyw_amount(cents: int) -> int:
+    """Apply the owner's round-down band to an already-validated amount.
+
+    Anything in 1..99c becomes 0; a dollar and up is charged as entered. See
+    PWYW_ROUND_DOWN_BELOW for why the band exists and where its edge is.
+
+    Separate from parse_pwyw_amount so the buyer can be shown what they will
+    actually be charged before they commit to it, using the same rule that
+    will charge them.
+    """
+    return 0 if cents < PWYW_ROUND_DOWN_BELOW else cents
 
 
 def parse_pwyw_amount(raw: Any) -> int:
@@ -939,7 +988,10 @@ def parse_pwyw_amount(raw: Any) -> int:
         raise PwywAmountError(
             f"{_display_amount(MAX_PWYW_AMOUNT)} is the most that can be "
             "taken in one go. Get in touch if you really meant it.")
-    return cents
+    # Rounding is the last step, after every refusal above. A negative, a
+    # fraction of a cent, a word or an absurd number is still an error -- it
+    # does not become a free download.
+    return round_pwyw_amount(cents)
 
 
 class Order(models.Model):
@@ -1201,11 +1253,14 @@ class Order(models.Model):
                 line += (f"   [adjusted at checkout, was "
                          f"{item.snapshot_quantity}]")
             if item.product is not None and item.product.is_pwyw:
-                # The amount above is now the one the buyer named on the site,
+                # The amount above is now what the buyer was actually billed,
                 # snapshotted before the session was created -- not the
                 # owner's suggestion. Still worth flagging: it explains a line
                 # that does not match the catalogue price, and a zero one.
-                line += "   [pay-what-you-want: the amount the buyer chose]"
+                # "paid" rather than "chose" because an amount under a dollar
+                # is rounded down, so the two can differ; see
+                # PWYW_ROUND_DOWN_BELOW.
+                line += "   [pay-what-you-want: the amount the buyer paid]"
             lines.append(line)
         lines += self.fulfilment_caveats()
         lines += [
