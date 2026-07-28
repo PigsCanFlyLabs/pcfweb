@@ -1,11 +1,6 @@
 from django.db import migrations
-from django.db.models import Q
 
-# The launch stock. Not a real warehouse count -- `stock` "manually gates
-# whether physical books can be purchased here; it does not cap order quantity
-# or decrement automatically" (Product.stock's own help_text), so this is the
-# number that turns the gate on, nothing more.
-LAUNCH_STOCK = 4
+from main.launch_stock import backfill_launch_stock
 
 
 def backfill_book_stock(apps, schema_editor):
@@ -21,12 +16,20 @@ def backfill_book_stock(apps, schema_editor):
     `set -euo pipefail`, so that would stop the primary pod from booting. The
     protection is also load-bearing in its own right -- it is what stops a
     deploy from resetting live inventory -- so it stays, and this runs once
-    instead.
+    instead. The distinction that makes both true at once: the FIXTURE may not
+    specify stock, while the seed COMMAND may apply a launch default to a row
+    it is creating.
 
-    FILL IN ONLY, NEVER CLOBBER. The update is filtered on stock being 0 (or
-    NULL), so a number a human typed into the admin is left exactly as it is.
-    Production may already carry hand-set counts, and silently overwriting a
-    real one would oversell a title -- worse than the bug being fixed here.
+    This half covers databases that already have a catalogue -- production
+    included. It cannot cover a fresh one: start-server.sh runs migrate before
+    seed_products, so on an empty database this finds zero rows. That case is
+    handled at the point of creation instead, in seed_products.
+
+    FILL IN ONLY, NEVER CLOBBER. backfill_launch_stock() filters on the row
+    carrying no stock figure, so a number a human typed into the admin is left
+    exactly as it is. Production may already carry hand-set counts, and
+    silently overwriting a real one would oversell a title -- worse than the
+    bug being fixed here.
 
     Scope mirrors is_out_of_stock()'s own clauses, because the rows worth
     touching are precisely the rows that predicate currently blocks:
@@ -51,21 +54,16 @@ def backfill_book_stock(apps, schema_editor):
       are already purchasable (is_out_of_stock() returns False for both), so
       they are not what this fixes, and a title that has not been printed yet
       does not have four copies of itself sitting anywhere.
+
+    The number and the predicate both live in main/launch_stock.py, shared
+    with seed_products so the two cannot drift apart. Sharing them couples
+    this migration to current app code, which is normally worth avoiding; it
+    is accepted here because two copies of the scope rule drifting is the
+    worse failure -- that is how the digital row would quietly acquire a
+    meaningless inventory count.
     """
     Product = apps.get_model("main", "Product")
-    Product.objects.filter(
-        cat="B",
-        delivery_type="PHYSICAL",
-        preorder_only=False,
-        backorder=False,
-        noorder=False,
-    ).filter(
-        # The column is NOT NULL (PositiveIntegerField, default 0, db_default
-        # 0), so the isnull arm matches nothing today. It is here so that the
-        # filter states the intent -- "only rows carrying no stock figure" --
-        # rather than relying on the column's nullability staying put.
-        Q(stock=0) | Q(stock__isnull=True)
-    ).update(stock=LAUNCH_STOCK)
+    backfill_launch_stock(Product)
 
 
 def reverse_backfill(apps, schema_editor):
