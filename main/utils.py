@@ -2,11 +2,27 @@ import functools
 import logging
 import secrets
 
-from typing import Optional
+from typing import List, Optional
 
+from django.conf import settings
 from django.contrib.auth.models import User
 
 logger = logging.getLogger(__name__)
+
+
+def admin_recipients() -> List[str]:
+    """Who to tell when something the owner has to fix goes wrong.
+
+    Shared by the order/digital-delivery notifications on Order and by the
+    startup asset audit (main/management/commands/check_book_assets.py), so
+    the two cannot end up mailing different people.
+    """
+    recipients = []
+    for entry in getattr(settings, "ADMINS", None) or []:
+        # Django 5.2 requires 2-tuples, but be forgiving about the bare
+        # string form so a mis-set env var is not a crash in a webhook.
+        recipients.append(entry if isinstance(entry, str) else entry[1])
+    return [r for r in recipients if r]
 
 
 def generate_username(email: str):
