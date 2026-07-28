@@ -4,6 +4,7 @@ import html as html_module
 import re
 from unittest import mock
 
+from django.template import Context, Template
 from django.test import TestCase, override_settings
 
 from main.models import Product
@@ -894,3 +895,33 @@ class FamilyPageTest(TestCase):
         response = self.client.get("/family")
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "family.html")
+
+
+class FooterCopyrightTest(TestCase):
+    """The footer copyright range, which every page inherits from base.html.
+
+    Every expectation here is derived from the clock the template itself
+    reads, so no assertion in this class can start failing on a 1 January
+    purely because the wall clock advanced.
+    """
+
+    def footer_years(self):
+        response = self.client.get("/privacy")
+        self.assertEqual(response.status_code, 200)
+        match = re.search(
+            r"Copyright © (\d{4})-(\d{4}) Pigs Can Fly Labs",
+            response.content.decode())
+        self.assertIsNotNone(match, "footer copyright line missing")
+        assert match is not None  # for mypy
+        return int(match.group(1)), int(match.group(2))
+
+    def test_footer_copyright_starts_at_the_founding_year(self):
+        start, _ = self.footer_years()
+        self.assertEqual(start, 2022)
+
+    def test_footer_copyright_ends_at_the_current_year(self):
+        # Compared against the same tag the footer uses, so this tracks the
+        # clock instead of pinning a year that would rot.
+        start, end = self.footer_years()
+        self.assertEqual(end, int(Template('{% now "Y" %}').render(Context())))
+        self.assertGreaterEqual(end, start)
