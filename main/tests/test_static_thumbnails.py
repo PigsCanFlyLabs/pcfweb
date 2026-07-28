@@ -37,9 +37,12 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import unittest
 from io import StringIO
 from pathlib import Path
 from typing import Set
+
+from PIL import Image
 
 from django.conf import settings
 from django.core.management import call_command
@@ -47,7 +50,8 @@ from django.core.management.base import CommandError
 from django.test import SimpleTestCase, TestCase
 
 from main.management.commands.pregenerate_thumbnails import (
-    iter_expected_thumbnails)
+    COVER_PREFIX, _cover_tree_is_wholly_absent, iter_expected_thumbnails,
+    thumbnail_names)
 from main.models import Product
 from main.tests.base import REPO_ROOT
 
@@ -60,6 +64,19 @@ COVER_PAGES = ["/", "/products"]
 FIXTURE = Path(settings.BASE_DIR) / "main" / "fixtures" / (
     "initial_products.yaml")
 
+# The book covers live in the sibling pcfweb-assets checkout, which CI does not
+# have -- it checks out this repository alone. A handful of assertions below
+# genuinely need the real collected artifact and cannot be faked; they are
+# skipped, visibly, when it is absent, rather than quietly weakened into
+# something that passes everywhere and proves nothing. Everything that CAN be
+# exercised hermetically is, in AbsentAssetTreeSkipTest below, so the command's
+# own logic is still covered on a bare checkout.
+REAL_COVERS_PRESENT = not _cover_tree_is_wholly_absent(
+    str(settings.STATIC_ROOT))
+NEEDS_REAL_COVERS = (
+    "needs the pcfweb-assets covers under STATIC_ROOT; run "
+    "scripts/sync-local-assets.sh and collectstatic")
+
 
 def _snapshot(root: str) -> Set[str]:
     return {
@@ -67,6 +84,30 @@ def _snapshot(root: str) -> Set[str]:
         for dirpath, _dirs, files in os.walk(root)
         for name in files
     }
+
+
+def _write_image(path: Path, size=(400, 500)) -> None:
+    """A real, decodable image at `path`. Parents created."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, (120, 90, 60)).save(path, "JPEG")
+
+
+def _build_static_tree(root: Path, *, covers=True, thumbs=True) -> None:
+    """A synthetic STATIC_ROOT shaped like the real collected one.
+
+    Lets the skip logic be tested on a bare checkout: what the command cares
+    about is which files exist at which paths, not what they are pictures of.
+    Thumbnail filenames come from thumbnail_names(), the same helper the
+    command uses, so this cannot drift into agreeing with itself.
+    """
+    for source, size in iter_expected_thumbnails(str(FIXTURE)):
+        if source.startswith(COVER_PREFIX) and not covers:
+            continue
+        _write_image(root / source)
+        if thumbs:
+            # Written after the source, so it is the newer file and the
+            # staleness check is satisfied.
+            _write_image(root / thumbnail_names(source, size)[0], (290, 380))
 
 
 class RenderedThumbnailTest(TestCase):
@@ -115,6 +156,7 @@ class RenderedThumbnailTest(TestCase):
                 f"{src} is not served from the static tree that ships in the "
                 "image")
 
+    @unittest.skipUnless(REAL_COVERS_PRESENT, NEEDS_REAL_COVERS)
     def test_rendering_generates_nothing_the_build_did_not(self):
         """Pre-generation must cover everything the templates actually ask for.
 
@@ -123,6 +165,10 @@ class RenderedThumbnailTest(TestCase):
         lazily -- exactly the per-pod runtime generation that broke
         production -- and it shows up here as a file that was not in the
         snapshot.
+
+        Needs the real covers: the point is that rendering the REAL pages
+        creates nothing, and the real pages read the real STATIC_ROOT. A
+        synthetic tree elsewhere would not be the thing under test.
         """
         call_command(
             "pregenerate_thumbnails", stdout=StringIO(), stderr=StringIO())
@@ -142,6 +188,7 @@ class RenderedThumbnailTest(TestCase):
 class PregenerateCommandTest(SimpleTestCase):
     """The build-path guard: does it look at the shipped tree, and can it fail?"""
 
+    @unittest.skipUnless(REAL_COVERS_PRESENT, NEEDS_REAL_COVERS)
     def test_check_passes_against_the_real_collected_tree(self):
         call_command(
             "pregenerate_thumbnails", stdout=StringIO(), stderr=StringIO())
@@ -153,16 +200,14 @@ class PregenerateCommandTest(SimpleTestCase):
     def test_check_fails_when_the_shipped_tree_lacks_a_thumbnail(self):
         """Proof the guard is not decoration.
 
-        A temporary tree holding the SOURCE images but none of the generated
-        thumbnails is exactly the artifact the build used to produce, and the
-        check must refuse it.
+        A tree holding the SOURCE images but none of the generated thumbnails
+        is exactly the artifact the build used to produce, and the check must
+        refuse it. Synthetic sources rather than copies of the real ones, so
+        this runs on a bare checkout too -- --check never decodes an image, it
+        asks whether a real file is at the path a request would ask for.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            for source, _size in iter_expected_thumbnails(str(FIXTURE)):
-                dest = Path(tmp) / source
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                real = Path(settings.STATIC_ROOT) / source
-                dest.write_bytes(real.read_bytes())
+            _build_static_tree(Path(tmp), thumbs=False)
 
             with self.assertRaises(CommandError) as caught:
                 call_command(
@@ -210,6 +255,190 @@ class PregenerateCommandTest(SimpleTestCase):
             source = f"assets/images/book_covers/{name}.jpg"
             self.assertIn(source, targets)
             self.assertEqual(targets[source], Product.THUMB_SIZE)
+
+
+class AbsentAssetTreeSkipTest(SimpleTestCase):
+    """--allow-absent-asset-tree must be narrow enough to be worth having.
+
+    scripts/checks.sh passes this flag because CI checks out this repository
+    alone and the covers live in the sibling pcfweb-assets checkout. That is a
+    hole in a guard, so it is bounded on exactly one axis: the ENTIRE cover
+    tree being absent. The tests here are the proof of that boundary -- a
+    "skip when anything is missing" flag would recreate the very defect this
+    module exists to pin, a guard reporting success over a tree it never
+    looked at.
+
+    Hermetic: synthetic trees under --static-root, so these run identically on
+    a developer's machine and on a bare CI checkout.
+    """
+
+    def _check(self, root, *flags):
+        call_command(
+            "pregenerate_thumbnails", "--check", "--static-root", str(root),
+            *flags, stdout=StringIO(), stderr=StringIO())
+
+    def test_complete_tree_passes(self):
+        """Positive control.
+
+        Without this, the failures asserted below could come from a malformed
+        synthetic tree rather than from the mutation each one makes, and the
+        whole class would prove nothing.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp))
+            self._check(tmp, "--allow-absent-asset-tree")
+
+    def test_skip_does_not_mask_a_missing_thumbnail(self):
+        """THE assertion this flag has to earn.
+
+        Sources present, one thumbnail deleted: the tree is not wholly absent,
+        so the flag must not engage and the check must still fail. This is the
+        difference between "CI has no assets" and "the build produced a broken
+        artifact", and conflating them is how a thumbnail-less image ships.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp))
+            victim = Path(tmp) / thumbnail_names(
+                f"{COVER_PREFIX}book_covers/learning_spark_1ed.jpg",
+                Product.THUMB_SIZE)[0]
+            self.assertTrue(victim.is_file(), "fixture drift: nothing deleted")
+            victim.unlink()
+
+            with self.assertRaises(CommandError) as caught:
+                self._check(tmp, "--allow-absent-asset-tree")
+
+        self.assertIn(
+            "pre-generated thumbnail is missing", str(caught.exception))
+        self.assertIn("learning_spark_1ed", str(caught.exception))
+
+    def test_skip_does_not_mask_a_single_missing_cover_source(self):
+        """One cover gone is a defect; only ALL of them gone is the CI case."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp))
+            (Path(tmp) / COVER_PREFIX
+             / "book_covers/kubeflow_for_ml.jpg").unlink()
+
+            with self.assertRaises(CommandError) as caught:
+                self._check(tmp, "--allow-absent-asset-tree")
+
+        self.assertIn("thumbnail source is missing", str(caught.exception))
+
+    def test_skip_does_not_mask_an_lfs_pointer(self):
+        """A ~130 byte text stub is present-but-wrong, so it must still fail."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp))
+            (Path(tmp) / COVER_PREFIX
+             / "book_covers/high_performance_spark.jpg").write_text(
+                "version https://git-lfs.github.com/spec/v1\n"
+                "oid sha256:abc123\nsize 123456\n")
+
+            with self.assertRaises(CommandError) as caught:
+                self._check(tmp, "--allow-absent-asset-tree")
+
+        self.assertIn("Git LFS pointer", str(caught.exception))
+
+    def test_skip_does_not_mask_a_stale_thumbnail(self):
+        """Present, a real image, and a picture of the old cover.
+
+        The one failure that survives every existence check. A pod finding a
+        thumbnail older than its source regenerates it at request time, which
+        is precisely the behaviour the pre-generation exists to remove.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp))
+            source = (Path(tmp) / COVER_PREFIX
+                      / "book_covers/scaling_python_with_ray.jpg")
+            thumb = Path(tmp) / thumbnail_names(
+                f"{COVER_PREFIX}book_covers/scaling_python_with_ray.jpg",
+                Product.THUMB_SIZE)[0]
+            # Age the thumbnail rather than touching the source: same relation,
+            # and it cannot be confused with the file simply being rewritten.
+            old = os.path.getmtime(source) - 60
+            os.utime(thumb, (old, old))
+
+            with self.assertRaises(CommandError) as caught:
+                self._check(tmp, "--allow-absent-asset-tree")
+
+        self.assertIn("is stale", str(caught.exception))
+
+    def test_wholly_absent_tree_is_skipped_only_with_the_flag(self):
+        """The CI case, and the proof the flag is doing the work.
+
+        Same tree twice: it fails without the flag and passes with it, so the
+        pass is attributable to the flag and not to the tree being acceptable.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp), covers=False)
+
+            with self.assertRaises(CommandError) as caught:
+                self._check(tmp)
+            self.assertIn("thumbnail source is missing", str(caught.exception))
+
+            self._check(tmp, "--allow-absent-asset-tree")
+
+    def test_the_skip_announces_itself(self):
+        """A skip nobody sees is indistinguishable from a pass."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp), covers=False)
+            err = StringIO()
+            call_command(
+                "pregenerate_thumbnails", "--check", "--static-root", tmp,
+                "--allow-absent-asset-tree",
+                stdout=StringIO(), stderr=err)
+
+        message = err.getvalue()
+        self.assertIn("SKIPPED", message)
+        self.assertIn("NOT verified", message)
+        # Says how many went unchecked, and points at what still enforces them.
+        self.assertIn("5 product cover", message)
+        self.assertIn("build.sh", message)
+
+    def test_an_empty_directory_counts_as_absent(self):
+        """What a half-finished sync or an `rm` of the files leaves behind."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp), covers=False)
+            (Path(tmp) / COVER_PREFIX / "book_covers").mkdir(parents=True)
+
+            self.assertTrue(_cover_tree_is_wholly_absent(tmp))
+            self._check(tmp, "--allow-absent-asset-tree")
+
+    def test_the_flag_never_excuses_a_fixture_with_no_covers(self):
+        """The vacuity guard outranks the skip.
+
+        "No covers anywhere" must stay fatal even in the environment that is
+        allowed to have no cover files, or a fixture that lost every product
+        would sail through CI.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "empty.yaml"
+            empty.write_text("[]\n")
+
+            with self.assertRaises(CommandError) as caught:
+                call_command(
+                    "pregenerate_thumbnails", "--allow-absent-asset-tree",
+                    "--fixture", str(empty),
+                    stdout=StringIO(), stderr=StringIO())
+
+        self.assertIn("no product covers found", str(caught.exception))
+
+
+class BuildSealTest(SimpleTestCase):
+    """build.sh's --check must stay unconditional. It is the actual seal."""
+
+    def test_build_sh_does_not_pass_the_skip_flag(self):
+        build = (REPO_ROOT / "build.sh").read_text()
+        self.assertIn("./manage.py pregenerate_thumbnails --check", build)
+        self.assertNotIn(
+            "pregenerate_thumbnails --check --allow-absent-asset-tree", build)
+        self.assertNotIn(
+            "pregenerate_thumbnails --allow-absent-asset-tree --check", build)
+
+    def test_checks_sh_passes_the_skip_flag_and_not_a_bare_run(self):
+        """CI's invocation is the tolerant one; that is the only tolerant one."""
+        checks = (REPO_ROOT / "scripts" / "checks.sh").read_text()
+        self.assertIn(
+            "./manage.py pregenerate_thumbnails --allow-absent-asset-tree",
+            checks)
 
 
 class ThumbnailPackagingTest(SimpleTestCase):

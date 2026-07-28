@@ -22,7 +22,16 @@ python -m mypy -p main -p pigscanfly
 # Before the tests, not after: main/tests/test_static_thumbnails.py asserts the
 # pages reference files that are already on disk, which is only a real
 # assertion if something other than the test put them there.
-./manage.py pregenerate_thumbnails
+#
+# --allow-absent-asset-tree because CI (.github/workflows/ci.yml) checks out
+# this repository on its own, and the covers live in the sibling pcfweb-assets
+# checkout it does not have. The flag is all-or-nothing: it skips the covers
+# only when NOT ONE of them is present, prints a banner saying so, and still
+# fails on a tree that exists with anything wrong in it. It does not weaken the
+# artifact -- build.sh runs `pregenerate_thumbnails --check` without it, on the
+# tree about to be COPYd into the image, and that is the seal that protects
+# production.
+./manage.py pregenerate_thumbnails --allow-absent-asset-tree
 ./manage.py test main
 ./manage.py validate_templates --ignore-app newsletter
 # Kubernetes manifests parse.

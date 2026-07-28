@@ -615,6 +615,29 @@ layer and nothing is generated at request time. `build.sh` then runs
 `manage.py pregenerate_thumbnails --check`, which is read-only on purpose: a
 check that generates what it cannot find can never fail.
 
+Generation needs no database. It goes through `generate_thumbnail()` plus an
+explicit storage save rather than `get_thumbnail()`, because the latter also
+writes `easy_thumbnails` cache rows — rows that land in whatever database the
+*build host* has (in CI, none at all) and that production never reads, since
+both storages are local and `thumbnail_exists()` compares file mtimes.
+
+#### Running the checks without `pcfweb-assets`
+
+CI checks out this repository alone, so it has no sibling `pcfweb-assets` and
+therefore no book covers. `scripts/checks.sh` passes
+`--allow-absent-asset-tree` for that case. It is strictly all-or-nothing: it
+skips the covers only when **not one** of them is present, prints a banner
+saying exactly how many went unverified, and still fails on a tree that exists
+with anything wrong in it — a missing cover, a stale thumbnail, an
+unmaterialised LFS pointer. `build.sh` never passes the flag; that unconditional
+`--check` is the seal on the image that actually ships.
+
+Deliberately not solved by having CI clone `pcfweb-assets`: `images/` is ~47MB
+across 91 Git LFS objects, so an `lfs: true` checkout would pull that on every
+run of every PR and exhaust the free 1 GiB/month LFS bandwidth in a few weeks —
+after which CI fails on a quota error that has nothing to do with the change
+under test.
+
 Uploaded-image thumbnails now land in `STATIC_ROOT` as well. That is not a fix
 for them — the upload itself is still ephemeral and pod-local, per the section
 above — it just moves the thumbnail alongside it.

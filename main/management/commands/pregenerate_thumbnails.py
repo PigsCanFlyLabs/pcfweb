@@ -36,6 +36,36 @@ product covers are listed in TEMPLATE_THUMBNAILS below. That list is a second
 copy of what the templates say and could drift from them; the backstop is
 main/tests/test_static_thumbnails.py, which renders the real pages and fails on
 any <img> whose file is not on disk. Add a line here when you add a tag there.
+
+NO DATABASE
+-----------
+Generation deliberately goes through ``generate_thumbnail()`` plus an explicit
+storage save, rather than the usual ``get_thumbnail()``. The only difference is
+that ``get_thumbnail()`` also calls ``save_thumbnail()``, which writes rows to
+the ``easy_thumbnails_source`` / ``easy_thumbnails_thumbnail`` cache tables --
+and that is a dependency this command should not have:
+
+  * Those rows land in whatever database the *build host* happens to have. In
+    CI that is no database at all, so the command died with "no such table:
+    easy_thumbnails_source" even for a source that was present and correct.
+  * They are never consulted in production anyway. Both storages here are
+    local, so ``Thumbnailer.thumbnail_exists()`` compares filesystem mtimes and
+    returns the existing file without a query; the rows written on the build
+    host never reach the cluster's Postgres in the first place.
+
+So the cache write bought nothing and cost portability. Everything else --
+which bytes are produced, and under which filename -- is identical, because
+``get_thumbnail()`` generates through this same call.
+
+MISSING ASSET TREE
+------------------
+The cover sources come from the sibling ``pcfweb-assets`` checkout, which CI
+does not have (see ``--allow-absent-asset-tree`` below). That flag is scoped as
+narrowly as it can be on purpose: it fires only when the cover tree is absent
+*in its entirety*, never when the tree is there and something in it is wrong.
+A guard that shrugs at any missing file is a guard that passes over a tree it
+never inspected, which is the exact shape of the bug this command exists to
+kill.
 """
 
 from __future__ import annotations
@@ -61,6 +91,70 @@ TEMPLATE_THUMBNAILS: List[Tuple[str, Tuple[int, int]]] = [
 # Git LFS pointer sentinel, same one scripts/check-image-assets.sh looks for. A
 # pointer would fail generation anyway, but saying so beats "not an image".
 LFS_SENTINEL = b"version https://git-lfs.github.com/spec/v1"
+
+# Static-relative root of the tree that comes from the sibling pcfweb-assets
+# checkout, i.e. the one thing a bare clone of *this* repo does not have.
+# .gitignore excludes main/static/assets/images, and collectstatic lands it
+# here. Everything outside this prefix -- the masthead logo, most obviously --
+# is committed to this repository and is present in any checkout, so it is
+# never covered by --allow-absent-asset-tree.
+COVER_PREFIX = "assets/images/"
+
+# Same shout as scripts/sync-local-assets.sh, for the same reason: a skipped
+# check has to be impossible to mistake for a passing one when skimming a log.
+BANNER = "!" * 70
+
+
+def thumbnail_names(source: str, size: Tuple[int, int]) -> List[str]:
+    """The relative path(s) a request for this thumbnail may resolve to.
+
+    Asked of easy-thumbnails rather than formatted here, so the check cannot
+    pass while looking for a filename nothing requests. Naming is pure; this
+    touches no disk, and needs no database.
+
+    Two names, not one, and the pair is not decoration: the extension depends
+    on whether the *generated* image came out transparent, which is not
+    knowable from the source path. A transparent source lands as
+    THUMBNAIL_TRANSPARENCY_EXTENSION (.png) while an opaque one lands as
+    THUMBNAIL_EXTENSION (.jpg) -- the masthead logo is the former and every
+    book cover the latter. Thumbnailer.get_existing_thumbnail() accepts either,
+    so a check that demanded only the .jpg would fail the build on a logo that
+    is present and correct.
+
+    Module-level rather than a Command method so the tests can ask the same
+    question the command asks, instead of hardcoding '.290x380_q85.jpg' and
+    quietly agreeing with themselves.
+    """
+    thumbnailer = Product.static_thumbnailer(source)
+    options = thumbnailer.get_options({"size": size})
+    names = [str(thumbnailer.get_thumbnail_name(options))]
+    transparent = str(
+        thumbnailer.get_thumbnail_name(options, transparent=True))
+    if transparent not in names:
+        names.append(transparent)
+    return names
+
+
+def _cover_tree_is_wholly_absent(static_root: str) -> bool:
+    """True only when NOT ONE cover source exists under static_root.
+
+    Deliberately all-or-nothing. "The pcfweb-assets checkout was never here"
+    is a legitimate environment (CI, a fresh clone) and is distinguishable
+    from "the assets are here and one of them is broken", which is a defect
+    and must stay fatal. Anything short of total absence -- one cover missing,
+    one an LFS pointer, one stale -- returns False and the normal enforcement
+    runs over every target.
+    """
+    root = os.path.join(static_root, COVER_PREFIX.rstrip("/"))
+    if not os.path.isdir(root):
+        return True
+    # A directory containing only empty subdirectories counts as absent too:
+    # that is what a half-finished sync or a `rm` of the files leaves behind,
+    # and there is nothing there to verify either way.
+    for _dirpath, _dirnames, filenames in os.walk(root):
+        if filenames:
+            return False
+    return True
 
 
 def _cover_names(fixture_path: str) -> List[str]:
@@ -115,6 +209,18 @@ class Command(BaseCommand):
                 "it at a temporary directory to prove the check can fail. "
                 "Generation always writes through the configured storage and "
                 "ignores this."))
+        parser.add_argument(
+            "--allow-absent-asset-tree",
+            action="store_true",
+            help=(
+                "Skip the product covers -- loudly -- when the cover tree is "
+                "absent in its entirety, instead of failing. For CI, which "
+                "checks out this repository alone and so has no "
+                "pcfweb-assets. Strictly all-or-nothing: if the tree exists "
+                "at all, every cover in it is enforced exactly as without "
+                "this flag, so a missing, stale, pointer-stub or unreadable "
+                "cover still fails. Never pass it in build.sh -- that "
+                "--check is the seal on the image that actually ships."))
 
     def handle(self, *args: Any, **options: Any) -> None:
         fixture_path = options["fixture"]
@@ -126,15 +232,38 @@ class Command(BaseCommand):
         # iter_expected_thumbnails always appends TEMPLATE_THUMBNAILS, so
         # count the covers specifically -- otherwise a fixture that lost every
         # product would still look like it had work to do.
-        covers = [t for t in targets if t[0].startswith("assets/images/")]
+        covers = [t for t in targets if t[0].startswith(COVER_PREFIX)]
         if not covers:
             # See the module docstring: a silent zero here is how an image
-            # ships with no thumbnails and a passing build.
+            # ships with no thumbnails and a passing build. Checked before the
+            # skip below, so "the fixture lost its covers" stays fatal even in
+            # the environment that is allowed to have no cover files.
             raise CommandError(
                 f"no product covers found in {fixture_path}. Refusing to "
                 "report success: that would ship an image with no "
                 "pre-generated thumbnails, which is the failure this command "
                 "exists to prevent.")
+
+        if (options["allow_absent_asset_tree"]
+                and _cover_tree_is_wholly_absent(static_root)):
+            # Loud, on stderr, and it names what was not verified. A skip
+            # nobody can see in the log is indistinguishable from a pass.
+            self.stderr.write(BANNER)
+            self.stderr.write(
+                f"!! SKIPPED: {len(covers)} product cover thumbnail(s) were "
+                "NOT verified.")
+            self.stderr.write(BANNER)
+            self.stderr.write(
+                f"There is no cover tree at all under {os.path.join(static_root, COVER_PREFIX.rstrip('/'))} "
+                "-- not one file. That is expected in CI, which checks out "
+                "this repository alone and so has no sibling pcfweb-assets "
+                "checkout; run scripts/sync-local-assets.sh to get one.\n"
+                "\n"
+                "Nothing about the covers has been checked here. build.sh "
+                "runs `pregenerate_thumbnails --check` WITHOUT this flag "
+                "before it builds the image, and that is what keeps a "
+                "thumbnail-less artifact from reaching production.\n")
+            targets = [t for t in targets if not t[0].startswith(COVER_PREFIX)]
 
         failures: List[str] = []
         done = 0
@@ -168,32 +297,6 @@ class Command(BaseCommand):
                 f"Pre-generated {done} thumbnail(s) into "
                 f"{settings.STATIC_ROOT}")
 
-    def _thumbnail_names(
-            self, source: str, size: Tuple[int, int]) -> List[str]:
-        """The relative path(s) a request for this thumbnail may resolve to.
-
-        Asked of easy-thumbnails rather than formatted here, so the check
-        cannot pass while looking for a filename nothing requests. Naming is
-        pure; this touches no disk.
-
-        Two names, not one, and the pair is not decoration: the extension
-        depends on whether the *generated* image came out transparent, which is
-        not knowable from the source path. A transparent source lands as
-        THUMBNAIL_TRANSPARENCY_EXTENSION (.png) while an opaque one lands as
-        THUMBNAIL_EXTENSION (.jpg) -- the masthead logo is the former and every
-        book cover the latter. Thumbnailer.get_existing_thumbnail() accepts
-        either, so a check that demanded only the .jpg would fail the build on
-        a logo that is present and correct.
-        """
-        thumbnailer = Product.static_thumbnailer(source)
-        options = thumbnailer.get_options({"size": size})
-        names = [str(thumbnailer.get_thumbnail_name(options))]
-        transparent = str(
-            thumbnailer.get_thumbnail_name(options, transparent=True))
-        if transparent not in names:
-            names.append(transparent)
-        return names
-
     def _assert_real_image(self, path: str, description: str) -> None:
         if not os.path.isfile(path):
             raise CommandError(f"{description} is missing: {path}")
@@ -213,10 +316,10 @@ class Command(BaseCommand):
         This is the guard that looks at the artifact rather than at the code:
         the tree it reads is the one the Dockerfile COPYs into the image.
         """
-        self._assert_real_image(
-            os.path.join(static_root, source), "thumbnail source")
+        source_path = os.path.join(static_root, source)
+        self._assert_real_image(source_path, "thumbnail source")
 
-        candidates = self._thumbnail_names(source, size)
+        candidates = thumbnail_names(source, size)
         present = [
             name for name in candidates
             if os.path.isfile(os.path.join(static_root, name))
@@ -227,8 +330,21 @@ class Command(BaseCommand):
                 + " and ".join(
                     os.path.join(static_root, name) for name in candidates))
         for name in present:
-            self._assert_real_image(
-                os.path.join(static_root, name), "pre-generated thumbnail")
+            thumb_path = os.path.join(static_root, name)
+            self._assert_real_image(thumb_path, "pre-generated thumbnail")
+            # Staleness is the failure that survives every other check: the
+            # file is there, it is a real image, and it is a picture of the
+            # cover as it used to be. Same comparison Thumbnailer
+            # .thumbnail_exists() makes for local storages, so this is exactly
+            # the condition under which a pod would decide to regenerate at
+            # request time -- which is the thing that must never happen in the
+            # cluster.
+            if os.path.getmtime(source_path) > os.path.getmtime(thumb_path):
+                raise CommandError(
+                    f"pre-generated thumbnail is stale: {thumb_path} is older "
+                    f"than its source {source_path}, so every pod would "
+                    "regenerate it at request time. Re-run "
+                    "`manage.py pregenerate_thumbnails`.")
 
     def _generate(self, source: str, size: Tuple[int, int]) -> str:
         """Build one thumbnail and prove the file is really on disk."""
@@ -237,16 +353,38 @@ class Command(BaseCommand):
         self._assert_real_image(
             os.path.join(static_root, source), "thumbnail source")
 
-        thumb = Product.static_thumbnailer(source).get_thumbnail(
-            {"size": size})
+        thumbnailer = Product.static_thumbnailer(source)
 
-        # get_thumbnail() returning a URL is not proof the bytes landed: the
-        # whole bug this command addresses was a URL pointing at a file that
-        # was not where the next request would look for it. Check the file.
-        self._assert_real_image(
-            os.path.join(static_root, str(thumb.name)),
-            f"thumbnail generated as {thumb.url}")
-        return str(thumb.url)
+        # generate_thumbnail() + an explicit save, rather than get_thumbnail().
+        # See "NO DATABASE" in the module docstring: get_thumbnail() would also
+        # write easy_thumbnails cache rows, which CI has no tables for and
+        # production never reads. The bytes and the filename are identical --
+        # get_thumbnail() produces them through this same call.
+        thumb = thumbnailer.generate_thumbnail({"size": size})
+        storage = thumbnailer.thumbnail_storage
+
+        # Delete first. Django's Storage.save() does not overwrite: it picks a
+        # free name, so re-running would quietly scatter
+        # <name>_<random>.jpg files that nothing ever requests while the real
+        # one stayed stale. easy-thumbnails' own save_thumbnail() deletes for
+        # this reason too.
+        try:
+            storage.delete(thumb.name)
+        except Exception:
+            pass
+        saved_name = storage.save(thumb.name, thumb)
+        if saved_name != thumb.name:
+            raise CommandError(
+                f"storage renamed the thumbnail from {thumb.name} to "
+                f"{saved_name}; something already occupies that path and the "
+                "file the templates ask for was not written")
+
+        # A returned name is not proof the bytes landed: the whole bug this
+        # command addresses was a URL pointing at a file that was not where
+        # the next request would look for it. Check the file.
+        written = os.path.join(static_root, str(saved_name))
+        self._assert_real_image(written, f"thumbnail generated as {saved_name}")
+        return str(storage.url(saved_name))
 
 
 def iter_expected_thumbnails(
