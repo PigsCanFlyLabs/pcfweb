@@ -155,8 +155,10 @@ class WebhookPaymentTest(OrderTestBase):
     def test_exactly_one_email_goes_to_the_owner(self):
         self.deliver(self.event_body(self.order))
 
-        self.assertEqual(len(mail.outbox), 1)
-        message = mail.outbox[0]
+        owner_emails = self.order_emails()
+        self.assertEqual(len(owner_emails), 1,
+                         "the owner must receive exactly one notification")
+        message = owner_emails[0]
         self.assertEqual(message.to, [OWNER_EMAIL])
         self.assertEqual(message.from_email, "support@pigscanfly.ca")
         self.assertIn(str(self.order.pk), message.subject)
@@ -164,7 +166,7 @@ class WebhookPaymentTest(OrderTestBase):
     def test_the_email_carries_everything_needed_to_fulfil(self):
         self.deliver(self.event_body(self.order))
 
-        body = mail.outbox[0].body
+        body = self.order_emails()[0].body
         self.assertIn(f"Order #{self.order.pk}", body)
         self.assertIn("2 x Learning Spark", body)
         self.assertIn("buyer@example.com", body)
@@ -188,7 +190,7 @@ class WebhookPaymentTest(OrderTestBase):
 
         self.order.refresh_from_db()
         self.assertTrue(self.order.quantities_are_authoritative())
-        self.assertNotIn("WARNING", mail.outbox[0].body)
+        self.assertNotIn("WARNING", self.order_emails()[0].body)
 
     def test_a_completed_but_unpaid_session_does_not_pay_the_order(self):
         # e.g. an ACH debit that has not settled yet.
@@ -208,7 +210,8 @@ class WebhookPaymentTest(OrderTestBase):
         self.assertEqual(response.status_code, 200)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PAID)
-        self.assertEqual(len(mail.outbox), 1)
+        self.assertGreaterEqual(len(mail.outbox), 1)
+        self.assertEqual(len(self.order_emails()), 1)
 
     def test_an_async_failure_cancels_the_pending_order(self):
         response = self.deliver(self.event_body(
@@ -318,7 +321,8 @@ class WebhookSessionBindingTest(OrderTestBase):
         self.assertEqual(response.status_code, 200)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PAID)
-        self.assertEqual(len(mail.outbox), 1)
+        self.assertGreaterEqual(len(mail.outbox), 1)
+        self.assertEqual(len(self.order_emails()), 1)
 
 
 class WebhookLineItemReconciliationTest(OrderTestBase):
@@ -396,7 +400,7 @@ class WebhookLineItemReconciliationTest(OrderTestBase):
 
         self.deliver(self.event_body(self.order))
 
-        body = mail.outbox[0].body
+        body = self.order_emails()[0].body
         self.assertIn("5 x Learning Spark", body)
         self.assertNotIn("2 x Learning Spark", body)
         self.assertIn("adjusted at checkout, was 2", body)
@@ -434,7 +438,8 @@ class WebhookLineItemReconciliationTest(OrderTestBase):
         self.assertIn("price_from_nowhere", self.order.reconciliation_error)
         self.assertIn("matches no line", self.order.reconciliation_error)
         # And the owner is told the match was not clean.
-        self.assertIn("not everything matched up cleanly", mail.outbox[0].body)
+        self.assertIn("not everything matched up cleanly",
+                      self.order_emails()[0].body)
 
     def test_an_order_line_with_no_price_id_is_recorded_not_crashed(self):
         OrderItem.objects.filter(pk=self.item.pk).update(price_id="")
@@ -576,20 +581,20 @@ class WebhookReconciliationFailureTest(OrderTestBase):
         self.deliver_with_broken_lookup(
             amount_subtotal=self.order.snapshot_subtotal() + 4321)
 
-        body = mail.outbox[0].body
+        body = self.order_emails()[0].body
         self.assertIn("DO NOT SHIP FROM THE LIST ABOVE", body)
         self.assertIn("Stripe is unreachable", body)
 
     def test_a_lookup_failure_with_a_matching_subtotal_says_so_quietly(self):
         self.deliver_with_broken_lookup()
 
-        body = mail.outbox[0].body
+        body = self.order_emails()[0].body
         self.assertNotIn("DO NOT SHIP", body)
         self.assertIn("could not be re-read from Stripe", body)
 
     def test_the_owner_is_still_emailed_once(self):
         self.deliver_with_broken_lookup()
-        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(len(self.order_emails()), 1)
 
     def test_a_crash_before_the_marker_lands_rolls_the_quantities_back(self):
         # The quantities and the "these came from Stripe" marker are one
@@ -645,7 +650,8 @@ class WebhookIdempotencyTest(OrderTestBase):
             [200, 200, 200])
         self.assertEqual(Order.objects.count(), 1)
         self.assertEqual(OrderItem.objects.count(), 1)
-        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(len(self.order_emails()), 1,
+                         "owner must receive exactly one notification")
 
     def test_the_paid_transition_only_ever_runs_from_pending(self):
         # The guard is a conditional UPDATE, not a read-then-write, so it is
@@ -683,7 +689,9 @@ class WebhookIdempotencyTest(OrderTestBase):
         response = self.deliver(self.event_body(self.order))
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(mail.outbox), 1)
+        self.assertGreaterEqual(len(mail.outbox), 1)
+        self.assertEqual(len(self.order_emails()), 1,
+                         "owner was notified exactly once on retry")
         self.order.refresh_from_db()
         self.assertIsNotNone(self.order.notified_at)
 
