@@ -35,7 +35,7 @@ each other by `DeployManifestTest.test_the_mail_relay_in_the_manifest_matches_th
 
 | Variable | Set in | Value today |
 |---|---|---|
-| `EMAIL_HOST` | ConfigMap (deploy.yaml) | `pigscanfly.ca` |
+| `EMAIL_HOST` | ConfigMap (deploy.yaml) | `mail.pigscanfly.ca` — the MX name, never the bare apex (see DNS below) |
 | `EMAIL_PORT` | ConfigMap | `25` |
 | `EMAIL_USE_TLS` | ConfigMap | `true` (STARTTLS) |
 | `EMAIL_USE_SSL` | ConfigMap | `false` — both on refuses to boot |
@@ -51,43 +51,43 @@ rebuild is only needed if the *defaults* should change.
 
 ## The DNS this rides on
 
-The zone lives in colo-scripts at `playbooks/files/bind-zones/pigscanfly.ca.`
-(deployed to the bind hosts by `playbooks/dns-setup.yaml`; note the zone's NS
-records point at `dns1`/`dns2.stabletransit.com`, so a change that must be
-visible to the public internet has to reach whatever actually serves those —
-bump the SOA serial either way or secondaries will not pick it up).
+The zone is served by Cloudflare (`woz`/`iris.ns.cloudflare.com`). The bind
+zone files in colo-scripts (`playbooks/files/bind-zones/`) are retired
+copies — nothing deploys from them anymore, and they have drifted from the
+live records; make DNS changes in Cloudflare and treat `dig` as the source
+of truth, not that directory. Live records as queried 2026-07-28:
 
-What matters for mail:
-
-- `pigscanfly.ca. MX 200 pigscanfly.ca.` — the relay we submit to is the
-  same host that receives the domain's mail, at `71.19.157.174`.
-- SPF: `v=spf1 include:_spf.google.com include:sendgrid.net mx ip4:71.19.157.174 ~all`.
-  Submitting through `pigscanfly.ca` means the onward hop leaves from an IP
-  inside `mx`/`ip4:` — aligned. The `sendgrid.net` include covers what
-  already sends `@pigscanfly.ca` mail through SendGrid (Alertmanager, the
-  health stack) and pcfweb if it is ever pointed there.
+- `pigscanfly.ca MX 200 mail.pigscanfly.ca.`, and `mail.pigscanfly.ca` is
+  `71.19.157.174` / `2605:2700:0:3:a800:ff:fef5:4975` — the machine the
+  apex pointed at before Cloudflare.
+- The apex and `www` resolve to Cloudflare edge IPs (`104.21.x`,
+  `172.67.x`). **This is why `EMAIL_HOST` names the MX host and must never
+  be the bare domain**: Cloudflare's proxy does not carry SMTP, so
+  `pigscanfly.ca:25` reaches an edge with nothing listening and every send
+  burns its full timeout before failing.
+- SPF: `v=spf1 include:_spf.google.com mx ip4:71.19.157.174 ~all`.
+  Submitting through `mail.pigscanfly.ca` means the onward hop leaves from
+  an IP the `mx` and `ip4:` mechanisms both cover — aligned, no DNS change
+  needed for pcfweb's sending. (Note this record does *not* list SendGrid,
+  which Alertmanager and the health stack in the colo send through — their
+  `@pigscanfly.ca` mail soft-fails SPF. That is their problem, not
+  pcfweb's, but it is fixed in Cloudflare if anyone gets to it.)
 - DKIM: the only published key is the Google-era selector
-  `20160214._domainkey`. Mail relayed through `pigscanfly.ca` or SendGrid is
-  not DKIM-signed under this domain unless that relay signs it; with SPF
-  aligned and no DMARC policy published this delivers, but if a `_dmarc`
-  record is ever added, set up the signer first (for SendGrid: domain
-  authentication, which adds its `s1`/`s2._domainkey` CNAMEs).
+  `20160214._domainkey`. Mail relayed through `mail.pigscanfly.ca` is not
+  DKIM-signed under this domain unless that server signs it; with SPF
+  aligned and no DMARC policy published this delivers, but set up a signer
+  before ever adding a `_dmarc` record.
 
-## Switching to SendGrid
+## If the relay ever changes
 
-The rest of the colo already sends through it (`smtp.sendgrid.net:587`
-STARTTLS for Alertmanager, `:465` SMTPS for the health stack; the username
-is literally `apikey`). For pcfweb it is four ConfigMap values and one
-secret:
-
-1. `EMAIL_HOST: smtp.sendgrid.net`, `EMAIL_PORT: "587"`,
-   `EMAIL_USE_TLS: "true"`, `EMAIL_USE_SSL: "false"` (or 465 with the flags
-   swapped), `EMAIL_HOST_USER: apikey`.
-2. Put the API key in `pcf_email_host_password` in the colo-scripts vault
-   and re-run cluster-setup, or edit `pcfweb-secret` in place.
-3. Restart the pods. The from addresses can stay `support@pigscanfly.ca`;
-   SPF already authorizes SendGrid (above), but complete SendGrid's domain
-   authentication before relying on it for DMARC.
+The knobs are all in the ConfigMap (host, port, one of the TLS flags, user)
+plus the password in `pcfweb-secret`, so it is an edit and a pod restart.
+Two things to keep true: the new relay's network must be in the live SPF
+TXT record (in Cloudflare) before mail rides it, and the From addresses can
+stay `support@pigscanfly.ca` either way. For reference, the colo's other
+senders use SendGrid (`smtp.sendgrid.net:587` STARTTLS, username literally
+`apikey`, an API key as the password) — but pcfweb's chosen path is the
+domain's own server above.
 
 ## Checking it actually works
 
@@ -96,7 +96,16 @@ From a prod pod (`kubectl -n pcfweb exec -it deploy/web -- bash`):
     cd /opt/app && ./manage.py sendtestemail you@example.com
 
 That exercises host, port, TLS mode, credentials and timeout in one shot and
-prints the real SMTP error on failure. After a deploy, the passive signals
-are: `Order.notification_error` / `digital_delivery_error` in the admin's
-order list (empty on healthy sends), and `check_book_assets` output in the
-primary pod's startup log.
+prints the real SMTP error on failure — including a STARTTLS certificate
+mismatch, the one thing DNS cannot tell you (the server has to present a
+certificate valid for `mail.pigscanfly.ca`). After a deploy, the passive
+signals are: `Order.notification_error` / `digital_delivery_error` in the
+admin's order list (empty on healthy sends), and `check_book_assets` output
+in the primary pod's startup log.
+
+For the DNS side of the story, ask the live zone, never the retired copies
+in colo-scripts:
+
+    dig +short MX pigscanfly.ca
+    dig +short TXT pigscanfly.ca
+    dig +short A mail.pigscanfly.ca

@@ -480,7 +480,12 @@ class Prod(Base):
     # of the colo-scripts vault. The whole path, including what the domain's
     # SPF record authorizes, is written down in docs/email.md.
     EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-    EMAIL_HOST = os.getenv("EMAIL_HOST", "pigscanfly.ca")
+    # The domain's own mail server, by its MX name. NOT the bare apex: since
+    # the site moved behind Cloudflare, pigscanfly.ca resolves to Cloudflare
+    # edge IPs, and Cloudflare does not proxy SMTP -- a connection there just
+    # burns the ten-second timeout below on every send. mail.pigscanfly.ca
+    # is the machine (71.19.157.174) the apex used to point at.
+    EMAIL_HOST = os.getenv("EMAIL_HOST", "mail.pigscanfly.ca")
     EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
     # STARTTLS on a plaintext port versus TLS from the first byte (SMTPS,
     # port 465). At most one may be on; pre_setup fails the rollout on the
