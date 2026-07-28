@@ -725,6 +725,68 @@ class HomePageWithoutSeedDataTest(TestCase):
 
 
 @override_settings(THUMBNAIL_DEBUG=False)
+class ProductListingTitleLinksTest(TestCase):
+    fixtures = ["initial_products"]
+
+    CARD_LINK_PATTERN = re.compile(
+        r'<a\b[^>]*href="(?P<image_href>/product/\d+)"[^>]*>\s*'
+        r'<img[^>]*>\s*</a>\s*</div>\s*<div class="down-content">\s*<h4>\s*'
+        r'<a\b[^>]*href="(?P<title_href>/product/\d+)"[^>]*>'
+        r'(?P<title>.*?)</a>\s*</h4>',
+        re.DOTALL,
+    )
+
+    def assert_title_links_match_cover_links(self, response, expected_products):
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+        matches = list(self.CARD_LINK_PATTERN.finditer(html))
+
+        self.assertEqual(
+            len(matches), len(expected_products),
+            "each rendered product card should have a title link and a "
+            "cover link")
+
+        actual = set()
+        for match in matches:
+            image_href = match.group("image_href")
+            title_href = match.group("title_href")
+            self.assertEqual(title_href, image_href)
+            actual.add((
+                title_href,
+                html_module.unescape(match.group("title")).strip(),
+            ))
+
+        expected = {
+            (f"/product/{product.pk}", product.name)
+            for product in expected_products
+        }
+        self.assertEqual(actual, expected)
+
+    def test_all_products_listing_links_each_title_to_its_cover_destination(
+            self):
+        response = self.client.get("/products")
+        products = Product.objects.exclude(noorder=True)
+
+        self.assert_title_links_match_cover_links(response, products)
+
+    def test_books_category_listing_links_each_title_to_its_cover_destination(
+            self):
+        response = self.client.get("/products/B")
+        products = Product.objects.filter(
+            cat=Product.Categories.BOOKS).exclude(noorder=True)
+
+        self.assert_title_links_match_cover_links(response, products)
+
+    def test_books_category_query_links_each_title_to_its_cover_destination(
+            self):
+        response = self.client.get("/products", {"category": "B"})
+        products = Product.objects.filter(
+            cat=Product.Categories.BOOKS).exclude(noorder=True)
+
+        self.assert_title_links_match_cover_links(response, products)
+
+
+@override_settings(THUMBNAIL_DEBUG=False)
 class PageSmokeTest(TestCase):
     """These pages had no coverage at all; at minimum they must render."""
 
