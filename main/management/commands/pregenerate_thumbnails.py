@@ -66,6 +66,15 @@ narrowly as it can be on purpose: it fires only when the cover tree is absent
 A guard that shrugs at any missing file is a guard that passes over a tree it
 never inspected, which is the exact shape of the bug this command exists to
 kill.
+
+WHAT "PRESENT AND CORRECT" MEANS
+--------------------------------
+Existence is not the property that matters, so --check does not stop there. For
+every source and every generated thumbnail it decodes the bytes through Pillow
+(see _assert_real_image), because the failure that reaches a visitor is a file
+the browser cannot render, and a file being at the path proves nothing about
+that. Checking only os.path.isfile() would be the same bug as the missing-tree
+one in miniature: a green tick over bytes nobody looked at.
 """
 
 from __future__ import annotations
@@ -74,6 +83,7 @@ import os
 from typing import Any, Iterable, List, Set, Tuple
 
 import yaml
+from PIL import Image
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -298,6 +308,51 @@ class Command(BaseCommand):
                 f"{settings.STATIC_ROOT}")
 
     def _assert_real_image(self, path: str, description: str) -> None:
+        """Fail unless `path` holds bytes that actually decode as an image.
+
+        Existence is not the property that matters. The thing that breaks
+        production is a file a browser cannot render, and "a file is at that
+        path" does not imply that -- which is how a plain-text or truncated
+        cover used to walk straight through this guard and get sealed into the
+        image. A guard that never looks at the bytes is a guard that passes
+        over a tree it never really inspected.
+
+        The cheap structural checks come first so that their diagnosis wins.
+        Missing, empty and unmaterialised-LFS-pointer each name their own
+        specific cause and carry their own remedy; only bytes that are none of
+        those reach the decoder and get reported as unreadable. Ordering is
+        load-bearing: an LFS pointer is also undecodable, and "run git lfs
+        pull" is a far more useful thing to say than "not an image".
+
+        load() is the load-bearing call, not verify(), and the difference is
+        not academic. verify() checks structure -- magic bytes, headers, PNG
+        chunk CRCs -- but explicitly does NOT decode pixel data, so a JPEG
+        whose header is intact and whose scan data was cut off PASSES it. That
+        was measured, not assumed: a JPEG truncated to 50%, 75% and 90% passes
+        verify() at every one of those lengths and fails load() at all three
+        ("image file is truncated"). Truncation is a live risk here rather than
+        a hypothetical, because these covers arrive from a sibling
+        pcfweb-assets checkout over Git LFS: an interrupted `git lfs pull`, a
+        half-written copy or a killed rsync all leave exactly that shape. A
+        verify()-only guard would be the same class of bug as the one this
+        module exists to kill, just further in.
+
+        verify() is kept in front of it anyway, and it is worth being honest
+        that it is not catching anything load() would miss -- in testing load()
+        was a strict superset. It earns its two lines on diagnosis: for
+        structural damage it names the specific defect ("broken PNG file (bad
+        header checksum in b'IDAT')") where load() only offers "broken data
+        stream when reading image file". On a guard whose whole job is telling
+        an operator what is wrong with the artifact, that is worth paying for --
+        and it is nearly free, because verify() reads headers rather than
+        pixels: 0.4ms for the whole tree against load()'s 278ms.
+
+        Two passes rather than one because verify() consumes the underlying
+        file object and leaves the instance unusable, so load() needs a fresh
+        open(). Whole decode pass over the real tree -- 12 files, 3.5MB, the
+        covers up to 2100x2756 -- measures ~0.28s, which is why this is done
+        unconditionally rather than behind a flag.
+        """
         if not os.path.isfile(path):
             raise CommandError(f"{description} is missing: {path}")
         if os.path.getsize(path) == 0:
@@ -307,6 +362,29 @@ class Command(BaseCommand):
                 raise CommandError(
                     f"{description} is an unmaterialised Git LFS pointer: "
                     f"{path}")
+
+        try:
+            with Image.open(path) as probe:
+                probe.verify()
+        except Exception as exc:
+            raise CommandError(
+                f"{description} is not a readable image: {path} "
+                f"({type(exc).__name__}: {exc}). The file is present and is "
+                "not an LFS pointer, so something wrote non-image bytes "
+                "there.") from exc
+
+        # Fresh open: verify() above consumed the file object.
+        try:
+            with Image.open(path) as probe:
+                probe.load()
+        except Exception as exc:
+            raise CommandError(
+                f"{description} is a truncated or undecodable image: {path} "
+                f"({type(exc).__name__}: {exc}). Its header parsed but the "
+                "image data did not decode, which is what a half-finished "
+                "transfer leaves behind; re-fetch it (`git lfs pull` in the "
+                "pcfweb-assets checkout) and re-run "
+                "`manage.py pregenerate_thumbnails`.") from exc
 
     def _check(
             self, static_root: str, source: str,
@@ -320,6 +398,16 @@ class Command(BaseCommand):
         self._assert_real_image(source_path, "thumbnail source")
 
         candidates = thumbnail_names(source, size)
+        # Existence -- and only existence -- decides which of the two candidate
+        # names a request resolves to, because that is the question
+        # Thumbnailer.get_existing_thumbnail() asks. So it stays the selection
+        # predicate here. It is emphatically NOT the verification: every name it
+        # selects then goes through _assert_real_image below, which decodes it.
+        # Selecting on decodability instead would be worse than useless -- a
+        # corrupt .jpg would be quietly passed over as "not present" and
+        # reported as a missing thumbnail, or masked entirely by a healthy .png
+        # sibling, while the corrupt file stayed in the image and kept being
+        # served.
         present = [
             name for name in candidates
             if os.path.isfile(os.path.join(static_root, name))
@@ -331,6 +419,9 @@ class Command(BaseCommand):
                     os.path.join(static_root, name) for name in candidates))
         for name in present:
             thumb_path = os.path.join(static_root, name)
+            # Decodes the thumbnail, not just its existence: a corrupt
+            # thumbnail is a 'broken image' icon on the live site, and it is
+            # reachable, so every present candidate has to be readable.
             self._assert_real_image(thumb_path, "pre-generated thumbnail")
             # Staleness is the failure that survives every other check: the
             # file is there, it is a real image, and it is a picture of the

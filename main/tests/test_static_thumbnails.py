@@ -92,6 +92,42 @@ def _write_image(path: Path, size=(400, 500)) -> None:
     Image.new("RGB", size, (120, 90, 60)).save(path, "JPEG")
 
 
+def _truncate_image(path: Path, keep: float = 0.6) -> None:
+    """Cut an existing image off mid-scan, preserving its header.
+
+    The shape an interrupted `git lfs pull` or a killed copy leaves behind, and
+    the reason this module decodes with load() rather than only verify(): the
+    header still parses, so verify() passes and only a real decode notices.
+    Asserted below, so the test cannot silently stop testing that distinction.
+    """
+    data = path.read_bytes()
+    path.write_bytes(data[:int(len(data) * keep)])
+
+
+def _diagnosis(message: str) -> str:
+    """The per-file diagnosis lines of a CommandError, without the footer.
+
+    handle() appends a fixed block of generic advice that names collectstatic
+    AND Git LFS regardless of what actually went wrong, so asserting "the
+    message does not mention LFS" against the whole string always fails on that
+    footer. The distinguishing-between-causes assertions have to read the part
+    that is specific to the file.
+    """
+    return message.split("\n\nLooked under")[0]
+
+
+def _keep_thumb_newer(root: Path, source: str, size) -> None:
+    """Age the thumbnail forward past its source.
+
+    Rewriting a source bumps its mtime, which trips the staleness check -- so
+    without this a "corrupt source" test would pass for the wrong reason and
+    keep passing if the decode check were deleted.
+    """
+    thumb = root / thumbnail_names(source, size)[0]
+    newer = os.path.getmtime(root / source) + 60
+    os.utime(thumb, (newer, newer))
+
+
 def _build_static_tree(root: Path, *, covers=True, thumbs=True) -> None:
     """A synthetic STATIC_ROOT shaped like the real collected one.
 
@@ -203,8 +239,8 @@ class PregenerateCommandTest(SimpleTestCase):
         A tree holding the SOURCE images but none of the generated thumbnails
         is exactly the artifact the build used to produce, and the check must
         refuse it. Synthetic sources rather than copies of the real ones, so
-        this runs on a bare checkout too -- --check never decodes an image, it
-        asks whether a real file is at the path a request would ask for.
+        this runs on a bare checkout too; they are written by _write_image and
+        so are genuinely decodable, which --check requires.
         """
         with tempfile.TemporaryDirectory() as tmp:
             _build_static_tree(Path(tmp), thumbs=False)
@@ -231,6 +267,110 @@ class PregenerateCommandTest(SimpleTestCase):
                     stdout=StringIO(), stderr=StringIO())
 
         self.assertIn("Git LFS pointer", str(caught.exception))
+
+    def test_check_fails_on_an_undecodable_source(self):
+        """Present, non-empty, not a pointer -- and not an image.
+
+        The gap this class of check used to have: os.path.isfile() plus a size
+        plus an LFS sniff says nothing about whether the bytes are an image, so
+        a cover full of plain text was sealed into the image and served as a
+        broken picture. The thumbnail is aged forward so the staleness check
+        cannot fire and take the credit -- without that this test passes even
+        with the decode removed, for the wrong reason.
+        """
+        source = f"{COVER_PREFIX}book_covers/learning_spark_1ed.jpg"
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp))
+            (Path(tmp) / source).write_text("I am not a JPEG.\n")
+            _keep_thumb_newer(Path(tmp), source, Product.THUMB_SIZE)
+
+            with self.assertRaises(CommandError) as caught:
+                call_command(
+                    "pregenerate_thumbnails", "--check", "--static-root", tmp,
+                    stdout=StringIO(), stderr=StringIO())
+
+        message = str(caught.exception)
+        self.assertIn("thumbnail source is not a readable image", message)
+        self.assertIn("learning_spark_1ed.jpg", message)
+        # Distinguishable from the other three ways a source can be bad. Read
+        # off the diagnosis, not the generic footer -- see _diagnosis().
+        diagnosis = _diagnosis(message)
+        self.assertNotIn("is missing", diagnosis)
+        self.assertNotIn("is empty", diagnosis)
+        self.assertNotIn("is an unmaterialised Git LFS pointer", diagnosis)
+        self.assertNotIn("is stale", diagnosis)
+
+    def test_check_fails_on_an_undecodable_thumbnail(self):
+        """The generated file, not the source.
+
+        A corrupt thumbnail is what a visitor actually receives, and existence
+        was the only thing ever asked of it. Source left intact so the failure
+        can only come from the thumbnail.
+        """
+        source = f"{COVER_PREFIX}book_covers/learning_spark_1ed.jpg"
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp))
+            thumb = Path(tmp) / thumbnail_names(source, Product.THUMB_SIZE)[0]
+            self.assertTrue(thumb.is_file(), "fixture drift: no thumbnail")
+            thumb.write_text("I am not a JPEG either.\n")
+
+            with self.assertRaises(CommandError) as caught:
+                call_command(
+                    "pregenerate_thumbnails", "--check", "--static-root", tmp,
+                    stdout=StringIO(), stderr=StringIO())
+
+        message = str(caught.exception)
+        self.assertIn(
+            "pre-generated thumbnail is not a readable image", message)
+        self.assertIn(thumb.name, message)
+        self.assertNotIn("thumbnail is missing", _diagnosis(message))
+
+    def test_check_fails_on_a_truncated_source(self):
+        """Why load() and not just verify().
+
+        A JPEG cut off mid-scan keeps a valid header, so verify() passes it --
+        asserted here directly, so this test is proof of the distinction and not
+        just a second corruption case. Only a real decode catches it, and this
+        is the shape a half-finished LFS fetch leaves behind.
+        """
+        source = f"{COVER_PREFIX}book_covers/kubeflow_for_ml.jpg"
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp))
+            victim = Path(tmp) / source
+            _truncate_image(victim)
+            _keep_thumb_newer(Path(tmp), source, Product.THUMB_SIZE)
+
+            # The premise: structure still parses. If Pillow ever starts
+            # failing here, this test is no longer about truncation.
+            with Image.open(victim) as probe:
+                probe.verify()
+
+            with self.assertRaises(CommandError) as caught:
+                call_command(
+                    "pregenerate_thumbnails", "--check", "--static-root", tmp,
+                    stdout=StringIO(), stderr=StringIO())
+
+        message = str(caught.exception)
+        self.assertIn("truncated or undecodable image", message)
+        self.assertIn("kubeflow_for_ml.jpg", message)
+
+    def test_check_fails_on_a_truncated_thumbnail(self):
+        source = f"{COVER_PREFIX}book_covers/kubeflow_for_ml.jpg"
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp))
+            thumb = Path(tmp) / thumbnail_names(source, Product.THUMB_SIZE)[0]
+            _truncate_image(thumb)
+
+            with Image.open(thumb) as probe:
+                probe.verify()
+
+            with self.assertRaises(CommandError) as caught:
+                call_command(
+                    "pregenerate_thumbnails", "--check", "--static-root", tmp,
+                    stdout=StringIO(), stderr=StringIO())
+
+        self.assertIn(
+            "truncated or undecodable image", str(caught.exception))
 
     def test_empty_fixture_is_refused_rather_than_reported_as_success(self):
         """A build host with no catalogue must not ship a thumbnail-less image."""
@@ -336,6 +476,95 @@ class AbsentAssetTreeSkipTest(SimpleTestCase):
                 self._check(tmp, "--allow-absent-asset-tree")
 
         self.assertIn("Git LFS pointer", str(caught.exception))
+
+    def test_skip_does_not_mask_an_undecodable_cover_source(self):
+        """One unreadable cover is a defect; only ALL of them gone is the CI case.
+
+        The flag's help text and scripts/checks.sh both promise this exact case
+        still fails ("an unreadable cover still fails"). It did not: the tree is
+        present, so the flag correctly declines to engage, but the check it fell
+        through to never decoded anything.
+        """
+        source = f"{COVER_PREFIX}book_covers/high_performance_spark.jpg"
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp))
+            (Path(tmp) / source).write_text("plain text, not a cover\n")
+            _keep_thumb_newer(Path(tmp), source, Product.THUMB_SIZE)
+
+            with self.assertRaises(CommandError) as caught:
+                self._check(tmp, "--allow-absent-asset-tree")
+
+        message = str(caught.exception)
+        self.assertIn("thumbnail source is not a readable image", message)
+        self.assertIn("high_performance_spark", message)
+
+    def test_skip_does_not_mask_an_undecodable_thumbnail(self):
+        """Same boundary, on the generated file rather than the source."""
+        source = f"{COVER_PREFIX}book_covers/scaling_python_with_ray.jpg"
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp))
+            thumb = Path(tmp) / thumbnail_names(source, Product.THUMB_SIZE)[0]
+            thumb.write_text("plain text, not a thumbnail\n")
+
+            with self.assertRaises(CommandError) as caught:
+                self._check(tmp, "--allow-absent-asset-tree")
+
+        message = str(caught.exception)
+        self.assertIn(
+            "pre-generated thumbnail is not a readable image", message)
+        self.assertIn("scaling_python_with_ray", message)
+
+    def test_one_present_cover_keeps_every_other_cover_enforced(self):
+        """The all-or-nothing boundary at its sharpest edge.
+
+        A tree with exactly ONE cover file in it is not wholly absent, so the
+        flag must not engage and all five covers must be enforced -- including
+        the four with no file at all. This is the line between "CI has no
+        assets" and "the sync half-finished", and a flag that engaged here would
+        wave through a tree that is missing almost everything.
+        """
+        survivor = f"{COVER_PREFIX}book_covers/learning_spark_1ed.jpg"
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp), covers=False)
+            _write_image(Path(tmp) / survivor)
+
+            self.assertFalse(
+                _cover_tree_is_wholly_absent(tmp),
+                "one cover present must not read as a wholly absent tree")
+
+            with self.assertRaises(CommandError) as caught:
+                self._check(tmp, "--allow-absent-asset-tree")
+
+        message = str(caught.exception)
+        self.assertIn("thumbnail source is missing", message)
+        # The other four are still named, and the banner did not appear.
+        for name in ["high_performance_spark", "kubeflow_for_ml",
+                     "scaling_python_with_ray",
+                     "distributed_computing_4_kids"]:
+            self.assertIn(name, message)
+
+    def test_one_corrupt_cover_alone_in_the_tree_still_fails(self):
+        """Corruption cannot buy its way into the skip.
+
+        A single unreadable cover and nothing else: the file exists, so the tree
+        is not wholly absent, so the flag stays shut and the corrupt file is
+        reported. The nightmare inverse would be corruption that made a tree
+        look empty enough to skip.
+        """
+        victim = f"{COVER_PREFIX}book_covers/learning_spark_1ed.jpg"
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_static_tree(Path(tmp), covers=False)
+            (Path(tmp) / victim).parent.mkdir(parents=True, exist_ok=True)
+            (Path(tmp) / victim).write_text("not an image\n")
+
+            self.assertFalse(_cover_tree_is_wholly_absent(tmp))
+
+            with self.assertRaises(CommandError) as caught:
+                self._check(tmp, "--allow-absent-asset-tree")
+
+        message = str(caught.exception)
+        self.assertIn("not a readable image", message)
+        self.assertIn("learning_spark_1ed", message)
 
     def test_skip_does_not_mask_a_stale_thumbnail(self):
         """Present, a real image, and a picture of the old cover.
