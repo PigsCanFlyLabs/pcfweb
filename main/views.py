@@ -16,7 +16,7 @@ from django.contrib.staticfiles.storage import staticfiles_storage
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import (
     FileResponse, Http404, HttpResponse, HttpResponseBadRequest,
@@ -38,8 +38,8 @@ from main.digital import (
 from main.forms import (
     MailingListImportForm, MailingListSendForm, MailingListSignupForm)
 from main.models import (
-    Cart, CartProduct, MailingListMessage, Order, Product, SuppressedAddress,
-    send_batch_size)
+    Cart, CartProduct, EmailIdentity, MailingListMessage, Order, Product,
+    SuppressedAddress, normalize_email_identity, send_batch_size)
 from main.payments import Payments
 from main.utils import (
     generate_username, get_country_code, get_storable_client_ip)
@@ -70,6 +70,48 @@ LIBERATED_BREAD_URL = "https://www.liberatedbread.com/"
 # fixture gives all three SKUs means the worst case is a card that falls back
 # to the books listing, which is visible rather than wrong.
 FEATURED_BOOK_TITLE = "Distributed Computing 4 Kids (and Executives)"
+
+
+def _integrity_error_text(error: IntegrityError) -> str:
+    parts = [str(error)]
+    cause = getattr(error, "__cause__", None)
+    if cause is not None:
+        parts.append(str(cause))
+    return " ".join(parts)
+
+
+def _constraint_name(error: IntegrityError) -> Optional[str]:
+    cause = getattr(error, "__cause__", None)
+    diag = getattr(cause, "diag", None)
+    return getattr(diag, "constraint_name", None)
+
+
+def _is_email_identity_conflict(error: IntegrityError) -> bool:
+    if _constraint_name(error) == "unique_normalized_email":
+        return True
+    return "unique_normalized_email" in _integrity_error_text(error)
+
+
+def _is_username_conflict(error: IntegrityError) -> bool:
+    if _constraint_name(error) == "auth_user_username_key":
+        return True
+    text = _integrity_error_text(error)
+    return ("auth_user.username" in text
+            or "auth_user_username_key" in text)
+
+
+def _create_signup_user(email: str, password: str) -> User:
+    for _ in range(5):
+        username = generate_username(email)
+        try:
+            with transaction.atomic():
+                return User.objects.create_user(
+                    email=email, username=username, password=password)
+        except IntegrityError as error:
+            if _is_username_conflict(error):
+                continue
+            raise
+    raise IntegrityError("Could not allocate a unique username.")
 
 
 # Create your views here.
@@ -677,7 +719,7 @@ class SignupView(View):
         # as None and 500 on the AttributeError, and a missing password
         # reached set_password(None), which silently creates an account with
         # an unusable password that can never be logged into.
-        email = (request.POST.get('email') or '').strip()
+        email = normalize_email_identity(request.POST.get('email') or '')
         password = request.POST.get('password') or ''
         if not email or not password:
             return redirect(reverse('signup') + '?invalid=missing')
@@ -688,13 +730,23 @@ class SignupView(View):
 
         # email is not unique on auth.User, so this can legitimately match
         # more than one row; either way the address is taken.
-        if User.objects.filter(email=email).exists():
+        if User.objects.filter(email__iexact=email).exists():
             return redirect(reverse('signup') + '?in_use=true')
 
-        username = generate_username(email)
-        user = User.objects.create(email=email, username=username)
-        user.set_password(password)
-        user.save()
+        # Reserve the address first. The functional unique constraint is
+        # the arbiter when concurrent requests both pass the advisory
+        # auth.User check above; the losing transaction creates no User.
+        with transaction.atomic():
+            try:
+                identity = EmailIdentity.objects.create(
+                    normalized_email=email)
+            except IntegrityError as error:
+                if _is_email_identity_conflict(error):
+                    return redirect(reverse('signup') + '?in_use=true')
+                raise
+            user = _create_signup_user(email, password)
+            identity.user = user
+            identity.save(update_fields=["user"])
 
         # No cart is created here: get_cart() owns that, and creating one
         # unconditionally on a OneToOneField is an unprotected insert.
@@ -1266,7 +1318,7 @@ class LoginView(View):
         return render(request, 'login.html', context={'title': 'Log In', 'valid': valid})
 
     def post(self, request):
-        email = (request.POST.get('email') or '').strip()
+        email = normalize_email_identity(request.POST.get('email') or '')
         password = request.POST.get('password') or ''
         if not email or not password:
             return redirect(reverse('login') + '?valid=false')
@@ -1274,7 +1326,7 @@ class LoginView(View):
         # email is not unique on auth.User, so .get() here could raise
         # MultipleObjectsReturned and 500 the login page. Try each match
         # instead: only the one whose password checks out authenticates.
-        for candidate in User.objects.filter(email=email):
+        for candidate in User.objects.filter(email__iexact=email):
             user = authenticate(request, email=email,
                                 username=candidate.username, password=password)
             if user is not None:

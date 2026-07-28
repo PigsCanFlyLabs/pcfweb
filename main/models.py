@@ -29,6 +29,36 @@ logger = logging.getLogger(__name__)
 DEFAULT_CURRENCY = "usd"
 
 
+def normalize_email_identity(email: str) -> str:
+    """Return the canonical representation used for account identity."""
+    return email.strip().casefold()
+
+
+class EmailIdentity(models.Model):
+    """Database-enforced ownership of a normalized signup email address.
+
+    ``auth.User.email`` is not unique.  Keeping the reservation in this small
+    table lets signup establish uniqueness before it creates the User without
+    requiring a disruptive mid-project custom-user migration.
+    """
+
+    normalized_email = models.CharField(max_length=254)
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="email_identity")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                Lower("normalized_email"), name="unique_normalized_email"),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.normalized_email = normalize_email_identity(
+            self.normalized_email)
+        super().save(*args, **kwargs)
+
+
 # Create your models here.
 class Product(models.Model):
     description = models.TextField(default="No description.")
