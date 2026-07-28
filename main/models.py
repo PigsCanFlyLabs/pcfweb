@@ -12,6 +12,7 @@ from django.utils.html import format_html
 from main.digital import (
     DigitalAssetError, download_url, link_lifetime_days, open_asset)
 from main.payments import Payments
+from main.utils import admin_recipients
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from easy_thumbnails.files import get_thumbnailer
@@ -250,6 +251,14 @@ class Product(models.Model):
     # them to drift apart.
     OREILLY_SAFARI_URL = "https://www.tkqlhce.com/click-7645222-14045081"
 
+    # The button's user-visible text, named here rather than written inline in
+    # get_alt_links() below so tests can assert against the source of truth
+    # instead of a copy. It has already been renamed once -- it read "Buy on
+    # Kindle (e-book)" before the storefront naming in #36 -- and each copy of
+    # the string is somewhere the next rename can be missed while the suite
+    # still passes.
+    AMAZON_EBOOK_LABEL = "Buy on Amazon (ebook)"
+
     def get_alt_links(self, country: Optional[str] = None):
         candidates = []
         if country == "IN":
@@ -280,7 +289,7 @@ class Product(models.Model):
             # the per-title claim that the book is on Amazon, so an absent one
             # is already the fail-safe. Adding a publisher flag on top would
             # discard a correct owner-entered URL -- see AmazonEbookLinkTest.
-            ("Buy on Amazon (ebook)", self.get_kindle_link()),
+            (self.AMAZON_EBOOK_LABEL, self.get_kindle_link()),
             ("Follow along on Kickstarter", self.kickstarter),
         ]
         return [(label, url) for label, url in candidates if url]
@@ -830,12 +839,7 @@ class Order(models.Model):
         return lines
 
     def notification_recipients(self) -> List[str]:
-        recipients = []
-        for entry in getattr(settings, "ADMINS", None) or []:
-            # Django 5.2 requires 2-tuples, but be forgiving about the bare
-            # string form so a mis-set env var is not a crash in a webhook.
-            recipients.append(entry if isinstance(entry, str) else entry[1])
-        return [r for r in recipients if r]
+        return admin_recipients()
 
     # One page is plenty: a line is a distinct product, and the store sells
     # nowhere near this many different things.
