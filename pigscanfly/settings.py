@@ -344,6 +344,10 @@ class Base(Configuration):
     STRIPE_API_KEY = os.getenv("STRIPE_TEST_SECRET_KEY", "")
     STRIPE_AUTOMATIC_TAX = os.getenv("STRIPE_AUTOMATIC_TAX", "true").lower() not in {
         "0", "false", "no", "off"}
+    # How tax is presented when automatic tax is enabled.
+    # 'exclusive': unit_amount is pre-tax; tax is added on top at checkout.
+    # 'inclusive': unit_amount includes tax; tax is remitted from that amount.
+    STRIPE_TAX_BEHAVIOR = os.getenv("STRIPE_TAX_BEHAVIOR", "exclusive")
 
     # Signing secret for the /stripe/webhook endpoint, from the Stripe
     # Dashboard (Developers -> Webhooks -> the endpoint -> signing secret).

@@ -1,11 +1,13 @@
 import logging
+from typing import Literal, Optional
 
 import stripe
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.urls import reverse
-from typing import Literal, Optional
 
 logger = logging.getLogger(__name__)
+TaxBehavior = Literal["exclusive", "inclusive", "unspecified"]
 
 COUPON_ERROR_CODES = {
     "coupon_expired",
@@ -26,6 +28,19 @@ SHIPPING_RATE_ERROR = (
     "live key (and vice versa). Check STRIPE_SHIPPING_RATES against the "
     "Stripe Dashboard for the key this deployment is using."
 )
+
+
+def stripe_tax_behavior() -> TaxBehavior:
+    value = str(getattr(settings, "STRIPE_TAX_BEHAVIOR", "exclusive"))
+    if value == "exclusive":
+        return "exclusive"
+    if value == "inclusive":
+        return "inclusive"
+    if value == "unspecified":
+        return "unspecified"
+    raise ImproperlyConfigured(
+        "STRIPE_TAX_BEHAVIOR must be 'exclusive', 'inclusive', or "
+        "'unspecified'.")
 
 
 class Payments:
@@ -72,16 +87,42 @@ class Payments:
         second line item in the same session, a quantity above one, an
         adjustable_quantity, a discount, and subscription mode.
         """
-        product_price = None
+        # When automatic tax is enabled, Stripe requires prices to have
+        # tax_behavior set. See STRIPE_TAX_BEHAVIOR in settings.py for the
+        # business decision on exclusive vs. inclusive tax display.
+        automatic_tax_enabled = bool(getattr(settings, "STRIPE_AUTOMATIC_TAX", True))
+        tax_behavior = stripe_tax_behavior()
+
         if interval is None:
-            product_price = stripe.Price.create(
-                unit_amount=price, currency=currency, product=product_id
-            )
+            if automatic_tax_enabled:
+                product_price = stripe.Price.create(
+                    unit_amount=price,
+                    currency=currency,
+                    product=product_id,
+                    tax_behavior=tax_behavior,
+                )
+            else:
+                product_price = stripe.Price.create(
+                    unit_amount=price,
+                    currency=currency,
+                    product=product_id,
+                )
         else:
-            product_price = stripe.Price.create(
-                unit_amount=price, currency=currency, product=product_id,
-                recurring = {"interval": interval}
-            )
+            if automatic_tax_enabled:
+                product_price = stripe.Price.create(
+                    unit_amount=price,
+                    currency=currency,
+                    product=product_id,
+                    recurring={"interval": interval},
+                    tax_behavior=tax_behavior,
+                )
+            else:
+                product_price = stripe.Price.create(
+                    unit_amount=price,
+                    currency=currency,
+                    product=product_id,
+                    recurring={"interval": interval},
+                )
         return product_price['id']
 
     # Seconds. The SDK's default is ~80, far longer than Stripe's own webhook
@@ -181,7 +222,7 @@ class Payments:
                 "Checkout extras must not override tax settings: "
                 f"{', '.join(sorted(shadowed_keys))}")
 
-        automatic_tax_enabled = settings.STRIPE_AUTOMATIC_TAX
+        automatic_tax_enabled = bool(getattr(settings, "STRIPE_AUTOMATIC_TAX", True))
         if not automatic_tax_enabled:
             logger.warning(
                 "Stripe automatic tax is disabled by STRIPE_AUTOMATIC_TAX; "
@@ -260,7 +301,17 @@ class Payments:
 
     @staticmethod
     def _is_tax_configuration_error(error: stripe.InvalidRequestError) -> bool:
-        return error.param == "automatic_tax" or error.code == "stripe_tax_inactive"
+        # Stripe Tax not activated (stable error.code from Stripe).
+        if error.param == "automatic_tax" or error.code == "stripe_tax_inactive":
+            return True
+        # Price missing tax_behavior (required when automatic_tax is enabled).
+        # Stripe provides no stable error.code for this case, so this branch
+        # matches the message. It only changes diagnostic logging and re-raises;
+        # it never retries with tax disabled.
+        message = str(error).lower()
+        if "tax" in message and "behavior" in message:
+            return True
+        return False
 
     @staticmethod
     def _is_shipping_rate_error(error: stripe.InvalidRequestError) -> bool:

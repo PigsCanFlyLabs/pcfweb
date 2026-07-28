@@ -164,6 +164,62 @@ class CheckoutTaxTest(TestCase):
         self.assertNotIn("automatic_tax", params)
         self.assertIn("STRIPE_AUTOMATIC_TAX", "\n".join(logs.output))
 
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_missing_tax_behavior_error_is_detected_and_reported(self, create_session):
+        """Regression test for production bug: prices without tax_behavior.
+
+        When STRIPE_AUTOMATIC_TAX is enabled, Stripe requires prices to have
+        tax_behavior set. Prices created without it trigger a checkout error
+        that says the price "does not have a tax behavior set". This should be
+        caught as a tax configuration error and given a helpful message.
+        """
+        create_session.side_effect = stripe.InvalidRequestError(
+            "The price `price_123` does not have a tax behavior set, which is "
+            "required for automatic tax computation.",
+            None,
+        )
+
+        with mock.patch("main.payments.logger.error") as log_error:
+            with self.assertRaises(stripe.InvalidRequestError) as error:
+                self._checkout()
+
+        # The error should be detected as a tax configuration issue
+        self.assertIn("tax", str(error.exception).lower())
+        log_error.assert_called_once()
+        # The logged message should help diagnose the problem
+        self.assertIn("tax", log_error.call_args.args[0].lower())
+        # Should not retry (not a coupon error)
+        create_session.assert_called_once()
+
+    @mock.patch("main.payments.stripe.Price.create")
+    def test_create_price_adds_tax_behavior_when_automatic_tax_enabled(self, create_price):
+        """Prices minted with automatic_tax enabled must have tax_behavior."""
+        from django.conf import settings
+        create_price.return_value = {"id": "price_test123"}
+
+        price_id = Payments.create_price("prod_test", 1000)
+
+        self.assertEqual(price_id, "price_test123")
+        create_price.assert_called_once()
+        params = create_price.call_args.kwargs
+        self.assertEqual(params["tax_behavior"], settings.STRIPE_TAX_BEHAVIOR)
+        self.assertEqual(params["unit_amount"], 1000)
+        self.assertEqual(params["product"], "prod_test")
+
+    @override_settings(STRIPE_AUTOMATIC_TAX=False)
+    @mock.patch("main.payments.stripe.Price.create")
+    def test_create_price_omits_tax_behavior_when_automatic_tax_disabled(self, create_price):
+        """When automatic tax is off, tax_behavior is optional."""
+        create_price.return_value = {"id": "price_test456"}
+
+        price_id = Payments.create_price("prod_test", 1000)
+
+        self.assertEqual(price_id, "price_test456")
+        create_price.assert_called_once()
+        params = create_price.call_args.kwargs
+        self.assertNotIn("tax_behavior", params)
+        self.assertEqual(params["unit_amount"], 1000)
+
 
 class BackfillStripeProductTaxCodesTest(TestCase):
     def _product(

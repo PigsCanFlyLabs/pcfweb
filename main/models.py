@@ -881,24 +881,35 @@ class CartProduct(models.Model):
     def refresh_pwyw_price(self) -> None:
         """Re-mint this line's Price from the amount this row holds, now.
 
-        Called once per line at session-creation time. Two jobs:
+        Called once per line at session-creation time. Three jobs:
 
-        It is the point where the billed amount is taken from the database
-        rather than from anything the customer sent. Whatever was posted to
-        /checkout, the Price handed to Stripe is minted here, from
-        chosen_amount as stored, so a tampered amount cannot undercut the row.
+        1. It is the point where the billed amount is taken from the database
+           rather than from anything the customer sent. Whatever was posted to
+           /checkout, the Price handed to Stripe is minted here, from
+           chosen_amount as stored, so a tampered amount cannot undercut the row.
 
-        It also retires the Prices that pay-what-you-want lines carried before
-        this change. Those were minted with custom_unit_amount, which Stripe
-        refuses to put in a session alongside a second line item, a quantity
-        above one, an adjustable_quantity or a discount -- exactly the four
-        things this change is here to allow. A cart that was filled before the
-        deploy would otherwise fail at checkout.
+        2. It retires the Prices that pay-what-you-want lines carried before
+           this change. Those were minted with custom_unit_amount, which Stripe
+           refuses to put in a session alongside a second line item, a quantity
+           above one, an adjustable_quantity or a discount -- exactly the four
+           things this change is here to allow. A cart that was filled before
+           the deploy would otherwise fail at checkout.
+
+        3. It retires Prices minted without tax_behavior. Stripe Price tax
+           behavior is immutable, so non-PWYW cart rows added before the fix
+           keep failing under automatic tax unless checkout mints a replacement.
         """
-        if not self.product.is_pwyw:
+        from django.conf import settings
+
+        if self.product.is_pwyw:
+            self.price_id = self.generate_price_id()
+            self.save(update_fields=["price_id"])
             return
-        self.price_id = self.generate_price_id()
-        self.save(update_fields=["price_id"])
+
+        automatic_tax_enabled = bool(getattr(settings, "STRIPE_AUTOMATIC_TAX", True))
+        if automatic_tax_enabled:
+            self.price_id = self.generate_price_id()
+            self.save(update_fields=["price_id"])
 
     def save(self, *args, **kwargs):
         if not self.price_id:
