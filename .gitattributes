@@ -1,0 +1,19 @@
+# The vendored site theme -- its CSS and JS, and the five templates built
+# directly on it -- arrived with CRLF endings in the original import and has
+# kept them since. Git counts the CR as trailing whitespace, so every line
+# added to one of these files is reported by `git diff --check` even when the
+# line is clean. That noise is what made real trailing whitespace unfindable
+# in review.
+#
+# cr-at-eol says the CR is part of the line terminator here, which is the
+# truth about these files. It does not weaken the check: a space or a tab
+# before the CR is still reported. Nothing else is declared, so no file is
+# renormalized or rewritten on checkout -- the endings stay exactly as they
+# are on disk today.
+main/static/assets/css/*.css whitespace=cr-at-eol
+main/static/assets/js/*.js   whitespace=cr-at-eol
+main/templates/about.html          whitespace=cr-at-eol
+main/templates/contact.html        whitespace=cr-at-eol
+main/templates/index.html          whitespace=cr-at-eol
+main/templates/products.html       whitespace=cr-at-eol
+main/templates/single-product.html whitespace=cr-at-eol
