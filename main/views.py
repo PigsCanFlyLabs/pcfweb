@@ -612,13 +612,6 @@ class BaseCartView():
     # decision.
     MAX_QUANTITY = 9223372036854775807
 
-    # Session key holding the names of pay-what-you-want products whose
-    # amount was changed by a cart merge. Set by _merge_cart, and consumed by
-    # whichever of the cart or checkout the buyer reaches first -- the cart
-    # shows it and carries on, checkout shows it and refuses to bill until
-    # they have looked.
-    PWYW_MERGE_NOTICE_KEY = "pwyw_merge_repriced"
-
     @staticmethod
     def _merge_notice(names) -> str:
         listed = ", ".join(names)
@@ -711,6 +704,10 @@ class BaseCartView():
             # suggestion still stands, and there is nothing to report.
             return False
         existing.chosen_amount = incoming.chosen_amount
+        # The hold, recorded on the row whose price just moved. The caller
+        # saves this row either way, so it is persisted with the new amount
+        # in the same statement.
+        existing.pwyw_amount_merged = True
         # A Stripe Price is immutable and this row's was minted for the old
         # amount, so it has to go. refresh_pwyw_price() would re-mint at
         # checkout regardless; clearing it here keeps price_id and
@@ -756,6 +753,9 @@ class BaseCartView():
                     cart=user_cart, product=cart_product.product).first()
                 if existing is not None:
                     if self._reconcile_pwyw_amount(existing, cart_product):
+                        # For the log line only. The hold itself is on the
+                        # row, set by _reconcile_pwyw_amount and saved
+                        # below with the amount that caused it.
                         repriced.append(existing.product.name)
                     try:
                         existing.quantity = self.quantity_sum(
@@ -784,10 +784,9 @@ class BaseCartView():
         # back, the session still points at an intact cart.
         del request.session["cart_id"]
         if repriced:
-            # Same reason, same timing: only record this once the reprice it
-            # describes is actually in the database. CheckoutView reads it and
-            # will not bill until the buyer has seen the combined cart.
-            request.session[self.PWYW_MERGE_NOTICE_KEY] = repriced
+            logger.info(
+                "Merge repriced %s on cart %s; holding checkout until the "
+                "cart has been shown.", ", ".join(repriced), user_cart.pk)
 
 class SignupView(View):
     def get(self, request):
@@ -851,9 +850,9 @@ class CartView(View, BaseCartView):
         cart = self.get_cart(request)
         # This view is the only thing that may clear the merge hold, because
         # it is the only thing that shows the buyer the merged basket. Read it
-        # here; it is deleted at the bottom, after the page has actually
-        # rendered.
-        repriced = request.session.get(self.PWYW_MERGE_NOTICE_KEY)
+        # off the cart here; it is cleared at the bottom, once the page has
+        # actually rendered into a body they will receive.
+        repriced = cart.pwyw_merge_notice_names()
         if repriced:
             messages.warning(request, self._merge_notice(repriced))
         cart_products = cart.products.select_related("product")
@@ -883,14 +882,23 @@ class CartView(View, BaseCartView):
             'has_pwyw': has_pwyw,
             'has_unavailable': has_unavailable,
         })
-        if repriced:
-            # Cleared here and nowhere else, and only now: render() has
-            # returned, so the merged basket and its notice are in the body
-            # that is about to go back to the buyer. Anything above that
-            # raised, or ever returns a redirect instead of this page, leaves
-            # the key in place and the hold stands -- which is the point. A
-            # buyer who is bounced away from the cart has not seen it.
-            del request.session[self.PWYW_MERGE_NOTICE_KEY]
+        # Cleared here and nowhere else, and only for a request that is
+        # actually being sent the basket:
+        #
+        #   HEAD  -- Django dispatches it to this same get(), and the body is
+        #            stripped before it reaches the client. A bodiless
+        #            response has by definition shown the buyer nothing, so it
+        #            must not count as having seen anything.
+        #   non-200 -- likewise nothing to look at.
+        #   an exception above -- render() is eager, so it raises here and
+        #            never reaches this line; the hold stands.
+        #
+        # That is also the answer to whether a /cart GET that redirects away
+        # should clear it: no, and this shape means it cannot, rather than
+        # relying on nobody adding such a branch later.
+        if (repriced and request.method == "GET"
+                and response.status_code == 200):
+            cart.clear_pwyw_merge_notice()
         return response
 
 
@@ -1020,16 +1028,15 @@ class CheckoutView(View, BaseCartView):
         # rounded figure before charging it, and a merge that silently swaps
         # the amount the buyer was just looking at breaks it by another route.
         #
-        # Read, never removed. Clearing it here made the hold one-shot on the
-        # *attempt to skip it*: a second POST, or a second tab on the same
-        # session, found the key already gone and went straight to Stripe with
-        # the repriced basket still unseen -- the exact thing the hold exists
-        # to stop. CartView owns the clear, because CartView is what shows the
-        # buyer the basket. No number of retries gets past this until it has.
+        # Read off the cart, and never cleared here. CartView owns the clear,
+        # because CartView is what shows the buyer the basket, and the hold
+        # itself is a column on the repriced row rather than a session key --
+        # so logging out, logging back in, opening a second tab or issuing a
+        # bodiless request cannot separate it from the cart it describes.
         #
         # Not strandable: this redirect goes to the page that clears it, so
         # the ordinary browser flow resolves in one hop.
-        repriced = request.session.get(self.PWYW_MERGE_NOTICE_KEY)
+        repriced = cart.pwyw_merge_notice_names()
         if repriced:
             logger.info(
                 "Held checkout for cart %s: merge repriced %s.",

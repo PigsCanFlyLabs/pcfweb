@@ -6,6 +6,7 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.mail import EmailMessage, send_mail
 from django.db import IntegrityError, models, transaction
+from django.db.models import Q
 from django.db.models.functions import Coalesce, Lower, NullIf
 from django.templatetags.static import static
 from django.urls import reverse
@@ -742,6 +743,30 @@ class Cart(models.Model):
     products: "models.ManyToManyField[CartProduct, Any]" = models.ManyToManyField(
         'CartProduct', related_name='cart_products')
 
+    def pwyw_merge_notice_rows(self) -> "models.QuerySet":
+        """Lines a merge repriced that the buyer has not been shown yet.
+
+        Union of the FK and the M2M, for the same reason _merge_cart takes
+        one: a row can be attached by either, and a hold that missed half the
+        rows would be a hold that could be walked around.
+        """
+        return CartProduct.objects.filter(
+            Q(cart=self) | Q(cart_products=self),
+            pwyw_amount_merged=True).distinct().select_related("product")
+
+    def pwyw_merge_notice_names(self) -> List[str]:
+        """Names of those lines, read live off the products themselves."""
+        return [row.product.name for row in self.pwyw_merge_notice_rows()]
+
+    def clear_pwyw_merge_notice(self) -> None:
+        """Drop the hold. Only ever called once the cart has been rendered."""
+        pks = list(self.pwyw_merge_notice_rows().values_list("pk", flat=True))
+        if pks:
+            # By pk rather than by the union filter above: UPDATE with a join
+            # is not portable, and the pks are already in hand.
+            CartProduct.objects.filter(pk__in=pks).update(
+                pwyw_amount_merged=False)
+
     def clear(self):
         """Empty the cart.
 
@@ -782,6 +807,17 @@ class CartProduct(models.Model):
     # parse_pwyw_amount() returned, and checkout reads the amount back off
     # this row rather than off anything the customer sends it.
     chosen_amount = models.IntegerField(null=True, blank=True)
+    # Set when a cart merge replaced this line's chosen amount, and cleared
+    # only once the buyer has actually been served the rendered cart.
+    #
+    # It lives here, on the row, rather than in the session, because that is
+    # where the fact lives: this line's price changed and the person paying
+    # for it has not seen the new one. A session is transient -- logout()
+    # flushes it, login() rotates its key, and a bodiless request can be made
+    # to touch it -- so a session-backed hold could be separated from the cart
+    # it describes, and every bypass found in review was some route to doing
+    # exactly that. The cart is persistent; so is this.
+    pwyw_amount_merged = models.BooleanField(default=False, db_default=False)
 
     class Meta:
         # Without this, two concurrent adds of the same product race into two

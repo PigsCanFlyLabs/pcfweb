@@ -1416,6 +1416,143 @@ class PwywMergeIsNotBilledUnseenTest(CartTestBase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(create.call_count, 1)
 
+    def test_a_head_request_to_the_cart_does_not_clear_the_hold(self):
+        # Django dispatches HEAD to the same get(), and the body is stripped
+        # before it reaches the client. Nothing was shown, so nothing may be
+        # counted as seen.
+        self._sign_in_over_a_saved_basket(500, "50.00")
+
+        head = self.client.head("/cart")
+
+        self.assertEqual(head.status_code, 200)
+        self.assertEqual(len(head.content), 0)
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            response = self.client.post("/checkout")
+        self.assertEqual(response["Location"], "/cart")
+        self.assertEqual(create.call_count, 0)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_a_head_request_leaves_a_later_real_render_able_to_clear_it(self):
+        # CONTROL -- passes on 9bfb38b too, for the opposite reason
+        # (there the HEAD itself cleared the hold). Kept because
+        # refusing to clear on HEAD is exactly the change that could
+        # stranded a buyer, and this is what says it does not.
+        self._sign_in_over_a_saved_basket(500, "50.00")
+        self.client.head("/cart")
+
+        self.client.get("/cart")
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/s", id="cs_after_head")
+            response = self.client.post("/checkout")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(create.call_count, 1)
+
+    def test_an_options_request_does_not_clear_the_hold(self):
+        # CONTROL -- passes on 9bfb38b too, because Django answers
+        # OPTIONS from View.options without ever reaching get(). Pinned
+        # so that stays true rather than because it changed.
+        self._sign_in_over_a_saved_basket(500, "50.00")
+
+        self.client.options("/cart")
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            response = self.client.post("/checkout")
+        self.assertEqual(response["Location"], "/cart")
+        self.assertEqual(create.call_count, 0)
+
+    def test_logging_out_and_back_in_does_not_drop_the_hold(self):
+        # logout() flushes the session and login() rotates its key, but the
+        # cart is persistent and so is the hold now.
+        user = self._sign_in_over_a_saved_basket(500, "50.00")
+        self.client.post("/checkout")
+
+        self.client.logout()
+        self.client.force_login(user)
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            response = self.client.post("/checkout")
+        self.assertEqual(response["Location"], "/cart")
+        self.assertEqual(create.call_count, 0)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_a_flushed_session_does_not_drop_the_hold(self):
+        # The same thing without the login round trip: whatever clears the
+        # session, the hold is not in it. The POST is what makes the merge
+        # happen -- get_cart() runs per request, not on force_login.
+        user = self._sign_in_over_a_saved_basket(500, "50.00")
+        self.client.post("/checkout")
+        self.client.session.flush()
+        self.client.force_login(user)
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            response = self.client.post("/checkout")
+        self.assertEqual(response["Location"], "/cart")
+        self.assertEqual(create.call_count, 0)
+
+    def test_a_wholly_fresh_client_for_the_same_user_is_still_held(self):
+        # A different browser entirely -- no shared cookie, a session of its
+        # own. The cart is the user's, so the hold travels with it. The POST
+        # first is what performs the merge that sets the hold.
+        user = self._sign_in_over_a_saved_basket(500, "50.00")
+        self.client.post("/checkout")
+        other = Client()
+        other.force_login(user)
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            response = other.post("/checkout")
+        self.assertEqual(response["Location"], "/cart")
+        self.assertEqual(create.call_count, 0)
+
+    def test_a_second_merge_while_a_hold_is_pending_stays_held(self):
+        # CONTROL -- passes on 9bfb38b too. Pinned because moving the
+        # hold onto the row is what could have made a second merge
+        # overwrite the first one's flag instead of adding to it.
+        user = self._sign_in_over_a_saved_basket(500, "50.00")
+        self.client.post("/checkout")
+        # Sign out, build another anonymous basket at a third amount, sign in
+        # again: a second merge on top of an unseen one.
+        self.client.logout()
+        self.client.post(
+            f"/add-to-cart/{EBOOK_PK}/1", {"chosen_amount": "7.00"})
+        self.client.force_login(user)
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            response = self.client.post("/checkout")
+
+        self.assertEqual(response["Location"], "/cart")
+        self.assertEqual(create.call_count, 0)
+        self.assertEqual(
+            CartProduct.objects.get(
+                cart__user=user, product_id=EBOOK_PK).chosen_amount, 700)
+
+    def test_a_render_that_raises_leaves_the_hold_in_place(self):
+        # render() is eager, so a template failure raises before the clear can
+        # run. Nothing was sent, so nothing was seen.
+        self._sign_in_over_a_saved_basket(500, "50.00")
+
+        with mock.patch("main.views.render",
+                        side_effect=RuntimeError("template exploded")):
+            with self.assertRaises(RuntimeError):
+                self.client.get("/cart")
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            response = self.client.post("/checkout")
+        self.assertEqual(response["Location"], "/cart")
+        self.assertEqual(create.call_count, 0)
+
+    def test_the_hold_is_stored_on_the_repriced_row(self):
+        # The design claim itself: the hold is cart state, not session state.
+        user = self._sign_in_over_a_saved_basket(500, "50.00")
+        self.client.get("/cart")
+
+        row = CartProduct.objects.get(cart__user=user, product_id=EBOOK_PK)
+
+        self.assertFalse(row.pwyw_amount_merged)
+        self.assertNotIn("pwyw_merge_repriced", self.client.session.keys())
+
     def test_the_notice_is_shown_once_not_on_every_cart_load(self):
         # CONTROL -- passes on e4ce4c3 too. Guards the other direction
         # from the bug: the fix must not make the hold sticky, or every
