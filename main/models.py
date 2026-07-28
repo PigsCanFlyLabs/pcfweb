@@ -368,6 +368,10 @@ class Product(models.Model):
         return not self.noorder and not self.is_out_of_stock()
 
     SIGNED_ON_REQUEST_NOTE = "All of Holden's books are available signed on request"
+    DIGITAL_DELIVERY_NOTE = (
+        "Delivered by email as a DRM-free ZIP containing both the EPUB and "
+        "the PDF."
+    )
 
     def get_display_text(self):
         """Product copy for the HTML product page, as escaped markup.
@@ -381,6 +385,9 @@ class Product(models.Model):
         if self.print_isbn:
             return format_html(
                 "{}<p>{}</p>", formatted, self.SIGNED_ON_REQUEST_NOTE)
+        if self.is_digitally_fulfilled():
+            return format_html(
+                "{}<p>{}</p>", formatted, self.DIGITAL_DELIVERY_NOTE)
         return format_html("{}", formatted)
 
     def get_feed_description(self) -> str:
@@ -391,6 +398,8 @@ class Product(models.Model):
         """
         if self.print_isbn:
             return f"{self.description}\n\n{self.SIGNED_ON_REQUEST_NOTE}"
+        if self.is_digitally_fulfilled():
+            return f"{self.description}\n\n{self.DIGITAL_DELIVERY_NOTE}"
         return self.description
 
     def get_feed_price(self) -> str:

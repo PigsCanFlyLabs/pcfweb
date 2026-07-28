@@ -250,7 +250,13 @@ class ProductCopyEscapingTest(TestCase):
 
     def test_ebook_isbn_does_not_offer_a_signed_copy(self):
         print_product = self.make_product("Print.", print_isbn="9781449358624")
-        ebook_product = self.make_product("PDF.", ebook_isbn="9781449358624")
+        ebook_product = self.make_product(
+            "PDF.",
+            ebook_isbn="9781449358624",
+            delivery_type=Product.DeliveryTypes.DIGITAL,
+            sells_ebook=True,
+            digital_asset_name="pdf_book",
+        )
 
         print_rendered = str(print_product.get_display_text())
         ebook_rendered = str(ebook_product.get_display_text())
@@ -260,10 +266,17 @@ class ProductCopyEscapingTest(TestCase):
         self.assertIn("signed on request", print_rendered)
         self.assertIn("PDF.", ebook_rendered)
         self.assertNotIn("signed on request", ebook_rendered)
+        self.assertIn(Product.DIGITAL_DELIVERY_NOTE, ebook_rendered)
 
     def test_feed_signed_note_is_keyed_to_print_isbn(self):
         print_product = self.make_product("Print.", print_isbn="9781449358624")
-        ebook_product = self.make_product("PDF.", ebook_isbn="9781449358624")
+        ebook_product = self.make_product(
+            "PDF.",
+            ebook_isbn="9781449358624",
+            delivery_type=Product.DeliveryTypes.DIGITAL,
+            sells_ebook=True,
+            digital_asset_name="pdf_book",
+        )
 
         print_description = print_product.get_feed_description()
         ebook_description = ebook_product.get_feed_description()
@@ -272,6 +285,7 @@ class ProductCopyEscapingTest(TestCase):
         self.assertIn(Product.SIGNED_ON_REQUEST_NOTE, print_description)
         self.assertIn("PDF.", ebook_description)
         self.assertNotIn(Product.SIGNED_ON_REQUEST_NOTE, ebook_description)
+        self.assertIn(Product.DIGITAL_DELIVERY_NOTE, ebook_description)
 
     def test_gtin_prefers_offer_format_identifier(self):
         print_product = Product(
