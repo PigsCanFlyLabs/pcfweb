@@ -6,6 +6,8 @@ import stripe
 from django.contrib.auth.models import User
 from django.core import mail
 from django.db import IntegrityError, transaction
+from django.template.loader import render_to_string
+from django.test import RequestFactory
 
 from main.models import Cart, CartProduct, Order, OrderItem, Product
 from main.tests.base import OrderTestBase
@@ -111,7 +113,10 @@ class CheckoutCreatesOrderTest(OrderTestBase):
         create.assert_not_called()
         self.assertFalse(Order.objects.exists())
 
-    def test_a_pwyw_mixed_cart_is_blocked_before_order_creation(self):
+    def test_a_pwyw_mixed_cart_becomes_one_order_with_two_lines(self):
+        # Was refused before an order could be created, because Stripe allows
+        # only one line item beside a custom_unit_amount price. It is an
+        # ordinary fixed price now, so the bundle is a single checkout.
         self.client.get("/cart")
         cart = Cart.objects.get(cart_id=self.client.session["cart_id"])
         fixed = CartProduct.objects.create(
@@ -120,48 +125,67 @@ class CheckoutCreatesOrderTest(OrderTestBase):
             cart=cart, product=Product.objects.get(pk=106), quantity=1)
         cart.products.add(fixed, pwyw)
         with mock.patch("main.payments.stripe.checkout.Session.create") as create:
-            response = self.client.post("/checkout", follow=True)
+            create.return_value = mock.Mock(
+                url="https://checkout.stripe.com/c/pay/cs_bundle",
+                id="cs_bundle")
+            response = self.client.post("/checkout")
 
-        self.assertRedirects(response, "/cart")
-        create.assert_not_called()
-        self.assertFalse(Order.objects.exists())
-        self.assertContains(response, "only line in its checkout")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(len(create.call_args.kwargs["line_items"]), 2)
+        order = Order.objects.get(stripe_session_id="cs_bundle")
+        self.assertEqual(order.items.count(), 2)
 
-    def test_a_pwyw_coupon_warns_and_checkout_still_proceeds(self):
+    def test_a_pwyw_coupon_reaches_stripe_instead_of_being_stripped(self):
+        # Was: the coupon was dropped and the buyer told why, because Stripe
+        # refuses discounts on a custom_unit_amount price. Verified against
+        # the live test API that a fixed price accepts one.
         self.client.post("/add-to-cart/106/1")
         with mock.patch("main.payments.stripe.checkout.Session.create") as create:
             create.return_value = mock.Mock(
-                url="https://checkout.stripe.com/c/pay/cs_couponless",
-                id="cs_couponless")
+                url="https://checkout.stripe.com/c/pay/cs_coupon",
+                id="cs_coupon")
             response = self.client.post("/checkout", {"coupon": "coupon_sale"})
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response["Location"],
-            "https://checkout.stripe.com/c/pay/cs_couponless")
-        order = Order.objects.get(stripe_session_id="cs_couponless")
+        params = create.call_args.kwargs
+        self.assertEqual(params["discounts"], [{"coupon": "coupon_sale"}])
+        order = Order.objects.get(stripe_session_id="cs_coupon")
         success = self.client.get(
             f"/checkout/success?session_id={order.stripe_session_id}")
-        self.assertContains(
+        self.assertNotContains(
             success,
             "code was removed and checkout will continue without it")
-        self.assertEqual(order.status, Order.Status.PENDING)
-        params = create.call_args.kwargs
-        self.assertNotIn("discounts", params)
 
-    def test_the_coupon_warning_is_visible_on_the_cancel_page_too(self):
-        self.client.post("/add-to-cart/106/1")
-        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
-            create.return_value = mock.Mock(
-                url="https://checkout.stripe.com/c/pay/cs_couponless",
-                id="cs_couponless")
-            self.client.post("/checkout", {"coupon": "coupon_sale"})
+    def test_the_checkout_pages_still_render_a_queued_message(self):
+        """A message queued before the redirect to Stripe is shown on return.
 
-        response = self.client.get("/checkout/cancel")
+        The pay-what-you-want coupon warning was the only thing that queued a
+        message during checkout, so removing it would otherwise take the
+        rendering added for it out of the suite along with it. The rendering
+        is still wanted, so it is asserted against the templates directly
+        rather than through the path that no longer produces one.
+        """
+        notice = "Something worth saying at checkout."
+        request = RequestFactory().get("/checkout/cancel")
 
-        self.assertContains(
-            response,
-            "code was removed and checkout will continue without it")
+        for template in ("checkout_cancel.html", "checkout_success.html"):
+            with self.subTest(template=template):
+                html = render_to_string(
+                    template, {"messages": [notice]}, request=request)
+
+                self.assertIn(notice, html)
+                self.assertIn('class="alert alert-warning"', html)
+
+    def test_the_checkout_pages_render_nothing_when_there_is_no_message(self):
+        # Control: the alert block is conditional, not always on.
+        request = RequestFactory().get("/checkout/cancel")
+
+        for template in ("checkout_cancel.html", "checkout_success.html"):
+            with self.subTest(template=template):
+                html = render_to_string(
+                    template, {"messages": []}, request=request)
+
+                self.assertNotIn('class="alert alert-warning"', html)
 
     def test_a_failed_stripe_checkout_does_not_leave_a_pending_order(self):
         # No session was created, so nothing will ever arrive for this order

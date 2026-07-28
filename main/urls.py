@@ -24,6 +24,8 @@ urlpatterns = [
          views.AddToCartView.as_view(), name='add-to-cart'),
     path('remove-from-cart/<int:cart_product_id>',
          views.RemoveFromCartView.as_view(), name='remove-from-cart'),
+    path('cart/pwyw-amount/<int:cart_product_id>',
+         views.SetPwywAmountView.as_view(), name='set-pwyw-amount'),
 
     # Checkout flow
     path('checkout', views.CheckoutView.as_view(), name='checkout'),

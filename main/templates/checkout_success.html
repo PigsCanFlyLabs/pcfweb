@@ -24,15 +24,16 @@
             <p>Order #{{ order.pk }} &mdash; {{ order.get_status_display }}</p>
             <ul style="list-style: none; padding: 0;">
                 {% for item in order.items.all %}
-                {# unit_amount is the snapshot of Product.price, which for a #}
-                {# pay-what-you-want line is the suggestion -- so this line and #}
-                {# the order total below can legitimately differ. Order's owner #}
-                {# email says the same thing; see order_summary_text. #}
+                {# unit_amount is the amount this line was actually billed at, #}
+                {# which on a pay-what-you-want line is the one the buyer #}
+                {# named on the site. It used to be the snapshot of #}
+                {# Product.price, i.e. the suggestion, which is why the note #}
+                {# below used to have to explain a line that disagreed with #}
+                {# the total. It no longer does. #}
                 <li>{{ item.quantity }} &times; {{ item.product_name }}
                     &mdash; ${{ item.total_display_price }}{% if item.product.is_pwyw %}
-                    <br><small class="pwyw-note">Pay what you want: shown at the
-                    suggested amount &mdash; see the order total for what was
-                    paid.</small>{% endif %}</li>
+                    <br><small class="pwyw-note">Pay what you want: this is the
+                    amount you chose.</small>{% endif %}</li>
                 {% endfor %}
             </ul>
             <p>Total: ${{ order.total_display_price }} {{ order.currency|upper }}</p>

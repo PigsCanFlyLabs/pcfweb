@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -315,6 +316,16 @@ class Product(models.Model):
             return f"Pre-order: {formatted_price}"
         else:
             return formatted_price
+
+    def pwyw_suggested_amount(self) -> str:
+        """The suggested amount as a bare number, for the amount input.
+
+        Its own accessor rather than get_display_price(), for the same reason
+        get_msrp_display() is: that method returns human copy and prefixes
+        "Pre-order: " on preorder rows, which a number input cannot hold and
+        which the running total already parseFloats into NaN.
+        """
+        return "{0:.2f}".format(self.price / 100)
 
     def get_msrp_display(self) -> str:
         """The MSRP as a bare formatted amount, for the strikethrough.
@@ -752,6 +763,15 @@ class CartProduct(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     quantity = models.PositiveBigIntegerField(default=1)
     price_id = models.CharField(max_length=250, null=True)
+    # What the buyer chose to pay for one of these, in cents.
+    #
+    # Null on every ordinary line, and on a pay-what-you-want line nobody has
+    # named an amount for yet -- there Product.price, the owner's suggestion,
+    # stands in. This column is server-owned: the only writer is
+    # set_chosen_amount() below, which only ever stores what
+    # parse_pwyw_amount() returned, and checkout reads the amount back off
+    # this row rather than off anything the customer sends it.
+    chosen_amount = models.IntegerField(null=True, blank=True)
 
     class Meta:
         # Without this, two concurrent adds of the same product race into two
@@ -762,26 +782,76 @@ class CartProduct(models.Model):
                 fields=['cart', 'product'], name='unique_cart_product'),
         ]
 
+    def effective_unit_amount(self) -> int:
+        """What one of these costs, in cents.
+
+        The amount the buyer chose where they chose one, the owner's price
+        otherwise. This is the single answer to "what is this line worth" --
+        the Stripe Price, the order snapshot and the cart total all come
+        through here, so none of them can disagree with the others.
+
+        Deliberately not routed through get_display_price(), which returns
+        presentation strings like "Pre-order: 30.00" rather than a number.
+        """
+        if self.chosen_amount is not None and self.product.is_pwyw:
+            return self.chosen_amount
+        return self.product.price
+
+    def set_chosen_amount(self, cents: Optional[int]) -> None:
+        """Record a validated pay-what-you-want amount and re-price the line.
+
+        `cents` must already have been through parse_pwyw_amount(); None puts
+        the line back on the owner's suggestion.
+
+        A Stripe Price is immutable, so a new amount needs a new Price. Doing
+        that here rather than at the call site means no caller can change the
+        amount and leave the old one behind for checkout to bill.
+        """
+        self.chosen_amount = cents
+        self.price_id = None
+        self.save()
+
     def generate_price_id(self):
         external_product_id = self.product.ensure_external_product_id()
+        amount = self.effective_unit_amount()
         if self.product.mode == Product.Modes.PAYMENT:
             price_id = Payments.create_price(
-                external_product_id, self.product.price, currency="usd",
-                pay_what_you_want=self.product.is_pwyw)
+                external_product_id, amount, currency="usd")
         else:
-            # Stripe's custom_unit_amount is payment-mode only, so a
-            # recurring pay-what-you-want price cannot exist. create_price
-            # refuses the combination rather than quietly billing the preset
-            # every year as if it were a fixed price.
             price_id = Payments.create_price(
-                external_product_id, self.product.price, currency="usd",
-                interval="year", pay_what_you_want=self.product.is_pwyw
-            )
+                external_product_id, amount, currency="usd", interval="year")
         return price_id
+
+    def refresh_pwyw_price(self) -> None:
+        """Re-mint this line's Price from the amount this row holds, now.
+
+        Called once per line at session-creation time. Two jobs:
+
+        It is the point where the billed amount is taken from the database
+        rather than from anything the customer sent. Whatever was posted to
+        /checkout, the Price handed to Stripe is minted here, from
+        chosen_amount as stored, so a tampered amount cannot undercut the row.
+
+        It also retires the Prices that pay-what-you-want lines carried before
+        this change. Those were minted with custom_unit_amount, which Stripe
+        refuses to put in a session alongside a second line item, a quantity
+        above one, an adjustable_quantity or a discount -- exactly the four
+        things this change is here to allow. A cart that was filled before the
+        deploy would otherwise fail at checkout.
+        """
+        if not self.product.is_pwyw:
+            return
+        self.price_id = self.generate_price_id()
+        self.save(update_fields=["price_id"])
 
     def save(self, *args, **kwargs):
         if not self.price_id:
             self.price_id = self.generate_price_id()
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None:
+                # Minting a price and then not writing it would silently
+                # abandon the Stripe object and re-mint on the next save.
+                kwargs["update_fields"] = set(update_fields) | {"price_id"}
         super().save(*args, **kwargs)
 
     def __str__(self) -> str:
@@ -791,7 +861,16 @@ class CartProduct(models.Model):
         return f'<CartProduct: {self.product.name}>'
 
     def total_price(self):
-        return (self.product.price * self.quantity)
+        return (self.effective_unit_amount() * self.quantity)
+
+    def unit_display_price(self) -> str:
+        """What one of these will be billed at, as a bare number.
+
+        Bare because the cart renders it into a number input the buyer can
+        edit. Not get_display_price(), which returns copy like
+        "Pre-order: 30.00" and does not know about the chosen amount.
+        """
+        return "{0:.2f}".format(self.effective_unit_amount() / 100)
 
     def total_display_price(self):
         return "{0:.2f}".format(self.total_price() / 100)
@@ -801,6 +880,66 @@ def _display_amount(cents: Optional[int]) -> str:
     if cents is None:
         return "-"
     return "{0:.2f}".format(cents / 100)
+
+
+# The most a buyer may choose to pay for one pay-what-you-want item, in cents.
+# There is no floor: paying nothing is a valid amount, on the owner's
+# instruction, and the copy on the product page says so. This ceiling is not a
+# judgement about generosity -- it is the guard that keeps a hostile or
+# fat-fingered amount from becoming a real charge. Stripe's own per-charge USD
+# maximum is 999_999_99, so anything below that is a local policy choice;
+# $10,000 is far beyond what anything here is worth and still low enough that
+# an extra keystroke is refused rather than billed.
+MAX_PWYW_AMOUNT = 1_000_000
+
+_NOT_A_NUMBER = ("That is not an amount. Enter dollars and cents, "
+                 "for example 12.99.")
+
+
+class PwywAmountError(ValueError):
+    """A pay-what-you-want amount that must not be stored or billed."""
+
+
+def parse_pwyw_amount(raw: Any) -> int:
+    """Turn a buyer-supplied dollar amount into integer cents.
+
+    Every branch here is a rejection rather than a coercion, because this
+    value arrives from a form field on a public page: it is hostile input
+    until it has been through this function, and the only thing downstream
+    ever sees is the int it returns.
+
+    Decimal rather than float on purpose. float("0.1") * 100 is 10.000000000
+    000002, so a float path would either bill a cent off or need a rounding
+    rule that quietly turns a rejected amount into an accepted one.
+    """
+    if raw is None:
+        raise PwywAmountError("Enter an amount. 0 is a valid amount.")
+    text = str(raw).strip().lstrip("$").strip()
+    if not text:
+        raise PwywAmountError("Enter an amount. 0 is a valid amount.")
+    try:
+        amount = Decimal(text)
+    except InvalidOperation:
+        raise PwywAmountError(_NOT_A_NUMBER) from None
+    # Decimal parses "NaN" and "Infinity" without complaint, and both slide
+    # through the comparisons below -- NaN because every comparison against it
+    # is False, Infinity because it really is greater than the ceiling but
+    # int() on it raises rather than returning something billable.
+    if not amount.is_finite():
+        raise PwywAmountError(_NOT_A_NUMBER)
+    if amount < 0:
+        raise PwywAmountError(
+            "An amount cannot be negative. The lowest you can pay is 0.")
+    scaled = amount.scaleb(2)
+    if scaled != scaled.to_integral_value():
+        raise PwywAmountError(
+            "Amounts go down to the cent, so at most two decimal places.")
+    cents = int(scaled)
+    if cents > MAX_PWYW_AMOUNT:
+        raise PwywAmountError(
+            f"{_display_amount(MAX_PWYW_AMOUNT)} is the most that can be "
+            "taken in one go. Get in touch if you really meant it.")
+    return cents
 
 
 class Order(models.Model):
@@ -939,7 +1078,12 @@ class Order(models.Model):
                 order=order,
                 product=cp.product,
                 product_name=cp.product.name,
-                unit_amount=cp.product.price,
+                # What this line is actually being billed at, which on a
+                # pay-what-you-want row is the buyer's amount and not the
+                # owner's suggestion. Snapshotting Product.price here was why
+                # a receipt for an order paid at nothing still showed a 12.99
+                # line above a 0.00 total.
+                unit_amount=cp.effective_unit_amount(),
                 currency=DEFAULT_CURRENCY,
                 quantity=cp.quantity,
                 snapshot_quantity=cp.quantity,
@@ -1057,11 +1201,11 @@ class Order(models.Model):
                 line += (f"   [adjusted at checkout, was "
                          f"{item.snapshot_quantity}]")
             if item.product is not None and item.product.is_pwyw:
-                # The snapshot holds the suggested amount, because that is
-                # what the line was worth when the cart was frozen. What the
-                # buyer actually chose to pay is only in the order total.
-                line += ("   [pay-what-you-want: shown at the suggested "
-                         "amount, see the order total for what was paid]")
+                # The amount above is now the one the buyer named on the site,
+                # snapshotted before the session was created -- not the
+                # owner's suggestion. Still worth flagging: it explains a line
+                # that does not match the catalogue price, and a zero one.
+                line += "   [pay-what-you-want: the amount the buyer chose]"
             lines.append(line)
         lines += self.fulfilment_caveats()
         lines += [

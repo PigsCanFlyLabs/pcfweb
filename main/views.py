@@ -39,7 +39,8 @@ from main.forms import (
     MailingListImportForm, MailingListSendForm, MailingListSignupForm)
 from main.models import (
     Cart, CartProduct, EmailIdentity, MailingListMessage, Order, Product,
-    SuppressedAddress, normalize_email_identity, send_batch_size)
+    PwywAmountError, SuppressedAddress, normalize_email_identity,
+    parse_pwyw_amount, send_batch_size)
 from main.payments import Payments
 from main.utils import (
     generate_username, get_country_code, get_storable_client_ip)
@@ -780,12 +781,12 @@ class CartView(View, BaseCartView):
         total_display_price = "{0:.2f}".format(total_price / 100)
         has_physical = any(cp.product.is_physical_good() for cp in cart_products
                            if not cp.product.noorder)
-        # The displayed total is the sum of list prices, which for a
-        # pay-what-you-want line is only a suggestion. Say so rather than
-        # showing a number the buyer is not going to be charged.
+        # The total is now the sum of the amounts that will actually be
+        # billed, because a pay-what-you-want line contributes the amount the
+        # buyer named rather than the owner's suggestion. The notice stays:
+        # it is what tells a buyer the row is theirs to change.
         has_pwyw = any(cp.product.is_pwyw for cp in cart_products)
         has_unavailable = any(cp.product.noorder for cp in cart_products)
-        pwyw_checkout_blocker = Payments.pwyw_checkout_blocker(cart)
         return render(request, 'cart.html', context={
             'title': 'Cart',
             'products': cart_products,
@@ -793,7 +794,6 @@ class CartView(View, BaseCartView):
             'has_physical': has_physical,
             'has_pwyw': has_pwyw,
             'has_unavailable': has_unavailable,
-            'pwyw_checkout_blocker': pwyw_checkout_blocker,
         })
 
 
@@ -820,15 +820,35 @@ class AddToCartView(View, BaseCartView):
         if not product.is_purchasable():
             return HttpResponseBadRequest("Product is not purchasable.")
         cart = self.get_cart(request)
-        pwyw_add_blocker = Payments.pwyw_add_to_cart_blocker(
-            cart, product, quantity)
-        if pwyw_add_blocker is not None:
-            messages.error(request, pwyw_add_blocker)
-            return redirect('cart')
+        # The amount field only exists on a pay-what-you-want product's form,
+        # and is only honoured for one: posting it at anything else changes
+        # nothing, rather than repricing the catalogue.
+        chosen_amount = None
+        if product.is_pwyw:
+            posted_amount = request.POST.get('chosen_amount')
+            if posted_amount is not None:
+                try:
+                    chosen_amount = parse_pwyw_amount(posted_amount)
+                except PwywAmountError as error:
+                    # Same shape as the add-to-cart refusals this replaces:
+                    # say why on the cart, which is the only page in the
+                    # buying flow that renders queued messages, and add
+                    # nothing. The product page has no messages block.
+                    messages.error(request, str(error))
+                    return redirect('cart')
 
         cart_product, created = CartProduct.objects.get_or_create(
-            cart=cart, product=product, defaults={'quantity': quantity})
+            cart=cart, product=product,
+            defaults={'quantity': quantity, 'chosen_amount': chosen_amount})
         if not created:
+            if chosen_amount is not None:
+                # Adding the same pay-what-you-want product again with a new
+                # amount means the new amount, not the first one: the buyer
+                # has just said what they want to pay, on the only form that
+                # asks. Dropping price_id makes the save below mint a Price
+                # for it, because a Stripe Price cannot be repriced.
+                cart_product.chosen_amount = chosen_amount
+                cart_product.price_id = None
             # Adding a product that's already in the cart adds to what's
             # there rather than silently discarding the new quantity.
             try:
@@ -852,6 +872,32 @@ class RemoveFromCartView(View, BaseCartView):
             CartProduct, pk=cart_product_id, cart=cart)
         cart.products.remove(cart_product)
         cart_product.delete()
+        return redirect('cart')
+
+
+class SetPwywAmountView(View, BaseCartView):
+    """Change what a pay-what-you-want line in the cart is worth.
+
+    POST only, for the same reason as AddToCartView: a GET would be
+    triggerable cross-site with no CSRF token, and this one writes a price.
+    """
+
+    def post(self, request, cart_product_id: int):
+        cart = self.get_cart(request)
+        # Scoped to the requester's own cart, so a row id belonging to
+        # somebody else is a 404 rather than a repricing of their basket.
+        cart_product = get_object_or_404(
+            CartProduct.objects.select_related("product"),
+            pk=cart_product_id, cart=cart)
+        if not cart_product.product.is_pwyw:
+            return HttpResponseBadRequest(
+                "That item does not have an amount to choose.")
+        try:
+            amount = parse_pwyw_amount(request.POST.get('chosen_amount'))
+        except PwywAmountError as error:
+            messages.error(request, str(error))
+            return redirect('cart')
+        cart_product.set_chosen_amount(amount)
         return redirect('cart')
 
 
@@ -893,18 +939,17 @@ class CheckoutView(View, BaseCartView):
                 "Sorry, these are no longer available and need to be removed "
                 "before checking out: " + ", ".join(unavailable) + ".")
             return redirect('cart')
-        coupon_warning = Payments.pwyw_coupon_warning(cart, coupon=coupon)
-        if coupon_warning is not None:
-            messages.warning(request, coupon_warning)
-            coupon = None
-        pwyw_checkout_blocker = Payments.pwyw_checkout_blocker(
-            cart, coupon=coupon)
-        if pwyw_checkout_blocker is not None:
-            logger.info(
-                "Blocked checkout for cart %s: %s",
-                cart.pk, pwyw_checkout_blocker)
-            messages.error(request, pwyw_checkout_blocker)
-            return redirect('cart')
+        # Re-price every pay-what-you-want line from the amount its own cart
+        # row holds, here, at the last moment before the order is snapshotted
+        # and the session created.
+        #
+        # This is the security boundary for the whole feature. Nothing posted
+        # to this endpoint is consulted -- `request.POST` is read for the
+        # coupon and for nothing else -- so an amount injected at /checkout,
+        # or a Price minted for an amount that has since been edited, cannot
+        # decide what the buyer is charged. The database row does.
+        for cart_product in cart.products.select_related("product"):
+            cart_product.refresh_pwyw_price()
         user = request.user if request.user.is_authenticated else None
         order = Order.create_from_cart(cart, user=user)
         try:
