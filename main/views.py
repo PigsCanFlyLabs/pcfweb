@@ -464,6 +464,7 @@ class SubscribeView(View):
         return render(request, 'subscribe_page.html', context={
             'title': 'Subscribe for updates',
             'areas': mailing.interest_choices(request),
+            'forced_interest': mailing.ALL_SLUG,
         })
 
 
