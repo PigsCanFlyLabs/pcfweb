@@ -1060,3 +1060,231 @@ class WebhookReconciliationRetryNotificationTest(OrderTestBase):
             self.deliver(body)
 
         self.assertEqual(len(self.order_emails()), 1)
+
+
+@override_settings(**ORDER_TEST_SETTINGS)
+class WebhookBuyerReceiptTest(OrderTestBase):
+    """The buyer receives a receipt email after Stripe reports the order PAID.
+
+    The receipt is best-effort: a failure is recorded on the row but must
+    never block digital delivery or the owner notification."""
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order()
+
+    def _receipts(self):
+        """Return every receipt email currently in the outbox."""
+        return [m for m in mail.outbox if "Your receipt" in m.subject]
+
+    def _receipt(self):
+        receipts = self._receipts()
+        self.assertTrue(receipts, "no receipt email found in the outbox")
+        return receipts[0]
+
+    # ---- requirement 1: the receipt is sent at all ----
+
+    def test_a_paid_order_sends_the_buyer_a_receipt(self):
+        self.deliver(self.event_body(self.order))
+
+        receipt = self._receipt()
+        self.assertEqual(receipt.to, ["buyer@example.com"])
+        self.assertIn("Order #", receipt.body)
+        self.order.refresh_from_db()
+        self.assertIsNotNone(self.order.receipt_sent_at)
+        self.assertEqual(self.order.receipt_error, "")
+
+    # ---- requirement 2: idempotency ----
+
+    def test_redelivering_the_same_event_sends_the_receipt_once(self):
+        self.deliver(self.event_body(self.order))
+        mail.outbox.clear()
+
+        self.deliver(self.event_body(self.order))
+
+        self.assertEqual(len(self._receipts()), 0)
+
+    def test_redelivery_after_failed_receipt_retries_it(self):
+        real_send = main_models.send_mail
+        with mock.patch(
+                "main.models.send_mail",
+                side_effect=[OSError("SMTP is down"), real_send]):
+            with self.assertLogs("main.models", level="ERROR"):
+                self.deliver(self.event_body(self.order))
+
+        self.assertEqual(len(self._receipts()), 0)
+        self.order.refresh_from_db()
+        self.assertIsNone(self.order.receipt_sent_at)
+        self.assertNotEqual(self.order.receipt_error, "")
+
+        mail.outbox.clear()
+
+        self.deliver(self.event_body(self.order))
+
+        self.assertEqual(len(self._receipts()), 1)
+        self.order.refresh_from_db()
+        self.assertIsNotNone(self.order.receipt_sent_at)
+        self.assertEqual(self.order.receipt_error, "")
+
+    # ---- requirement 3: failure isolation ----
+
+    def test_receipt_failure_never_blocks_the_owner_notification(self):
+        real_send = main_models.send_mail
+        with mock.patch(
+                "main.models.send_mail",
+                side_effect=[OSError("SMTP is down"), real_send]):
+            with self.assertLogs("main.models", level="ERROR"):
+                self.deliver(self.event_body(self.order))
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertIsNone(self.order.receipt_sent_at)
+        self.assertNotEqual(self.order.receipt_error, "")
+        self.assertIsNotNone(self.order.notified_at,
+                             "owner was not notified")
+
+    def test_receipt_failure_never_blocks_the_order_from_completing(self):
+        # The worst case: send_mail raises for EVERY call, yet the order
+        # still transitions to PAID and the webhook still returns 200.
+        with mock.patch("main.models.send_mail",
+                        side_effect=OSError("SMTP is down")):
+            with self.assertLogs("main.models", level="ERROR"):
+                response = self.deliver(self.event_body(self.order))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+
+    # ---- requirement 4: PWYW amounts ----
+
+    def test_pwyw_receipt_shows_the_chosen_amount_not_the_suggestion(self):
+        product = main_models.Product.objects.get(pk=106)
+        order = self.manual_order((product, 1))
+        # $5.00 paid against a $12.99 suggestion
+        item = order.items.get()
+        item.unit_amount = 500
+        item.save()
+        order.amount_total = 700   # $5 + $2 tax
+        order.amount_subtotal = 500
+        order.amount_tax = 200
+        order.customer_email = "buyer@example.com"
+        order.save()
+
+        order.send_receipt()
+
+        body = self._receipt().body
+        self.assertIn("5.00", body)
+        self.assertNotIn("12.99", body)
+        self.assertIn("(pay-what-you-want", body)
+
+    def test_zero_dollar_receipt_is_still_sent_and_reads_sensibly(self):
+        product = main_models.Product.objects.get(pk=104)
+        order = self.manual_order((product, 1))
+        item = order.items.get()
+        item.unit_amount = 0
+        item.save()
+        order.amount_total = 0
+        order.amount_subtotal = 0
+        order.amount_tax = 0
+        order.customer_email = "buyer@example.com"
+        order.save()
+
+        order.send_receipt()
+
+        body = self._receipt().body
+        self.assertIn("0.00", body)
+        self.assertIn("Total:", body)
+        self.assertNotIn("unpaid", body.lower())
+        self.assertNotIn("invoice", body.lower())
+
+    # ---- requirement 5: no internal leaks ----
+
+    def test_receipt_body_leaks_no_internal_keys(self):
+        self.deliver(self.event_body(self.order))
+
+        body = self._receipt().body
+        self.assertNotIn("cs_test", body)
+        self.assertNotIn("download_token", body)
+        self.assertNotIn("?token=", body)
+
+    # ---- requirement 6: mutation ----
+
+    def test_reverting_the_send_makes_the_test_fail(self):
+        # Guard: if send_receipt is removed, this test must fail.
+        self.deliver(self.event_body(self.order))
+        self.assertTrue(self._receipts(),
+                        "no receipt was sent — send_receipt is not wired")
+
+    # ---- edge cases ----
+
+    def test_no_receipt_without_customer_email(self):
+        # send_receipt itself refuses, recording the failure on the row.
+        self.order.customer_email = ""
+        self.order.save()
+        self.order.send_receipt()
+
+        self.assertEqual(len(self._receipts()), 0)
+        self.order.refresh_from_db()
+        self.assertIsNone(self.order.receipt_sent_at)
+        self.assertNotEqual(self.order.receipt_error, "")
+
+
+@override_settings(**ORDER_TEST_SETTINGS)
+class WebhookBuyerReceiptConcurrentTest(OrderTestMixin, TransactionTestCase):
+    """Two workers fulfilling the same order send exactly one receipt.
+
+    TransactionTestCase rather than TestCase so the second worker sees
+    committed data on its own connection."""
+
+    @contextlib.contextmanager
+    def as_a_separate_worker_process(self):
+        saved = {name: value
+                 for name, value in vars(StripeWebhookView).items()
+                 if type(value) is set}
+        for name in saved:
+            setattr(StripeWebhookView, name, set())
+        try:
+            yield
+        finally:
+            for name, value in saved.items():
+                setattr(StripeWebhookView, name, value)
+
+    def test_concurrent_workers_send_the_receipt_exactly_once(self):
+        order = self.place_order()
+        body = self.event_body(order)
+        overlapped = []
+        failures = []
+        real_send = main_models.send_mail
+
+        def second_worker():
+            try:
+                with self.as_a_separate_worker_process():
+                    Client().post(
+                        WEBHOOK_URL, data=body,
+                        content_type="application/json",
+                        HTTP_STRIPE_SIGNATURE=stripe_signature(body))
+            except Exception:
+                failures.append(traceback.format_exc())
+            finally:
+                django_connection.close()
+
+        def send_and_overlap(*args, **kwargs):
+            if not overlapped:
+                overlapped.append(True)
+                thread = threading.Thread(target=second_worker)
+                thread.start()
+                thread.join(timeout=30)
+                self.assertFalse(thread.is_alive(),
+                                 "the second worker never finished")
+            return real_send(*args, **kwargs)
+
+        with mock.patch("main.models.send_mail", send_and_overlap):
+            self.deliver(body)
+
+        self.assertEqual(failures, [], "the second worker raised")
+        receipts = [m for m in mail.outbox
+                     if "Your receipt" in m.subject]
+        self.assertEqual(len(receipts), 1,
+                         f"expected 1 receipt; got {len(receipts)}")
+        order.refresh_from_db()
+        self.assertIsNotNone(order.receipt_sent_at)
