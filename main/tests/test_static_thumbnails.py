@@ -619,7 +619,18 @@ class AbsentAssetTreeSkipTest(SimpleTestCase):
         self.assertIn("SKIPPED", message)
         self.assertIn("NOT verified", message)
         # Says how many went unchecked, and points at what still enforces them.
-        self.assertIn("5 product cover", message)
+        #
+        # Derived rather than written out: the literal here was 5 until the
+        # second edition of High Performance Spark added a sixth cover to the
+        # fixture, and how many books the shop sells is not what this test is
+        # about. Counting covers specifically -- not len(targets) -- still
+        # catches the regression the command guards against, which is
+        # reporting the whole target list, TEMPLATE_THUMBNAILS included,
+        # in place of the cover count.
+        cover_count = sum(
+            1 for source, _size in iter_expected_thumbnails(str(FIXTURE))
+            if source.startswith(COVER_PREFIX))
+        self.assertIn(f"{cover_count} product cover", message)
         self.assertIn("build.sh", message)
 
     def test_an_empty_directory_counts_as_absent(self):
