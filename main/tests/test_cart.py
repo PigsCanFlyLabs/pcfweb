@@ -293,7 +293,8 @@ class CartAuthenticationTest(CartTestBase):
             cart=user_cart, product=product,
             quantity=AddToCartView.MAX_QUANTITY,
             price_id="price_existing")
-        user_cart.products.add(existing)
+        # Build the FK-only shape the admin can create: this is the one place
+        # the overflow branch must repair the M2M link instead of assuming it.
 
         self.client.post("/add-to-cart/100/1")
         session_cart_id = self.client.session["cart_id"]
@@ -310,7 +311,9 @@ class CartAuthenticationTest(CartTestBase):
         )
         existing.refresh_from_db()
         self.assertEqual(existing.quantity, AddToCartView.MAX_QUANTITY)
-        self.assertFalse(CartProduct.objects.filter(pk=session_line.pk).exists())
+        self.assertEqual(list(user_cart.products.all()), [existing])
+        self.assertFalse(
+            CartProduct.objects.filter(pk=session_line.pk).exists())
         self.assertFalse(Cart.objects.filter(pk=session_cart_id).exists())
         self.assertNotIn("cart_id", self.client.session)
 

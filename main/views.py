@@ -631,6 +631,7 @@ class BaseCartView():
                             f"We capped {existing.product.name} at "
                             f"{self.MAX_QUANTITY} because the combined cart "
                             "quantity would not fit in storage.")
+                        user_cart.products.add(existing)
                         cart_product.delete()
                         continue
                     existing.save()
