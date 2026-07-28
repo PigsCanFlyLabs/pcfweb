@@ -218,21 +218,47 @@ class Product(models.Model):
             else:
                 return None
 
+    # The one place the cover thumbnail size is written down. Named rather than
+    # inline because it is no longer used only here: the build pre-generates
+    # every one of these into STATIC_ROOT (see
+    # main/management/commands/pregenerate_thumbnails.py) so that no pod ever
+    # has to generate one at request time, and a second copy of the numbers
+    # would let the pre-generated file and the requested file drift into
+    # different names -- which reintroduces exactly the runtime generation the
+    # pre-generation exists to remove, silently.
+    THUMB_SIZE = (290, 380)
+
+    @staticmethod
+    def static_thumbnailer(static_path: str):
+        """Thumbnailer for a source that lives in the static tree.
+
+        Takes a path relative to STATIC_ROOT -- the same thing
+        ``{% static_thumbnail %}`` takes -- not a bare cover name, so the
+        build-time pre-generator can drive it for the template-declared
+        sources (the masthead logo) as well as for product covers.
+
+        Split out of get_thumb() so that pre-generator resolves the source
+        exactly the way a request does, off the same STATIC_ROOT-rooted
+        storage, instead of reimplementing the path join and generating a file
+        under a name nothing ever asks for.
+        """
+        from static_thumbnails.templatetags.static_thumbnails import (
+            static_storage)
+        return get_thumbnailer(static_storage, relative_name=static_path)
+
     def get_thumb(self):
         t = None
         try:
             if self.image_name:
-                from static_thumbnails.templatetags.static_thumbnails import static_storage
-                t = get_thumbnailer(
-                    static_storage,
-                    relative_name=f"assets/images/{self.image_name}")
+                t = self.static_thumbnailer(
+                    f"assets/images/{self.image_name}")
             else:
                 t = get_thumbnailer(self.image)
         except Exception as e:
             logger.warning(f"Got exception {e} trying to load thumbnailer.")
             return self.get_image_url()
         try:
-            th = t.get_thumbnail({'size': (290, 380)})
+            th = t.get_thumbnail({'size': self.THUMB_SIZE})
             return th.url
         except Exception as e:
             logger.warning(f"Error generating thumbnail: {e}")

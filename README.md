@@ -374,6 +374,39 @@ served from `static/`) instead — that is what every fixture product does.
 Fixing this properly needs a `ReadWriteMany` volume or object storage, and
 the cluster's `encrypted-local-path` StorageClass is `ReadWriteOnce`.
 
+#### Thumbnails used to be caught by this too
+
+Using `image_name` did **not** avoid the above, and for a long time nobody
+noticed. The source cover was indeed served from `static/`, but the *thumbnail*
+of it was not: `easy-thumbnails` resolves its output storage through the
+`easy_thumbnails` entry in `STORAGES` and, finding none configured, fell back
+to `default_storage` — `MEDIA_ROOT`. So every book cover on `/` and `/products`
+rendered as `/media/…290x380_q85.jpg`, generated lazily by whichever pod
+happened to render the page and existing only there.
+
+The page render and the browser's follow-up request for the image are
+load-balanced independently, so pod A wrote the file and emitted the URL while
+pods B and C answered that URL with a 404 — and Cloudflare cached the 404 for
+four hours (`Cache-Control: max-age=14400`). That is what turned a per-request
+race into an outage that looked stable and per-book ("every cover except
+Learning Spark") rather than flaky, and why it was never reproducible under
+`run_local.sh`: one process, one filesystem, no CDN, so the process that writes
+the thumbnail is the one that serves it.
+
+The fix treats a thumbnail of a *static* source as what it is — a build
+artifact, fully determined by a file already baked into the image. The
+`easy_thumbnails` storage alias now points at `STATIC_ROOT`, and
+`manage.py pregenerate_thumbnails` (run by `scripts/checks.sh` after
+`collectstatic`) materialises every one of them into the tree the Dockerfile
+`COPY`s, so all replicas serve byte-identical files off the read-only image
+layer and nothing is generated at request time. `build.sh` then runs
+`manage.py pregenerate_thumbnails --check`, which is read-only on purpose: a
+check that generates what it cannot find can never fail.
+
+Uploaded-image thumbnails now land in `STATIC_ROOT` as well. That is not a fix
+for them — the upload itself is still ephemeral and pod-local, per the section
+above — it just moves the thumbnail alongside it.
+
 ### One-time cluster prerequisites (not in this repo)
 
 1. CloudNativePG operator installed cluster-wide.

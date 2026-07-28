@@ -13,6 +13,16 @@ python -m mypy -p main -p pigscanfly
 ./manage.py makemigrations --check --dry-run
 # Tests render pages that thumbnail collected static assets, so collect first.
 ./manage.py collectstatic --no-input
+# Materialise every thumbnail into STATIC_ROOT, i.e. into the tree the
+# Dockerfile COPYs. Without this the first request on each pod generates them
+# instead, into a directory deploy.yaml mounts no volume over -- so they were
+# per-pod and per-boot, and the image request round-robined onto a replica that
+# did not have the file. See main/management/commands/pregenerate_thumbnails.py.
+#
+# Before the tests, not after: main/tests/test_static_thumbnails.py asserts the
+# pages reference files that are already on disk, which is only a real
+# assertion if something other than the test put them there.
+./manage.py pregenerate_thumbnails
 ./manage.py test main
 ./manage.py validate_templates --ignore-app newsletter
 # Kubernetes manifests parse.

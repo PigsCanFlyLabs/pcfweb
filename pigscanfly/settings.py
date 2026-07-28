@@ -178,13 +178,71 @@ class Base(Configuration):
     # Static files (CSS, JavaScript, Images)
     # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-    STATIC_URL = 'static/'
+    # Leading slash deliberately. Django's Settings.__init__ normalises a bare
+    # 'static/' to '/static/' anyway, but THUMBNAIL_MEDIA_URL below is derived
+    # from this value inside the class body, where that normalisation has not
+    # happened yet -- and easy-thumbnails does NOT normalise its own URL
+    # setting. Without the slash every thumbnail renders as a relative
+    # 'static/...' that 404s on any page below the site root.
+    STATIC_URL = '/static/'
     STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 
     # MEDIA FILE SETTINGS
 
     MEDIA_URL = '/media/'
     MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+    # ---------------------------------------------------------------------
+    # WHERE GENERATED THUMBNAILS LAND, AND WHY IT IS NOT MEDIA_ROOT.
+    #
+    # static-thumbnails reads its SOURCE out of STATIC_ROOT, but easy-thumbnails
+    # writes its OUTPUT to `thumbnail_default_storage`. That resolves through
+    # easy_thumbnails.storage.get_storage(), which looks up the
+    # THUMBNAIL_DEFAULT_STORAGE_ALIAS ('easy_thumbnails') entry in STORAGES and,
+    # not finding one, silently falls back to `default_storage` -- i.e.
+    # MEDIA_ROOT. Note that ThumbnailFileSystemStorage is never instantiated on
+    # that path, so THUMBNAIL_MEDIA_ROOT alone does nothing: the alias below is
+    # what makes the setting take effect at all.
+    #
+    # MEDIA_ROOT is /opt/app/media in the image, and deploy.yaml mounts no
+    # volume there. So it is the container's own ephemeral writable layer:
+    # wiped on every pod restart, and NOT shared between the three `web`
+    # replicas. Thumbnails are generated lazily, at request time, by whichever
+    # pod happens to render the page -- so pod A would write the file, emit
+    # /media/<name> into the HTML, and the browser's follow-up request for that
+    # URL would round-robin onto pod B or C, which had never rendered that page
+    # and returned 404. Cloudflare then cached the 404 for four hours
+    # (Cache-Control: max-age=14400), freezing a transient race into a stable,
+    # every-visitor outage for whichever covers lost the coin flip. This is
+    # unreachable under run_local.sh: one process, one filesystem, no CDN, so
+    # the process that writes the thumbnail is the process that serves it.
+    #
+    # The fix is to stop treating these as runtime artifacts. A thumbnail of a
+    # STATIC source image is a build artifact: it is fully determined by a file
+    # that is already baked into the image. Pointing the alias at STATIC_ROOT
+    # puts it in the tree the Dockerfile COPYs, so every replica serves a
+    # byte-identical file straight off the read-only image layer, with no
+    # generation at request time and therefore no 404 for the edge to cache.
+    # scripts/checks.sh pre-generates them; build.sh fails if any is missing.
+    #
+    # Uploaded-image thumbnails (Product.image, a real ImageField) move here
+    # too. That is not a regression -- MEDIA_ROOT is ephemeral and pod-local, so
+    # those uploads do not survive a restart today either -- but it is also not
+    # a fix for them. See the note in README.md.
+    STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+        },
+        "staticfiles": {
+            "BACKEND": (
+                "django.contrib.staticfiles.storage.StaticFilesStorage"),
+        },
+        "easy_thumbnails": {
+            "BACKEND": "easy_thumbnails.storage.ThumbnailFileSystemStorage",
+        },
+    }
+    THUMBNAIL_MEDIA_ROOT = STATIC_ROOT
+    THUMBNAIL_MEDIA_URL = STATIC_URL
 
     # Default primary key field type
     # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
