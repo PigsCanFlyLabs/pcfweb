@@ -20,15 +20,40 @@ from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def parse_comma_list(raw: str) -> List[str]:
+    """Split a comma-separated environment variable into stripped entries.
+
+    Every entry is stripped, not just tested for being non-blank: a value
+    written as a conventional "a, b" list, or pulled out of a file into a
+    Secret with a trailing newline, otherwise carries whitespace into a
+    comparison that has to be exact.
+    """
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def parse_int(raw: Optional[str], default: int) -> int:
+    """An integer setting from the environment, tolerant of an empty value.
+
+    A Secret created out of a file, or a key set to "", would otherwise raise
+    ValueError at settings import -- on every pod, before anything can log it.
+    The deploy gate reports that as "Schema is behind (or the database is
+    unreachable)" and retries forever, so a blank environment variable presents
+    as a database outage. Falling back to the default is the recoverable
+    direction.
+    """
+    try:
+        return int((raw or "").strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def parse_shipping_rates(raw: str) -> List[str]:
     """Split a comma-separated STRIPE_SHIPPING_RATES value into ids.
 
-    Each id is stripped, not just tested for being non-blank. Stripe matches
-    the id exactly, so " shr_two" from a conventional "a, b" list -- or
-    "shr_two\\n" from a Secret created out of a file -- is not the rate, it is
-    a resource_missing that fails every physical checkout.
+    Stripe matches the id exactly, so " shr_two" is not the rate, it is a
+    resource_missing that fails every physical checkout.
     """
-    return [rate.strip() for rate in raw.split(",") if rate.strip()]
+    return parse_comma_list(raw)
 
 
 def parse_invite_half(raw: str) -> str:
@@ -41,6 +66,31 @@ def parse_invite_half(raw: str) -> str:
     quietly serve the "e-mail us" fallback instead of a link.
     """
     return raw.strip()
+
+
+def parse_email_flag(raw: str) -> bool:
+    """Read one of the EMAIL_USE_* switches from its env string.
+
+    "0", "false", "no", "off" and the empty string are off; anything else is
+    on. Unlike STRIPE_AUTOMATIC_TAX's inline parser, empty means OFF: these
+    flags pick a wire protocol, and `EMAIL_USE_SSL: ""` in a manifest reads
+    as "not set" -- it must not wrap the connection in TLS. Absent stays
+    distinct from empty because the default is supplied by the caller
+    through os.getenv.
+    """
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _email_encryption_flags() -> Tuple[bool, bool]:
+    """(EMAIL_USE_TLS, EMAIL_USE_SSL) as the environment currently says.
+
+    One reader for the pair, because it has two callers that must agree: the
+    Prod class body, which turns them into settings, and Prod.pre_setup,
+    which refuses to boot when both are on (see the guard there). Inlining
+    the getenv calls twice would let the defaults drift apart.
+    """
+    return (parse_email_flag(os.getenv("EMAIL_USE_TLS", "false")),
+            parse_email_flag(os.getenv("EMAIL_USE_SSL", "true")))
 
 
 class Base(Configuration):
@@ -276,6 +326,41 @@ class Base(Configuration):
     DISCORD_SUPPORT_EMAIL = os.getenv(
         "DISCORD_SUPPORT_EMAIL", "support@pigscanfly.ca")
 
+    # MAILING LIST SETTINGS
+
+    # Where confirmations and mailings come from. Falls back to
+    # DEFAULT_FROM_EMAIL; set it when list mail should come from a different
+    # address than order mail (a separate list@ address is easier to filter
+    # on and easier for a mail host to rate-limit separately).
+    MAILING_LIST_FROM_EMAIL = os.getenv("MAILING_LIST_FROM_EMAIL", "")
+
+    # Unsubscribe links built without a request to derive a host from use
+    # SITE_BASE_URL, the same setting the emailed download links use -- one
+    # absolute base for the site, not one per feature.
+
+    # Confirmation emails one address's source may trigger per hour. The
+    # signup endpoint is CSRF exempt and open to the internet, so without a
+    # ceiling it is a way to have us mail whoever somebody points it at. Kept
+    # generous because a school or an office is one address to us. 0 disables.
+    MAILING_LIST_SIGNUP_RATE_LIMIT = parse_int(
+        os.getenv("MAILING_LIST_SIGNUP_RATE_LIMIT"), 20)
+
+    # How many freshly imported addresses the import page will email the
+    # "we've updated our list" notice to. Above this it imports and says to
+    # write a mailing instead: the notice loop runs inside one request, and a
+    # big import would outlive the worker timeout half-sent, whereas the send
+    # page batches and is resumable.
+    MAILING_LIST_IMPORT_NOTICE_MAX = parse_int(
+        os.getenv("MAILING_LIST_IMPORT_NOTICE_MAX"), 500)
+
+    # Recipients per click of "send" in the admin, and per SMTP connection.
+    # The whole batch has to fit inside GUNICORN_TIMEOUT, so this trades
+    # clicks against the risk of a half-finished request -- which is survivable
+    # either way, because each recipient's delivery row is written as its mail
+    # goes out and a resumed send skips it.
+    MAILING_LIST_SEND_BATCH_SIZE = parse_int(
+        os.getenv("MAILING_LIST_SEND_BATCH_SIZE"), 100)
+
     # Who gets told about a paid order so they can ship it. Env-driven so the
     # owner's address is not baked into the repo.
     ORDER_NOTIFICATION_EMAIL = os.getenv(
@@ -325,6 +410,10 @@ class Prod(Base):
         console intact. Checking the whole set at once matters too -- the
         properties are evaluated in alphabetical order, so one guard at a time
         would mean one failed rollout per missing variable.
+
+        The same early exit hosts the cross-variable email check: a value
+        that is only wrong in combination (EMAIL_USE_TLS with EMAIL_USE_SSL)
+        has no single property to guard it.
         """
         super().pre_setup()
         missing = [name for name in _prod_required_env if not os.getenv(name)]
@@ -336,6 +425,20 @@ class Prod(Base):
                 "(see deploy.yaml). Details:\n"
                 + "\n".join(f"  {name}: {_prod_required_env[name]}"
                             for name in missing))
+
+        use_tls, use_ssl = _email_encryption_flags()
+        if use_tls and use_ssl:
+            # Django's SMTP backend refuses the pair too, but only when a
+            # connection is opened -- at send time, inside the Stripe
+            # webhook, where every caller catches the failure and records it
+            # on the order row. That is a silently mail-less site. Failing
+            # the rollout here keeps the previous pods serving instead.
+            raise ImproperlyConfigured(
+                "EMAIL_USE_TLS and EMAIL_USE_SSL are both on, and they pick "
+                "the wire protocol for the same connection: STARTTLS on a "
+                "plaintext port (587/25) versus TLS from the first byte "
+                "(465). Turn one of them off in the pcfweb-db-config "
+                "ConfigMap (see deploy.yaml).")
 
     ALLOWED_HOSTS: List[str] = [
         'www.pigscanfly.ca',
@@ -427,15 +530,59 @@ class Prod(Base):
             }
         }
 
+    # OUTBOUND MAIL
+    # Order notifications, download links, the book-asset audit and Django's
+    # 500 reports to ADMINS all leave through this relay. Everything here is
+    # env-driven, with defaults mirroring the pcfweb-db-config ConfigMap in
+    # deploy.yaml (a drift test ties the two together) -- so changing the
+    # relay is a ConfigMap edit plus a pod restart, not a rebuild. Only
+    # EMAIL_HOST_PASSWORD is secret; it rides pcfweb-secret, provisioned out
+    # of the colo-scripts vault. The whole path, including what the domain's
+    # SPF record authorizes, is written down in docs/email.md.
     EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-    EMAIL_HOST = os.getenv("EMAIL_HOST", "pigscanfly.ca")
-    EMAIL_USE_TLS = True
-    EMAIL_PORT = 25
-    EMAIL_USE_SSL = False
-    # Django's default error logger emails ADMINS synchronously.  If the SMTP
-    # server is unreachable, an otherwise immediate 500 must not occupy a
-    # gunicorn worker until its 60-second timeout kills the process.
-    EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "5"))
+    # The domain's own mail server, by its MX name. NOT the bare apex: since
+    # the site moved behind Cloudflare, pigscanfly.ca resolves to Cloudflare
+    # edge IPs, and Cloudflare does not proxy SMTP -- a connection there just
+    # burns the ten-second timeout below on every send. mail.pigscanfly.ca
+    # is the machine (71.19.157.174) the apex used to point at.
+    EMAIL_HOST = os.getenv("EMAIL_HOST", "mail.pigscanfly.ca")
+    # The submissions port (RFC 8314): TLS from the first byte, and the
+    # meaning the port carries -- an authenticated client handing mail in,
+    # which is what this app is. Not 25, the MTA-to-MTA relay port, where
+    # outbound traffic is widely blocked or throttled and servers routinely
+    # refuse AUTH. If the mail server turns out not to listen on 465, the
+    # flip is port 587 with EMAIL_USE_TLS on and EMAIL_USE_SSL off
+    # (STARTTLS submission) -- in the ConfigMap, not here.
+    EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465"))
+    # STARTTLS on a plaintext port versus TLS from the first byte (SMTPS,
+    # port 465). At most one may be on; pre_setup fails the rollout on the
+    # pair rather than letting Django's backend raise at send time -- which
+    # would be inside the Stripe webhook, where every caller catches the
+    # failure and files it on the order row instead of anywhere a deploy
+    # would notice.
+    EMAIL_USE_TLS, EMAIL_USE_SSL = _email_encryption_flags()
+    # Django's SMTP backend has no timeout by default, so a mail host that
+    # drops packets (as distinct from refusing the connection) blocks
+    # send_mail for the OS TCP timeout -- minutes. Every send_mail call here
+    # runs somewhere that cannot afford that: inside the Stripe webhook,
+    # where a hang past GUNICORN_TIMEOUT gets the worker killed mid-request
+    # (the same reasoning as the database connect_timeout above and
+    # STRIPE_TIMEOUT); in Django's error logger, which mails ADMINS
+    # synchronously while handling a 500; and during primary startup
+    # (check_book_assets), where it would eat into build.sh's 300s rollout
+    # budget. Mail that cannot be sent in ten seconds is mail that is not
+    # getting sent; every caller already catches the failure and records it.
+    EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
     EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "support")
+    # Empty disables SMTP AUTH altogether -- Django only authenticates when
+    # both user and password are non-empty -- which is the right degradation
+    # for a relay that trusts the cluster's source address instead of a
+    # login.
     EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
-    DEFAULT_FROM_EMAIL = "support@pigscanfly.ca"
+    DEFAULT_FROM_EMAIL = os.getenv(
+        "DEFAULT_FROM_EMAIL", "support@pigscanfly.ca")
+    # The sender on Django's 500 reports to ADMINS. Its framework default is
+    # root@localhost, which any modern relay rejects or spam-folders -- so
+    # left unset, the mail about failures is the mail most likely to fail.
+    # Ride the same address everything else sends as.
+    SERVER_EMAIL = os.getenv("SERVER_EMAIL", DEFAULT_FROM_EMAIL)
