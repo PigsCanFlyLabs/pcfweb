@@ -21,7 +21,7 @@ from unittest import mock
 
 from django.contrib.auth.models import User
 from django.core import mail
-from django.test import TestCase, override_settings
+from django.test import Client, TestCase, override_settings
 
 from main.models import Order, Product
 
@@ -56,15 +56,29 @@ def stripe_signature(payload: str, secret: str = WEBHOOK_SECRET,
     return f"t={timestamp},v1={signature}"
 
 
-@override_settings(
+"""The settings every order test needs. Kept as a dict rather than applied
+once, because the concurrency tests need the same settings on a
+``TransactionTestCase`` -- real threads on real connections cannot see the
+uncommitted data a ``TestCase`` leaves in its wrapping transaction."""
+ORDER_TEST_SETTINGS = dict(
     STRIPE_WEBHOOK_SECRET=WEBHOOK_SECRET,
     ADMINS=[("Owner", OWNER_EMAIL)],
     DEFAULT_FROM_EMAIL="support@pigscanfly.ca")
-class OrderTestBase(TestCase):
-    """Orders and the Stripe webhook. Stripe itself is stubbed; the signature
-    verification is not."""
+
+
+class OrderTestMixin:
+    """Order and Stripe-webhook helpers, independent of which TestCase base.
+
+    Everything lives here rather than on ``OrderTestBase`` so it can be mixed
+    into a ``TransactionTestCase`` too; ``override_settings`` refuses to
+    decorate a plain mixin, so concrete classes apply
+    ``ORDER_TEST_SETTINGS`` themselves.
+    """
 
     fixtures = ["initial_products"]
+    # Supplied by the concrete TestCase this gets mixed into; named here so
+    # the helpers below type-check on the mixin on its own.
+    client: Client
 
     def setUp(self):
         patcher = mock.patch("main.models.Payments")
@@ -184,6 +198,12 @@ class OrderTestBase(TestCase):
             "HTTP_STRIPE_SIGNATURE": signature}
         return self.client.post(
             WEBHOOK_URL, data=body, content_type="application/json", **extra)
+
+
+@override_settings(**ORDER_TEST_SETTINGS)
+class OrderTestBase(OrderTestMixin, TestCase):
+    """Orders and the Stripe webhook. Stripe itself is stubbed; the signature
+    verification is not."""
 
 
 def write_book_archive(directory, stem=EBOOK_STEM) -> Path:

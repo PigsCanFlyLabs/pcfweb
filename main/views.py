@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from datetime import timedelta
 from urllib.parse import quote, urlparse
 
 from typing import *
@@ -890,8 +891,10 @@ class StripeWebhookView(View):
     solely by the signature on the body. Every path out of here that is not a
     verified payload is a 400 before any state is touched.
 
-    Everything runs synchronously: the work is one UPDATE and one email, and
-    a queue would be more moving parts than the whole feature.
+    Everything runs synchronously, but each post-payment action has a durable
+    completion marker on the order.  A redelivery of a paid event resumes any
+    action whose marker is still empty; this matters when a worker disappears
+    after the paid transition has committed but before fulfilment finishes.
     """
 
     # Both mean "the money arrived". async_payment_succeeded is the delayed
@@ -914,6 +917,13 @@ class StripeWebhookView(View):
     # pay-what-you-want with a floor of zero, and the owner's decision is that
     # a $0 order is still an order and the book still gets delivered.
     PAID_PAYMENT_STATUSES = frozenset({"paid", "no_payment_required"})
+
+    # How long a fulfilment claim stays valid. Long enough that a worker
+    # working through a slow Stripe lookup and two SMTP sends keeps its claim
+    # -- the gunicorn timeout is 60s, so no live request can outlast this --
+    # and short enough that a worker killed mid-fulfilment is retried well
+    # inside the three days Stripe keeps redelivering.
+    FULFILMENT_LEASE = timedelta(minutes=15)
 
     def post(self, request):
         secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
@@ -980,23 +990,103 @@ class StripeWebhookView(View):
                 pk=order.pk, status=Order.Status.PENDING).update(**fields)
 
         if not updated:
+            order.refresh_from_db()
+            if order.status == Order.Status.PAID:
+                logger.info(
+                    "Order #%s is already PAID; retrying incomplete "
+                    "fulfilment for Stripe session %s.",
+                    order.pk, session.get("id"))
+                self.fulfil_order(order)
+                return
             logger.info(
                 "Order #%s is already past PENDING; ignoring a duplicate "
                 "delivery of Stripe session %s.", order.pk, session.get("id"))
             return
 
         order.refresh_from_db()
-        # Only the delivery that actually moved the row gets here, so this
-        # runs once per order -- which is exactly what keeps a webhook
-        # re-delivery from emailing the customer their book a second time.
-        # All three calls are best-effort by construction: the payment is
-        # already recorded and must not be undone by a secondary lookup, a
-        # missing file or an SMTP outage.
-        order.reconcile_line_items()
-        # Before notify_owner, so the owner's email can report whether the
-        # customer actually got their download.
-        order.deliver_digital_goods()
-        order.notify_owner()
+        self.fulfil_order(order)
+
+    def fulfil_order(self, order: Order) -> None:
+        """Run only the paid order actions that have not completed yet.
+
+        The PAID transition deliberately commits before this method.  Each
+        successful action writes its own marker, so a crash at any point is
+        repaired by Stripe's next delivery rather than turning PAID into a
+        terminal, unfulfilled state.
+        """
+        if not self.claim_fulfilment(order):
+            logger.info(
+                "Order #%s fulfilment is already claimed by another worker; "
+                "leaving it to them.", order.pk)
+            return
+        try:
+            order.refresh_from_db()
+            if order.reconciled_at is None:
+                # Whether the owner has already been told about this order
+                # *before* this attempt can change the answer. See below.
+                notified_before = order.notified_at is not None
+                order.reconcile_line_items()
+                order.refresh_from_db()
+                if notified_before and order.reconciled_at is not None:
+                    # An earlier delivery could not reach Stripe, so the owner
+                    # was emailed a pick list built from the cart snapshot and
+                    # told it was unverified. This attempt got the real
+                    # quantities, which may differ -- the customer can change
+                    # them on Stripe's hosted page. Clearing the marker
+                    # reissues the notification below, because otherwise the
+                    # only instruction the owner ever received says to ship
+                    # numbers the database now knows are wrong.
+                    #
+                    # Bounded to one extra email per order: reconciled_at only
+                    # goes null -> set once, so this can never fire twice.
+                    logger.info(
+                        "Order #%s reconciled on a retry after the owner was "
+                        "notified from an unverified snapshot; reissuing the "
+                        "notification.", order.pk)
+                    Order.objects.filter(pk=order.pk).update(notified_at=None)
+                    order.notified_at = None
+
+            order.refresh_from_db()
+            if (order.digital_delivery_sent_at is None
+                    and order.digital_items()):
+                order.deliver_digital_goods()
+
+            # Kept last so the owner's message reports the final reconciliation
+            # and digital-delivery outcome.
+            order.refresh_from_db()
+            if order.notified_at is None:
+                order.notify_owner()
+        finally:
+            self.release_fulfilment(order)
+
+    def claim_fulfilment(self, order: Order) -> bool:
+        """Take the exclusive right to fulfil this order, or report defeat.
+
+        One conditional UPDATE, which both Postgres and SQLite apply
+        atomically, so of two workers racing on the same order exactly one
+        sees a row count of 1. Nothing else here serialises them: the row lock
+        in handle_paid is released with its transaction, and each completion
+        marker is only written once its side effect has already happened, so
+        without this both workers would read null markers and both would send.
+        """
+        now = timezone.now()
+        return bool(
+            Order.objects.filter(pk=order.pk).filter(
+                Q(fulfilment_claimed_at__isnull=True)
+                | Q(fulfilment_claimed_at__lt=now - self.FULFILMENT_LEASE)
+            ).update(fulfilment_claimed_at=now))
+
+    @staticmethod
+    def release_fulfilment(order: Order) -> None:
+        """Drop the claim so the next delivery can pick up anything left.
+
+        Released rather than left to expire because a run that finished with
+        an action still incomplete -- a bounced owner email, say -- should be
+        retried by Stripe's next delivery immediately, not after the lease
+        runs out.
+        """
+        Order.objects.filter(pk=order.pk).update(fulfilment_claimed_at=None)
+        order.fulfilment_claimed_at = None
 
     def handle_cancelled(self, session, reason: str) -> None:
         order = self.find_order(session)
