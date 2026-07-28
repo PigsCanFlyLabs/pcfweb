@@ -1321,6 +1321,17 @@ class PwywMergeIsNotBilledUnseenTest(CartTestBase):
         self.assertFalse(Order.objects.exists())
         self.assertContains(response, "combined with the basket")
 
+    def test_reverse_reprice_checkout_straight_after_signing_in_is_held(self):
+        self._sign_in_over_a_saved_basket(5000, "5.00")
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            response = self.client.post("/checkout", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        create.assert_not_called()
+        self.assertFalse(Order.objects.exists())
+        self.assertContains(response, "combined with the basket")
+
     def test_posting_checkout_twice_without_loading_the_cart_is_still_held(self):
         # The hold used to be consumed by the first POST rather than by the
         # buyer seeing the basket, so the second one billed the repriced cart
@@ -1397,6 +1408,22 @@ class PwywMergeIsNotBilledUnseenTest(CartTestBase):
         self.assertEqual(item.unit_amount, 5000)
         self.assertEqual(item.quantity, 2)
         self.assertEqual(order.amount_total, 10000)
+
+    def test_reverse_reprice_goes_through_once_the_cart_has_been_loaded(self):
+        self._sign_in_over_a_saved_basket(5000, "5.00")
+        self.client.post("/checkout", follow=True)
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/s", id="cs_reverse_merged")
+            self.client.post("/checkout")
+
+        self.assertEqual(create.call_count, 1)
+        order = Order.objects.get(stripe_session_id="cs_reverse_merged")
+        item = order.items.get()
+        self.assertEqual(item.unit_amount, 500)
+        self.assertEqual(item.quantity, 2)
+        self.assertEqual(order.amount_total, 1000)
 
     def test_a_rendered_cart_clears_the_hold_for_the_other_tab_too(self):
         # CONTROL -- passes on e4ce4c3 too, where the cart also cleared

@@ -5,10 +5,13 @@ from unittest import mock
 
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
+from django.http import HttpResponse
 from django.test import Client
+from django.utils.cache import add_never_cache_headers
 
 from main.models import Cart, CartProduct, Product
-from main.tests.base import CartTestBase
+from main.tests.base import (
+    assert_never_cache_response, cache_control_directives, CartTestBase)
 from main.views import AddToCartView
 
 
@@ -114,6 +117,33 @@ class CartHttpMethodTest(CartTestBase):
             response, f'action="/remove-from-cart/{cart_product.pk}"')
         self.assertContains(response, "csrfmiddlewaretoken")
         self.assertNotContains(response, 'href="/remove-from-cart')
+
+
+class CartCacheControlTest(CartTestBase):
+    """The cart is per-session state and must never be shared by a cache."""
+
+    def test_the_cart_page_is_marked_uncacheable(self):
+        self.client.post("/add-to-cart/106/1", {"chosen_amount": "5.00"})
+
+        response = self.client.get("/cart")
+
+        self.assertEqual(response.status_code, 200)
+        assert_never_cache_response(self, response)
+
+    def test_the_cache_assertion_rejects_shared_cache_directives(self):
+        response = HttpResponse()
+        add_never_cache_headers(response)
+        response["Cache-Control"] += ", public, s-maxage=3600"
+
+        self.assertIn("private", response["Cache-Control"])
+        self.assertIn("no-store", response["Cache-Control"])
+        self.assertIn("no-cache", response["Cache-Control"])
+        self.assertIn("public", cache_control_directives(response))
+        self.assertTrue(
+            any(directive.startswith("s-maxage=")
+                for directive in cache_control_directives(response)))
+        with self.assertRaises(AssertionError):
+            assert_never_cache_response(self, response)
 
 
 class AddToCartWithoutJavascriptTest(CartTestBase):

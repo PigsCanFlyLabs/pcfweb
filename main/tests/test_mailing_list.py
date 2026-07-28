@@ -29,6 +29,7 @@ from newsletter.models import Newsletter, Subscription
 from main import mailing
 from main.models import (
     MailingListDelivery, MailingListMessage, SuppressedAddress)
+from main.tests.base import assert_never_cache_response
 from main.views import MailingListSubscribeView
 
 
@@ -1564,6 +1565,7 @@ class AdminPagesTest(MailingListTestBase):
         response = self.client.get("/timbit/admin/home")
 
         self.assertEqual(response.status_code, 200)
+        assert_never_cache_response(self, response)
         for path in ["/timbit/admin/newsletter/subscription/",
                      "/timbit/admin/newsletter/newsletter/",
                      "/timbit/admin/mailing-list/import",
