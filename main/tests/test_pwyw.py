@@ -1145,6 +1145,216 @@ class ZeroCheckoutFailsGracefullyTest(CartTestBase):
                     self.client.post("/checkout")
 
 
+class PwywAmountSurvivesACartMergeTest(CartTestBase):
+    """Signing in must not reprice what the buyer is looking at.
+
+    An anonymous basket is folded into the saved one on sign-in. The merge
+    summed quantities and kept the saved row wholesale, so a saved amount
+    silently replaced the amount the buyer had just chosen and just seen --
+    and because checkout can be posted straight after signing in, there was
+    no point at which they could have noticed. Same surprise at the till the
+    round-down display exists to prevent, arriving by another route.
+    """
+
+    def _anonymous_row(self, amount):
+        """Put the e-book in this client's anonymous basket at `amount`.
+
+        Scoped to the user-less cart: the saved basket holds a row for the
+        same product, which is the whole point of the merge under test.
+        """
+        self.client.post(
+            f"/add-to-cart/{EBOOK_PK}/1", {"chosen_amount": amount})
+        return CartProduct.objects.get(
+            cart__user__isnull=True, product_id=EBOOK_PK)
+
+    def _saved_cart(self, user, amount, quantity=1):
+        cart = Cart.objects.create(user=user)
+        row = CartProduct.objects.create(
+            cart=cart, product=Product.objects.get(pk=EBOOK_PK),
+            quantity=quantity, chosen_amount=amount)
+        cart.products.add(row)
+        return cart
+
+    def _merged_row(self, user):
+        return CartProduct.objects.get(cart__user=user, product_id=EBOOK_PK)
+
+    def test_the_amount_the_buyer_was_looking_at_wins(self):
+        # Codex's scenario: $5.00 saved, $50.00 on screen, sign in, checkout.
+        # The buyer saw 50.00 and was billed 10.00 (500 x 2).
+        user = self.make_user()
+        self._saved_cart(user, 500)
+        self._anonymous_row("50.00")
+
+        self.client.force_login(user)
+        self.client.get("/cart")
+
+        self.assertEqual(self._merged_row(user).chosen_amount, 5000)
+
+    def test_the_reverse_ordering_also_keeps_the_session_amount(self):
+        # $50.00 saved, $5.00 on screen: the session row still wins, so this
+        # is not just "the larger amount".
+        user = self.make_user()
+        self._saved_cart(user, 5000)
+        self._anonymous_row("5.00")
+
+        self.client.force_login(user)
+        self.client.get("/cart")
+
+        self.assertEqual(self._merged_row(user).chosen_amount, 500)
+
+    def test_a_saved_amount_gives_way_to_an_unnamed_session_amount(self):
+        # Only the saved row named an amount. The anonymous basket was
+        # showing the suggestion, so the suggestion is what the buyer saw.
+        user = self.make_user()
+        self._saved_cart(user, 500)
+        self._anonymous_row("12.99")
+        CartProduct.objects.filter(cart__user__isnull=True).update(
+            chosen_amount=None)
+
+        self.client.force_login(user)
+        self.client.get("/cart")
+
+        row = self._merged_row(user)
+        self.assertIsNone(row.chosen_amount)
+        self.assertEqual(row.effective_unit_amount(), 1299)
+
+    def test_an_unnamed_saved_amount_takes_the_session_one(self):
+        user = self.make_user()
+        cart = self._saved_cart(user, None)
+        self.assertIsNone(CartProduct.objects.get(cart=cart).chosen_amount)
+        self._anonymous_row("3.00")
+
+        self.client.force_login(user)
+        self.client.get("/cart")
+
+        self.assertEqual(self._merged_row(user).chosen_amount, 300)
+
+    def test_matching_amounts_are_not_reported_as_a_change(self):
+        # CONTROL -- passes on cde332d too, where the saved amount was
+        # kept regardless. Here to scope the notice to a real change, so
+        # merging alone does not nag or hold up checkout.
+        user = self.make_user()
+        self._saved_cart(user, 500)
+        self._anonymous_row("5.00")
+
+        self.client.force_login(user)
+        response = self.client.get("/cart")
+
+        self.assertEqual(self._merged_row(user).chosen_amount, 500)
+        self.assertNotContains(response, "combined with the basket")
+
+    def test_two_unnamed_amounts_are_not_reported_as_a_change(self):
+        # CONTROL -- passes on cde332d too, for the same reason: None
+        # equals None, so nothing moved and there is nothing to say.
+        user = self.make_user()
+        self._saved_cart(user, None)
+        self.client.post(f"/add-to-cart/{EBOOK_PK}/1")
+
+        self.client.force_login(user)
+        response = self.client.get("/cart")
+
+        self.assertIsNone(self._merged_row(user).chosen_amount)
+        self.assertNotContains(response, "combined with the basket")
+
+    def test_the_stale_price_id_is_dropped_when_the_amount_moves(self):
+        # The saved row's Stripe Price was minted for the old amount, and a
+        # Price cannot be repriced.
+        user = self.make_user()
+        cart = self._saved_cart(user, 500)
+        CartProduct.objects.filter(cart=cart).update(price_id="price_old")
+        self._anonymous_row("50.00")
+
+        self.client.force_login(user)
+        self.client.get("/cart")
+
+        self.assertNotEqual(self._merged_row(user).price_id, "price_old")
+
+    def test_an_ordinary_product_merge_is_untouched(self):
+        # CONTROL -- the reconciliation is scoped to pay-what-you-want rows;
+        # quantity summing for everything else is unchanged.
+        user = self.make_user()
+        cart = Cart.objects.create(user=user)
+        row = CartProduct.objects.create(
+            cart=cart, product=Product.objects.get(pk=PRINT_PK), quantity=2)
+        cart.products.add(row)
+        self.client.post(f"/add-to-cart/{PRINT_PK}/3")
+
+        self.client.force_login(user)
+        self.client.get("/cart")
+
+        merged = CartProduct.objects.get(cart__user=user, product_id=PRINT_PK)
+        self.assertEqual(merged.quantity, 5)
+        self.assertIsNone(merged.chosen_amount)
+
+
+class PwywMergeIsNotBilledUnseenTest(CartTestBase):
+    """A merge that moved an amount must be shown before it is charged."""
+
+    def _sign_in_over_a_saved_basket(self, saved, session):
+        user = self.make_user()
+        cart = Cart.objects.create(user=user)
+        row = CartProduct.objects.create(
+            cart=cart, product=Product.objects.get(pk=EBOOK_PK),
+            quantity=1, chosen_amount=saved)
+        cart.products.add(row)
+        self.client.post(
+            f"/add-to-cart/{EBOOK_PK}/1", {"chosen_amount": session})
+        self.client.force_login(user)
+        return user
+
+    def test_checkout_straight_after_signing_in_goes_to_the_cart_instead(self):
+        self._sign_in_over_a_saved_basket(500, "50.00")
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            response = self.client.post("/checkout", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        create.assert_not_called()
+        self.assertFalse(Order.objects.exists())
+        self.assertContains(response, "combined with the basket")
+
+    def test_the_second_attempt_goes_through_at_the_session_amount(self):
+        # The hold is one-shot: they have now seen the combined basket.
+        self._sign_in_over_a_saved_basket(500, "50.00")
+        self.client.post("/checkout", follow=True)
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/s", id="cs_merged")
+            self.client.post("/checkout")
+
+        order = Order.objects.get(stripe_session_id="cs_merged")
+        item = order.items.get()
+        self.assertEqual(item.unit_amount, 5000)
+        self.assertEqual(item.quantity, 2)
+        self.assertEqual(order.amount_total, 10000)
+
+    def test_visiting_the_cart_first_also_clears_the_hold(self):
+        self._sign_in_over_a_saved_basket(500, "50.00")
+        cart_response = self.client.get("/cart")
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/s", id="cs_seen")
+            response = self.client.post("/checkout")
+
+        self.assertContains(cart_response, "combined with the basket")
+        self.assertEqual(response.status_code, 302)
+        create.assert_called_once()
+
+    def test_a_merge_that_changed_nothing_does_not_hold_checkout(self):
+        # CONTROL -- the hold is scoped to an actual reprice, not to merging.
+        self._sign_in_over_a_saved_basket(500, "5.00")
+
+        with mock.patch("main.payments.stripe.checkout.Session.create") as create:
+            create.return_value = mock.Mock(
+                url="https://checkout.example/s", id="cs_same")
+            response = self.client.post("/checkout")
+
+        self.assertEqual(response.status_code, 302)
+        create.assert_called_once()
+
+
 class PwywCopyStaysOutOfTheFeedTest(TestCase):
     """Google needs a number it can parse, not a sentence about choosing.
 

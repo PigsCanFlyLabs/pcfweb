@@ -612,6 +612,22 @@ class BaseCartView():
     # decision.
     MAX_QUANTITY = 9223372036854775807
 
+    # Session key holding the names of pay-what-you-want products whose
+    # amount was changed by a cart merge. Set by _merge_cart, and consumed by
+    # whichever of the cart or checkout the buyer reaches first -- the cart
+    # shows it and carries on, checkout shows it and refuses to bill until
+    # they have looked.
+    PWYW_MERGE_NOTICE_KEY = "pwyw_merge_repriced"
+
+    @staticmethod
+    def _merge_notice(names) -> str:
+        listed = ", ".join(names)
+        return (
+            f"Your saved basket already held {listed}, so it has been "
+            "combined with the basket you were using: the quantity is the "
+            "total of both, and the amount is the one you chose most "
+            "recently. Please check it before paying.")
+
     @classmethod
     def quantity_sum(cls, existing_quantity: int, added_quantity: int) -> int:
         """Add two valid quantities without overflowing the database field."""
@@ -660,12 +676,65 @@ class BaseCartView():
         self._merge_cart(request, session_cart, user_cart)
         return user_cart
 
+    @staticmethod
+    def _reconcile_pwyw_amount(existing, incoming) -> bool:
+        """Decide which chosen amount survives a merge, and say if it moved.
+
+        `existing` is the row already in the user's saved cart. `incoming` is
+        the row from the anonymous session cart -- the one the buyer has been
+        looking at, and the one they last named an amount on.
+
+        The session row always wins, because its amount is the number the
+        buyer was last shown. Keeping the saved row's amount instead means
+        billing them something they never saw, which is the same surprise at
+        the till that the round-down display exists to prevent.
+
+        The five cases, all of which fall out of one comparison:
+
+          only the session row has an amount   -> that amount, and say so
+          only the saved row has an amount     -> cleared, so the suggestion
+                                                  stands, and say so; the
+                                                  session cart was showing
+                                                  the suggestion, not the
+                                                  saved amount
+          both, and they differ                -> the session one, and say so
+          both, and they agree                 -> unchanged, nothing to say
+          neither                              -> unchanged, nothing to say
+
+        Returns True when the surviving amount is not the one the saved row
+        held, i.e. when the buyer needs telling before anything is billed.
+        """
+        if not existing.product.is_pwyw:
+            return False
+        if existing.chosen_amount == incoming.chosen_amount:
+            # Covers both-None: nothing was named on either side, the
+            # suggestion still stands, and there is nothing to report.
+            return False
+        existing.chosen_amount = incoming.chosen_amount
+        # A Stripe Price is immutable and this row's was minted for the old
+        # amount, so it has to go. refresh_pwyw_price() would re-mint at
+        # checkout regardless; clearing it here keeps price_id and
+        # effective_unit_amount() consistent in the meantime.
+        existing.price_id = None
+        return True
+
     def _merge_cart(self, request, session_cart: Cart, user_cart: Cart) -> None:
         """Fold an anonymous session cart into the logged-in user's cart.
 
         Rows for a product the user cart already holds have their quantity
         added on and are dropped; the rest are reparented. Either way we never
         end up with two rows for the same (cart, product).
+
+        Quantities are still summed, including when the two rows carried
+        different pay-what-you-want amounts. Two rows at different amounts are
+        arguably not the same line at all, but this schema cannot hold two
+        rows for one (cart, product) -- there is a unique constraint -- so
+        some rule has to combine them, and dropping the saved row's quantity
+        would throw away something the buyer put there on purpose. Summing is
+        the rule this merge has always used and it is about count, not price.
+        What changes is that the result is no longer billed unseen: any row
+        whose amount moved is recorded below, and CheckoutView refuses to go
+        to Stripe until the buyer has been shown the combined cart.
 
         The whole thing is one transaction: adding a quantity onto the
         surviving row and deleting the row it came from are two statements,
@@ -675,6 +744,7 @@ class BaseCartView():
         surviving row at MAX_QUANTITY, dropping the duplicate session row and
         warning the shopper.
         """
+        repriced = []
         with transaction.atomic():
             # Rows are linked to a cart both by FK and by the M2M; take the
             # union so a row that only made it into one still gets merged.
@@ -685,6 +755,8 @@ class BaseCartView():
                 existing = CartProduct.objects.filter(
                     cart=user_cart, product=cart_product.product).first()
                 if existing is not None:
+                    if self._reconcile_pwyw_amount(existing, cart_product):
+                        repriced.append(existing.product.name)
                     try:
                         existing.quantity = self.quantity_sum(
                             existing.quantity, cart_product.quantity)
@@ -711,6 +783,11 @@ class BaseCartView():
         # once the merge has actually committed. If the block above rolled
         # back, the session still points at an intact cart.
         del request.session["cart_id"]
+        if repriced:
+            # Same reason, same timing: only record this once the reprice it
+            # describes is actually in the database. CheckoutView reads it and
+            # will not bill until the buyer has seen the combined cart.
+            request.session[self.PWYW_MERGE_NOTICE_KEY] = repriced
 
 class SignupView(View):
     def get(self, request):
@@ -772,6 +849,13 @@ class GoogleProductFeed(View):
 class CartView(View, BaseCartView):
     def get(self, request):
         cart = self.get_cart(request)
+        # Consumed here as well as at checkout: a buyer who comes to the cart
+        # of their own accord is being shown the combined basket, which is
+        # exactly what the notice is for, so there is no reason to bounce
+        # them off checkout afterwards as well.
+        repriced = request.session.pop(self.PWYW_MERGE_NOTICE_KEY, None)
+        if repriced:
+            messages.warning(request, self._merge_notice(repriced))
         cart_products = cart.products.select_related("product")
         # A noorder line contributes nothing to the total. Public add-to-cart
         # refuses these and checkout re-checks, so one is only here because it
@@ -921,6 +1005,21 @@ class CheckoutView(View, BaseCartView):
         back from a webhook to this cart, which will be gone by then.
         """
         cart = self.get_cart(request)
+        # get_cart() may have just merged an anonymous basket into the saved
+        # one and changed a pay-what-you-want amount doing it. That reprice
+        # must not be billed unseen: this is the same rule as showing the
+        # rounded figure before charging it, and a merge that silently swaps
+        # the amount the buyer was just looking at breaks it by another route.
+        # Bounce to the cart, which renders the combined basket and the
+        # notice; the key is consumed there or here, so the next attempt goes
+        # through.
+        repriced = request.session.pop(self.PWYW_MERGE_NOTICE_KEY, None)
+        if repriced:
+            logger.info(
+                "Held checkout for cart %s: merge repriced %s.",
+                cart.pk, ", ".join(repriced))
+            messages.warning(request, self._merge_notice(repriced))
+            return redirect('cart')
         if not cart.products.exists():
             # Stripe rejects a session with no line items anyway; bailing here
             # keeps empty checkouts from leaving orphan PENDING orders behind.

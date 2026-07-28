@@ -160,8 +160,16 @@
 			   What the buyer will actually be charged, kept in step with the
 			   field above by calculateTotal(). Rounding must not be a
 			   surprise at the till: typing 0.50 says $0.00 here, before
-			   anything is committed. Rendered server-side too, so it is
-			   right on first paint and with JavaScript off.
+			   anything is committed.
+			
+			   Rendered server-side so it is right on first paint, before any
+			   script has run. It is NOT right with JavaScript off once the
+			   buyer edits the field: pwyw_charged_amount is the rounded
+			   *suggestion*, and the server does not learn what they typed
+			   until the form is posted. With no script, this line stays at
+			   the suggestion and the cart is where the real figure appears,
+			   already rounded, before checkout. Do not describe this as a
+			   no-JavaScript guarantee -- it is not one.
 			{% endcomment %}
 			<p class="pwyw-charge">You will be charged:
 			    <strong id="pwyw-charge-amount">${{ product.pwyw_charged_amount }}</strong></p>
