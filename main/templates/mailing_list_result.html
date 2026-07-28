@@ -1,0 +1,13 @@
+{% extends 'external-base.html' %}
+{% block content %}
+  <p>{{ message }}</p>
+  {% if ok %}
+    <p>We only mail when there is something worth saying, and every message
+      has an unsubscribe link in it.</p>
+    {% if unsubscribe_url %}
+      <p><a href="{{ unsubscribe_url }}">Changed your mind? Unsubscribe.</a></p>
+    {% endif %}
+  {% else %}
+    <p><a href="{% url 'subscribe' %}">Try again</a></p>
+  {% endif %}
+{% endblock content %}

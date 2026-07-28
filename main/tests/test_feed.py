@@ -5,6 +5,8 @@ up days later in Merchant Center rather than in any request, so the shapes
 worth pinning are the ones a template change could quietly break.
 """
 
+import html as html_module
+import re
 from unittest import mock
 from xml.etree import ElementTree
 
@@ -178,6 +180,21 @@ class ProductCopyEscapingTest(TestCase):
                 cat=Product.Categories.BOOKS,
                 external_product_id="prod_esc", **fields)
 
+    def description_html(self, response):
+        html = response.content.decode()
+        match = re.search(
+            r'<div class="product-description">(.*?)</div>', html, re.DOTALL)
+        self.assertIsNotNone(match)
+        assert match is not None  # for mypy
+        return match.group(1)
+
+    def paragraph_texts(self, response):
+        return [
+            html_module.unescape(text.strip())
+            for text in re.findall(
+                r"<p>(.*?)</p>", self.description_html(response), re.DOTALL)
+        ]
+
     def test_the_description_is_escaped(self):
         product = self.make_product("Angle < bracket & ampersand")
 
@@ -201,6 +218,35 @@ class ProductCopyEscapingTest(TestCase):
 
         self.assertIn("<p>", rendered)
         self.assertIn("signed on request", rendered)
+
+    def test_blank_lines_become_distinct_paragraphs(self):
+        product = self.make_product("First paragraph.\n\nSecond paragraph.")
+
+        rendered = str(product.get_display_text())
+
+        self.assertIn("<p>First paragraph.</p>", rendered)
+        self.assertIn("<p>Second paragraph.</p>", rendered)
+
+    def test_a_single_paragraph_product_page_stays_a_single_description_block(self):
+        product = self.make_product("Plain prose.", print_isbn="9781449358624")
+
+        response = self.client.get(f"/product/{product.pk}")
+
+        self.assertEqual(
+            self.paragraph_texts(response),
+            ["Plain prose.", Product.SIGNED_ON_REQUEST_NOTE])
+
+    def test_product_page_paragraphization_still_escapes_apostrophes_and_tags(self):
+        product = self.make_product(
+            "O'Hara <tag>\n\nSecond <b>paragraph</b>.")
+
+        response = self.client.get(f"/product/{product.pk}")
+        html = self.description_html(response)
+
+        self.assertIn("O&#x27;Hara &lt;tag&gt;", html)
+        self.assertIn("Second &lt;b&gt;paragraph&lt;/b&gt;.", html)
+        self.assertNotIn("<tag>", html)
+        self.assertNotIn("<b>paragraph</b>", html)
 
     def test_ebook_isbn_does_not_offer_a_signed_copy(self):
         print_product = self.make_product("Print.", print_isbn="9781449358624")
