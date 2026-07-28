@@ -10,7 +10,8 @@ from django.test import RequestFactory, TestCase
 
 from main.models import Cart, CartProduct, Order, Product
 from main.payments import Payments
-from main.tests.base import EBOOK_PK, BookAssetRootMixin, OrderTestBase
+from main.tests.base import (
+    EBOOK_PK, BookAssetRootMixin, CartTestBase, OrderTestBase)
 
 
 class PwywPriceTest(TestCase):
@@ -196,3 +197,130 @@ class ZeroTotalOrderTest(BookAssetRootMixin, OrderTestBase):
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.PENDING)
         self.assertEqual(self.order_emails(), [])
+
+
+def squashed(response):
+    """Response body with runs of whitespace collapsed to single spaces.
+
+    The notices below wrap across several template lines, so a raw substring
+    search would miss them over the indentation.
+    """
+    return " ".join(response.content.decode().split())
+
+
+# The card label and the receipt note, quoted once so a test cannot drift
+# away from the template and still pass.
+CARD_LABEL = "Pay what you want &mdash; suggested amount, or nothing at all"
+RECEIPT_NOTE = (
+    "Pay what you want: shown at the suggested amount &mdash; see the "
+    "order total for what was paid.")
+CART_FLOOR = "nothing at all is a valid amount"
+
+
+class PwywIsLabelledWhereverAPriceIsShownTest(CartTestBase):
+    """Part 3: a bare price on a pay-what-you-want row reads as a fixed one.
+
+    The product page already says the amount is a suggestion, the buyer
+    chooses, and zero is allowed. The listing cards showed the number with
+    nothing beside it, so they said the opposite by omission.
+
+    CartTestBase for the Stripe stub: creating a Product and adding one to a
+    cart both mint Stripe objects on save.
+    """
+
+    def test_the_products_listing_labels_the_pwyw_ebook(self):
+        response = self.client.get("/products")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(CARD_LABEL, squashed(response))
+
+    def test_the_products_listing_leaves_fixed_price_rows_alone(self):
+        # The label is conditional, not decoration on every card.
+        response = self.client.get("/products")
+
+        self.assertEqual(squashed(response).count(CARD_LABEL), 1)
+
+    def test_the_homepage_carousel_labels_a_pwyw_product(self):
+        # The carousel shows the three dearest rows per category, and the
+        # e-book is not one of them -- so price this above the fixtures.
+        Product.objects.create(
+            name="A Dear E-book", description="d", price=999999,
+            is_pwyw=True, cat=Product.Categories.BOOKS,
+            delivery_type=Product.DeliveryTypes.DIGITAL)
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(CARD_LABEL, squashed(response))
+
+    def test_the_cart_says_zero_is_allowed(self):
+        # The cart already called the total a suggestion and said the buyer
+        # chooses at checkout; it did not say the floor was zero.
+        self.client.post(f"/add-to-cart/{EBOOK_PK}/1")
+
+        response = self.client.get("/cart")
+
+        self.assertIn(CART_FLOOR, squashed(response))
+
+
+class PwywReceiptTest(BookAssetRootMixin, OrderTestBase):
+    """Part 3: the receipt line and the receipt total disagree on purpose.
+
+    OrderItem.unit_amount snapshots Product.price, which on a
+    pay-what-you-want row is the suggestion -- so a buyer who paid nothing
+    sees a 12.99 line above a 0.00 total. The owner's email has explained
+    that since order_summary_text; the buyer's copy had not.
+    """
+
+    def _paid_for_nothing(self):
+        order = self.place_order(product_pk=EBOOK_PK, quantity=1)
+        self.deliver(self.event_body(
+            order, payment_status="no_payment_required",
+            amount_total=0, amount_subtotal=0,
+            total_details={"amount_tax": 0, "amount_shipping": 0}))
+        order.refresh_from_db()
+        return order
+
+    def test_the_receipt_explains_the_line_the_buyer_was_not_charged(self):
+        order = self._paid_for_nothing()
+
+        response = self.client.get(
+            f"/checkout/success?session_id={order.stripe_session_id}")
+
+        body = squashed(response)
+        self.assertEqual(response.status_code, 200)
+        # The mismatch this note exists to explain: a 12.99 line, a 0.00 total.
+        self.assertIn("12.99", body)
+        self.assertIn("Total: $0.00", body)
+        self.assertIn(RECEIPT_NOTE, body)
+
+    def test_a_fixed_price_receipt_carries_no_pwyw_note(self):
+        order = self.place_order(product_pk=100, quantity=1)
+        self.deliver(self.event_body(order))
+
+        response = self.client.get(
+            f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertNotIn(RECEIPT_NOTE, squashed(response))
+
+
+class PwywCopyStaysOutOfTheFeedTest(TestCase):
+    """Google needs a number it can parse, not a sentence about choosing.
+
+    A regression guard, not new behaviour: get_feed_price/get_feed_description
+    are already separate plain-text paths and this passes before the change
+    too. It is here because the presentation copy above is one careless
+    template include away from the feed.
+    """
+
+    fixtures = ["initial_products"]
+
+    def test_the_feed_prices_the_pwyw_ebook_as_a_bare_number(self):
+        response = self.client.get("/google_products.xml")
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("<g:price>12.99 USD</g:price>", body)
+        for fragment in ("Pay what you want", "pay-what-you-want",
+                         "suggested amount", CART_FLOOR):
+            self.assertNotIn(fragment, body)
