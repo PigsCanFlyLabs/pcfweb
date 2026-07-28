@@ -116,7 +116,7 @@
 		    {% endif %}
 		    {# get_display_text returns escaped markup (format_html), so #}
 		    {# this needs no autoescape override. #}
-		    <span>{{ product.get_display_text }}</span>
+		    <div class="product-description">{{ product.get_display_text }}</div>
 		    {% if product.is_physical_good and not product.noorder %}
 		    {% include 'components/shipping-notice.html' %}
 		    {% endif %}

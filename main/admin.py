@@ -1,5 +1,7 @@
 # type: ignore
 from django.contrib import admin
+from django.urls import reverse
+from django.utils.html import format_html
 
 from main.models import *
 from django.apps import apps
@@ -49,6 +51,73 @@ class OrderAdmin(admin.ModelAdmin):
     # Everything else is Stripe's record of what happened, not ours to edit.
     readonly_fields = tuple(
         f.name for f in Order._meta.fields if f.name != "status")
+
+@admin.register(SuppressedAddress)
+class SuppressedAddressAdmin(admin.ModelAdmin):
+    """The never-email list. Add one here; add many from the import page."""
+
+    list_display = ("email", "reason", "created_at", "created_by")
+    search_fields = ("email", "reason")
+    readonly_fields = ("created_at", "created_by")
+    date_hierarchy = "created_at"
+
+    def save_model(self, request, obj, form, change):
+        if obj.created_by is None:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
+
+
+class MailingListDeliveryInline(admin.TabularInline):
+    """Who this mailing actually reached. Read-only: it is a record of what
+    happened, and editing it away would mean sending somebody a second copy."""
+
+    model = MailingListDelivery
+    extra = 0
+    can_delete = False
+    fields = ("email", "subscription", "status", "error", "created_at")
+    readonly_fields = fields
+    # A finished mailing has one row per recipient; the whole list would make
+    # the change page unusable.
+    max_num = 50
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(MailingListMessage)
+class MailingListMessageAdmin(admin.ModelAdmin):
+    list_display = ("subject", "status", "groups", "created_at", "sent_at",
+                    "send_link")
+    list_filter = ("status", "created_at")
+    search_fields = ("subject", "body")
+    filter_horizontal = ("interests",)
+    readonly_fields = ("send_link", "status", "created_at", "updated_at",
+                       "send_started_at", "sent_at", "created_by")
+    inlines = [MailingListDeliveryInline]
+
+    def save_model(self, request, obj, form, change):
+        if obj.created_by is None:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
+
+    @admin.display(description="going to")
+    def groups(self, obj):
+        """Straight from the model, so this cannot drift from what gets sent."""
+        return obj.audience_description()
+
+    @admin.display(description="send")
+    def send_link(self, obj):
+        """The way to the send page, on the changelist and on the change form.
+
+        Saving a mailing is not sending it, so without a link here the send
+        page is reachable only by knowing the URL.
+        """
+        if obj.pk is None:
+            return "Save this first, then a send link appears here."
+        return format_html(
+            '<a href="{}">send this mailing…</a>',
+            reverse("mailing-list-send", args=[obj.pk]))
+
 
 # Auto magic
 models = apps.get_models()
