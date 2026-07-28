@@ -38,12 +38,11 @@ import logging
 from typing import Any, List, Tuple
 
 from django.conf import settings
-from django.core.mail import send_mail
 from django.core.management.base import BaseCommand
 
 from main.digital import DigitalAssetError, asset_root, open_asset
 from main.models import Product
-from main.utils import admin_recipients
+from main.utils import email_admins
 
 logger = logging.getLogger(__name__)
 
@@ -168,23 +167,8 @@ class Command(BaseCommand):
         the primary from booting -- the log lines above have already been
         emitted and are what the deploy actually depends on.
         """
-        recipients = admin_recipients()
-        if not recipients:
-            logger.error(
-                "No ADMINS configured, so nobody was mailed about the missing "
-                "book file(s). Set the ORDER_NOTIFICATION_EMAIL env var.")
-            return
-        try:
-            send_mail(
-                SUBJECT,
-                body,
-                settings.DEFAULT_FROM_EMAIL,
-                recipients,
-                fail_silently=False,
-            )
-        except Exception:
-            logger.exception(
-                "Could not email %s about the missing book file(s).",
-                ", ".join(recipients))
-            return
-        self.stdout.write(f"Emailed {', '.join(recipients)}.")
+        if email_admins(
+                SUBJECT, body, logger,
+                "about the missing book file(s). Set the "
+                "ORDER_NOTIFICATION_EMAIL env var."):
+            self.stdout.write("Emailed ADMINS.")

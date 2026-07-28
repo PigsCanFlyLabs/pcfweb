@@ -29,6 +29,36 @@ logger = logging.getLogger(__name__)
 DEFAULT_CURRENCY = "usd"
 
 
+def normalize_email_identity(email: str) -> str:
+    """Return the canonical representation used for account identity."""
+    return email.strip().casefold()
+
+
+class EmailIdentity(models.Model):
+    """Database-enforced ownership of a normalized signup email address.
+
+    ``auth.User.email`` is not unique.  Keeping the reservation in this small
+    table lets signup establish uniqueness before it creates the User without
+    requiring a disruptive mid-project custom-user migration.
+    """
+
+    normalized_email = models.CharField(max_length=254)
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="email_identity")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                Lower("normalized_email"), name="unique_normalized_email"),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.normalized_email = normalize_email_identity(
+            self.normalized_email)
+        super().save(*args, **kwargs)
+
+
 # Create your models here.
 class Product(models.Model):
     description = models.TextField(default="No description.")
@@ -70,6 +100,20 @@ class Product(models.Model):
     preorder_only = models.BooleanField(default=False, null=False)
     noorder = models.BooleanField(default=False, null=False)
     backorder = models.BooleanField(default=False, null=False)
+    # Advisory ONLY, and deliberately not a fourth member of the three flags
+    # above. Those gate ordering; this one gates a sentence of copy and
+    # nothing else. An older edition that still sells is still sold, so this
+    # is read by the product page and by nothing in is_purchasable(),
+    # get_availability(), buy_text(), stock_description() or the Merchant
+    # feed -- setting it cannot remove a buy button or drop a row out of the
+    # catalogue. If you ever want "out of date" to also mean "stop selling
+    # it", that flag already exists and is called `noorder`; set that one and
+    # leave this meaning what it says. Pinned by
+    # OutOfDateIsAdvisoryOnlyTest, which asserts the *absence* of any effect.
+    #
+    # db_default as well as default, for the rolling-deploy reason spelled
+    # out on delivery_type below.
+    out_of_date = models.BooleanField(default=False, db_default=False)
     stock = models.PositiveIntegerField(
         default=0,
         db_default=0,
@@ -146,6 +190,29 @@ class Product(models.Model):
         max_length=250,
         blank=True)
     price = models.IntegerField(default=0)
+    # Manufacturer's suggested retail price, in the same units as `price`
+    # above: integer cents. A separate column rather than anything derived,
+    # because an MSRP is a publisher's number and not a function of ours.
+    #
+    # NULL means "no MSRP recorded", which is not the same as zero -- an MSRP
+    # of 0 would be a real (if odd) claim, whereas most rows simply have no
+    # such figure. That distinction is why this is nullable rather than
+    # defaulted to 0, and it is also what keeps the strikethrough off every
+    # row in the catalogue by default: see show_msrp().
+    #
+    # Nullable also makes it safe for a rolling deploy -- an INSERT from a
+    # pod that has never heard of this column omits it and gets NULL. It is
+    # deliberately absent from the OLD_CODE_PRODUCT_COLUMNS lists in
+    # test_schema/test_stock for exactly that reason.
+    msrp = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Suggested retail price in cents, same units as price. Leave "
+            "empty when there is no MSRP; it is shown struck through beside "
+            "the price only when it is strictly greater than the price."
+        ),
+    )
     image = models.ImageField(
         upload_to='data_here',
         blank=True)
@@ -204,12 +271,91 @@ class Product(models.Model):
     digital_asset_name = models.CharField(
         max_length=100, blank=True, db_default="")
 
+    # Related editions and formats of the same work: the print edition, the
+    # executive edition and the e-book of one title all point at each other.
+    #
+    # Symmetrical, which is Django's default for a self-M2M and is the right
+    # default here rather than an accident of it: "is another edition of" is
+    # a mutual statement, and a one-directional version would let the print
+    # page list the e-book while the e-book page listed nothing. It also
+    # halves the ways the seeded graph can be wrong -- adding one side adds
+    # the other, so the two can never disagree.
+    #
+    # Purely navigational. get_cross_links() turns these into links to the
+    # other product's own page; none of them is a buy affordance, which is
+    # why (unlike the e-book links below) they are not gated on
+    # is_purchasable(). pk 107 exists precisely to be pointed at while not
+    # being for sale, and a "this also exists in hardback" pointer stays true
+    # for a format we do not stock.
+    # No related_name: Django overrides it to a hidden one for a symmetrical
+    # self-M2M anyway, since the forward accessor already reaches both sides.
+    x_links: "models.ManyToManyField[Product, Any]" = models.ManyToManyField(
+        "self", blank=True)
+
+    # The e-book cross-link, deliberately a second and separate M2M rather
+    # than a filtered view over x_links above.
+    #
+    # x_links answers "what else is this book?"; this one answers "where is
+    # the e-book you can buy?", and the two are different questions with
+    # different rules. Only this one is directional -- symmetrical=False,
+    # because a print row points at an e-book row and the reverse is
+    # meaningless: an e-book is not its own e-book edition, and a symmetrical
+    # version would make pk 106 render a "get the e-book" button pointing at
+    # the paperback. Only this one is gated on is_purchasable(). Collapsing
+    # them into one field would mean either the navigation list inherits the
+    # purchase gate or the buy button loses it.
+    ebook_x_links: "models.ManyToManyField[Product, Any]" = (
+        models.ManyToManyField(
+            "self", symmetrical=False, blank=True,
+            related_name="print_x_links"))
+
     def get_display_price(self) -> str:
         formatted_price = "{0:.2f}".format(self.price / 100)
         if self.preorder_only:
             return f"Pre-order: {formatted_price}"
         else:
             return formatted_price
+
+    def get_msrp_display(self) -> str:
+        """The MSRP as a bare formatted amount, for the strikethrough.
+
+        Bare on purpose, and this is the one thing not to "tidy" into
+        get_display_price(): that method returns human copy, prefixing
+        "Pre-order: " on preorder rows, and single-product.html feeds it to
+        a parseFloat() in the running-total script. Anything that goes near
+        that path has to stay a number. This is only ever rendered as static
+        markup, but keeping the two formatters separate is what guarantees a
+        later edit cannot make MSRP the second string that arrives at
+        parseFloat as NaN.
+
+        Only meaningful when show_msrp() is true; callers must ask that
+        first, since an unset MSRP has nothing to format.
+        """
+        return "{0:.2f}".format(cast(int, self.msrp) / 100)
+
+    def show_msrp(self) -> bool:
+        """Whether to strike an MSRP through beside the price.
+
+        Strictly greater, never equal: an MSRP that matches the price is not
+        a saving, and rendering "39.99 ~~39.99~~" is at best noise and at
+        worst reads as a discount that is not being given. Lower is a
+        stronger no -- striking through a number *below* what we charge
+        advertises the opposite of a deal.
+
+        An unset MSRP (NULL) is simply absent, which is the common case; it
+        short-circuits before the comparison so that None never reaches `>`.
+        """
+        return self.msrp is not None and self.msrp > self.price
+
+    # The advisory sentence for `out_of_date`, named here rather than written
+    # inline in the template so the tests assert against the source of truth
+    # instead of a second copy of the words -- the same reason
+    # AMAZON_EBOOK_LABEL below is a constant. Note what it does not say: it
+    # does not say the book is unavailable, because it is still for sale.
+    OUT_OF_DATE_NOTICE = (
+        "This edition may be out of date. It remains available here for "
+        "historical purposes."
+    )
 
     def get_absolute_url(self) -> str:
         # The route is product/<int:pk>, so the kwarg has to be pk.
@@ -224,21 +370,47 @@ class Product(models.Model):
             else:
                 return None
 
+    # The one place the cover thumbnail size is written down. Named rather than
+    # inline because it is no longer used only here: the build pre-generates
+    # every one of these into STATIC_ROOT (see
+    # main/management/commands/pregenerate_thumbnails.py) so that no pod ever
+    # has to generate one at request time, and a second copy of the numbers
+    # would let the pre-generated file and the requested file drift into
+    # different names -- which reintroduces exactly the runtime generation the
+    # pre-generation exists to remove, silently.
+    THUMB_SIZE = (290, 380)
+
+    @staticmethod
+    def static_thumbnailer(static_path: str):
+        """Thumbnailer for a source that lives in the static tree.
+
+        Takes a path relative to STATIC_ROOT -- the same thing
+        ``{% static_thumbnail %}`` takes -- not a bare cover name, so the
+        build-time pre-generator can drive it for the template-declared
+        sources (the masthead logo) as well as for product covers.
+
+        Split out of get_thumb() so that pre-generator resolves the source
+        exactly the way a request does, off the same STATIC_ROOT-rooted
+        storage, instead of reimplementing the path join and generating a file
+        under a name nothing ever asks for.
+        """
+        from static_thumbnails.templatetags.static_thumbnails import (
+            static_storage)
+        return get_thumbnailer(static_storage, relative_name=static_path)
+
     def get_thumb(self):
         t = None
         try:
             if self.image_name:
-                from static_thumbnails.templatetags.static_thumbnails import static_storage
-                t = get_thumbnailer(
-                    static_storage,
-                    relative_name=f"assets/images/{self.image_name}")
+                t = self.static_thumbnailer(
+                    f"assets/images/{self.image_name}")
             else:
                 t = get_thumbnailer(self.image)
         except Exception as e:
             logger.warning(f"Got exception {e} trying to load thumbnailer.")
             return self.get_image_url()
         try:
-            th = t.get_thumbnail({'size': (290, 380)})
+            th = t.get_thumbnail({'size': self.THUMB_SIZE})
             return th.url
         except Exception as e:
             logger.warning(f"Error generating thumbnail: {e}")
@@ -299,6 +471,74 @@ class Product(models.Model):
             ("Follow along on Kickstarter", self.kickstarter),
         ]
         return [(label, url) for label, url in candidates if url]
+
+    def get_cross_links(self) -> List[Tuple[str, str]]:
+        """Sibling editions and formats, as (name, product page URL) pairs.
+
+        Navigation, not commerce: every URL here is another row's own product
+        page on this site, so following one lands the visitor on a page that
+        states that product's name, price and availability for itself. That
+        is why there is no is_purchasable() gate -- pointing at a page is not
+        offering to sell anything, and a title we list only for the history
+        (pk 107) is still a true answer to "what other editions exist".
+
+        Ordered by pk so the list a page renders is stable between requests
+        and between deploys; M2M querysets are otherwise unordered.
+        """
+        return [
+            (sibling.name, sibling.get_absolute_url())
+            # A symmetrical M2M will happily store a row pointing at itself
+            # if something adds one, and "also available as: itself" is
+            # nonsense rather than merely untidy.
+            for sibling in self.x_links.order_by("pk")
+            if sibling.pk != self.pk
+        ]
+
+    # The prefix for the e-book cross-link button. Says "get", not "add to
+    # cart": the button navigates to the e-book's own page rather than
+    # putting anything in the cart, and a label promising an add-to-cart that
+    # does not happen is the same class of lie as a mislabelled one that does.
+    EBOOK_CROSS_LINK_PREFIX = "Get the e-book"
+
+    def get_ebook_cross_links(self) -> List[Tuple[str, str]]:
+        """The e-book buy affordance for a print row, as (label, URL) pairs.
+
+        Every URL is the linked e-book's OWN product page, and the label
+        names that product. Both halves are deliberate, and the reason is
+        that this button renders on a *different* product's page:
+
+        * It is not an add-to-cart. A form on the pk 104 page that posted an
+          add-to-cart would either add pk 104 -- selling a paperback as a
+          download -- or quietly add pk 106, a product the visitor never
+          named. Navigating to pk 106's page instead means the add-to-cart
+          the visitor eventually presses is on the page of the thing they
+          are buying, with its own name, price and pay-what-you-want notice
+          in front of them.
+        * The label carries the target's name for the same reason: "Get the
+          e-book" alone, on a page titled with the print edition, does not
+          tell the visitor which row they are about to land on.
+
+        Gated on the target's is_purchasable(), which get_alt_links() above
+        notably is not -- see the module note on pk 107, where an ungated
+        Amazon button renders on a page that says the book is not sold here.
+        That hole predates this method and is not propagated into it: an
+        e-book that is not purchasable produces no button at all rather than
+        a button onto a page with no way to buy.
+        """
+        links = []
+        for ebook in self.ebook_x_links.order_by("pk"):
+            # Defensive rather than expected: seed_products rejects a
+            # self-reference, but the admin will happily create one, and
+            # "get the e-book" pointing at the page you are already on is
+            # a dead end.
+            if ebook.pk == self.pk:
+                continue
+            if not ebook.is_purchasable():
+                continue
+            links.append(
+                (f"{self.EBOOK_CROSS_LINK_PREFIX}: {ebook.name}",
+                 ebook.get_absolute_url()))
+        return links
 
     @staticmethod
     def _amazon_url(domain: str, asin: Optional[str]) -> Optional[str]:
@@ -373,6 +613,10 @@ class Product(models.Model):
         return not self.noorder and not self.is_out_of_stock()
 
     SIGNED_ON_REQUEST_NOTE = "All of Holden's books are available signed on request"
+    DIGITAL_DELIVERY_NOTE = (
+        "Delivered by email as a DRM-free ZIP containing both the EPUB and "
+        "the PDF."
+    )
 
     def get_display_text(self):
         """Product copy for the HTML product page, as escaped markup.
@@ -386,6 +630,9 @@ class Product(models.Model):
         if self.print_isbn:
             return format_html(
                 "{}<p>{}</p>", formatted, self.SIGNED_ON_REQUEST_NOTE)
+        if self.is_digitally_fulfilled():
+            return format_html(
+                "{}<p>{}</p>", formatted, self.DIGITAL_DELIVERY_NOTE)
         return format_html("{}", formatted)
 
     def get_feed_description(self) -> str:
@@ -396,6 +643,8 @@ class Product(models.Model):
         """
         if self.print_isbn:
             return f"{self.description}\n\n{self.SIGNED_ON_REQUEST_NOTE}"
+        if self.is_digitally_fulfilled():
+            return f"{self.description}\n\n{self.DIGITAL_DELIVERY_NOTE}"
         return self.description
 
     def get_feed_price(self) -> str:
@@ -646,6 +895,21 @@ class Order(models.Model):
     # null means we fell back to the snapshot entirely; set with
     # reconciled_at populated means we reconciled but something was odd.
     reconciliation_error = models.TextField(blank=True)
+
+    # Held by whichever worker is currently running fulfilment for this order,
+    # so the four Gunicorn workers cannot each start it at once. The markers
+    # above are all written *after* their side effect, so on their own they
+    # only serialise deliveries that do not overlap: two workers checking
+    # notified_at while a third is mid-send all see null and all send. This
+    # column is claimed with a single conditional UPDATE, which is atomic on
+    # both Postgres and SQLite, so exactly one worker can hold it.
+    #
+    # It is a lease, not a flag: a worker that dies mid-fulfilment cannot
+    # release it, and a permanently claimed order would never be repaired --
+    # which is the very failure this whole retry path exists to fix. A claim
+    # older than FULFILMENT_LEASE is therefore reclaimable. Nullable, so an
+    # old pod's checkout INSERT during a rolling deploy still succeeds.
+    fulfilment_claimed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']

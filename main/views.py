@@ -1,7 +1,8 @@
 import json
 import logging
 import re
-from urllib.parse import quote
+from datetime import timedelta
+from urllib.parse import quote, urlparse
 
 from typing import *
 from django.conf import settings
@@ -15,13 +16,14 @@ from django.contrib.staticfiles.storage import staticfiles_storage
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import (
     FileResponse, Http404, HttpResponse, HttpResponseBadRequest,
     JsonResponse)
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import NoReverseMatch, reverse
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views import View
@@ -36,13 +38,18 @@ from main.digital import (
 from main.forms import (
     MailingListImportForm, MailingListSendForm, MailingListSignupForm)
 from main.models import (
-    Cart, CartProduct, MailingListMessage, Order, Product, SuppressedAddress,
-    send_batch_size)
+    Cart, CartProduct, EmailIdentity, MailingListMessage, Order, Product,
+    SuppressedAddress, normalize_email_identity, send_batch_size)
 from main.payments import Payments
 from main.utils import (
     generate_username, get_country_code, get_storable_client_ip)
+from pigscanfly.hostnames import ascii_lowercase
 
 logger = logging.getLogger(__name__)
+
+
+class CartQuantityOverflow(ValueError):
+    """Combining valid cart quantities would exceed the storage column."""
 
 
 # /healthz is served by main.middleware.HealthCheckMiddleware rather than a
@@ -63,6 +70,48 @@ LIBERATED_BREAD_URL = "https://www.liberatedbread.com/"
 # fixture gives all three SKUs means the worst case is a card that falls back
 # to the books listing, which is visible rather than wrong.
 FEATURED_BOOK_TITLE = "Distributed Computing 4 Kids (and Executives)"
+
+
+def _integrity_error_text(error: IntegrityError) -> str:
+    parts = [str(error)]
+    cause = getattr(error, "__cause__", None)
+    if cause is not None:
+        parts.append(str(cause))
+    return " ".join(parts)
+
+
+def _constraint_name(error: IntegrityError) -> Optional[str]:
+    cause = getattr(error, "__cause__", None)
+    diag = getattr(cause, "diag", None)
+    return getattr(diag, "constraint_name", None)
+
+
+def _is_email_identity_conflict(error: IntegrityError) -> bool:
+    if _constraint_name(error) == "unique_normalized_email":
+        return True
+    return "unique_normalized_email" in _integrity_error_text(error)
+
+
+def _is_username_conflict(error: IntegrityError) -> bool:
+    if _constraint_name(error) == "auth_user_username_key":
+        return True
+    text = _integrity_error_text(error)
+    return ("auth_user.username" in text
+            or "auth_user_username_key" in text)
+
+
+def _create_signup_user(email: str, password: str) -> User:
+    for _ in range(5):
+        username = generate_username(email)
+        try:
+            with transaction.atomic():
+                return User.objects.create_user(
+                    email=email, username=username, password=password)
+        except IntegrityError as error:
+            if _is_username_conflict(error):
+                continue
+            raise
+    raise IntegrityError("Could not allocate a unique username.")
 
 
 # Create your views here.
@@ -319,9 +368,22 @@ class ServicesView(View):
     # Titles cited in the credentials, with the ISBN each one links by. Linked
     # through /book/<isbn> so no fixture primary key ever appears in markup --
     # a pk that moves keeps resolving, to the wrong book.
+    #
+    # Where a label names more than one edition, it links the NEWEST one it
+    # names: that is the edition in print and the one a reader following the
+    # link is best served by. test_cited_editions_land_on_the_edition_they_name
+    # enforces that, and it is a semantic check -- the older
+    # test_each_cited_book_link_reaches_a_page_naming_that_book strips the
+    # bracket off the label before comparing, so it cannot see a label and a
+    # destination that disagree about which edition they mean.
     LEARNING_SPARK = ("Learning Spark (1st edition)", "9781449358624")
+    # Cites both editions and links the 2nd (pk 108, ISBN 9781098145859). It
+    # linked the 1st until pk 101 was renamed to "High Performance Spark
+    # (1st edition)", at which point the label said "1st and 2nd editions"
+    # and the page it reached said it was only the first. The sentence is the
+    # owner's approved copy and does not change; only the target moves.
     HIGH_PERFORMANCE_SPARK = (
-        "High Performance Spark (1st and 2nd editions)", "9781491943205")
+        "High Performance Spark (1st and 2nd editions)", "9781098145859")
     FAST_DATA_PROCESSING = ("Fast Data Processing with Spark", "9781782167068")
     KUBEFLOW = ("Kubeflow for Machine Learning", "9781492050124")
     SCALING_PYTHON_RAY = ("Scaling Python with Ray", "9781098118808")
@@ -464,6 +526,8 @@ class SubscribeView(View):
         return render(request, 'subscribe_page.html', context={
             'title': 'Subscribe for updates',
             'areas': mailing.interest_choices(request),
+            'forced_interest': mailing.ALL_SLUG,
+            'signup_action': reverse('mailing-list-subscribe-all'),
         })
 
 
@@ -535,6 +599,24 @@ class ProductView(View):
 class BaseCartView():
     """Common base cart view."""
 
+    # What a PositiveBigIntegerField can physically hold. Python ints are
+    # arbitrary precision, so every path which combines cart quantities must
+    # enforce the database column's upper bound before doing the addition.
+    # This is a storage capacity guard, not a purchase limit -- whether there
+    # should be a product-level cap on quantity is a separate, still-open
+    # decision.
+    MAX_QUANTITY = 9223372036854775807
+
+    @classmethod
+    def quantity_sum(cls, existing_quantity: int, added_quantity: int) -> int:
+        """Add two valid quantities without overflowing the database field."""
+        # Write this as subtraction rather than adding first: it remains safe
+        # even if the values eventually come from a fixed-width integer type.
+        if existing_quantity > cls.MAX_QUANTITY - added_quantity:
+            raise CartQuantityOverflow(
+                f"Combined quantity must be at most {cls.MAX_QUANTITY}.")
+        return existing_quantity + added_quantity
+
     def get_cart(self, request) -> Cart:
         """Return the cart belonging to *this* requester.
 
@@ -582,9 +664,11 @@ class BaseCartView():
 
         The whole thing is one transaction: adding a quantity onto the
         surviving row and deleting the row it came from are two statements,
-        and a crash between them would lose the quantity for good. All or
-        nothing means a failed merge leaves the session cart untouched and
-        the next request can just retry it.
+        and a crash between them would lose the quantity for good. Ordinary
+        failures still roll the whole merge back so the next request can retry
+        it; a deterministic quantity overflow is handled in-line by capping the
+        surviving row at MAX_QUANTITY, dropping the duplicate session row and
+        warning the shopper.
         """
         with transaction.atomic():
             # Rows are linked to a cart both by FK and by the M2M; take the
@@ -596,7 +680,20 @@ class BaseCartView():
                 existing = CartProduct.objects.filter(
                     cart=user_cart, product=cart_product.product).first()
                 if existing is not None:
-                    existing.quantity += cart_product.quantity
+                    try:
+                        existing.quantity = self.quantity_sum(
+                            existing.quantity, cart_product.quantity)
+                    except CartQuantityOverflow:
+                        existing.quantity = self.MAX_QUANTITY
+                        existing.save()
+                        messages.warning(
+                            request,
+                            f"We capped {existing.product.name} at "
+                            f"{self.MAX_QUANTITY} because the combined cart "
+                            "quantity would not fit in storage.")
+                        user_cart.products.add(existing)
+                        cart_product.delete()
+                        continue
                     existing.save()
                     user_cart.products.add(existing)
                     cart_product.delete()
@@ -622,7 +719,7 @@ class SignupView(View):
         # as None and 500 on the AttributeError, and a missing password
         # reached set_password(None), which silently creates an account with
         # an unusable password that can never be logged into.
-        email = (request.POST.get('email') or '').strip()
+        email = normalize_email_identity(request.POST.get('email') or '')
         password = request.POST.get('password') or ''
         if not email or not password:
             return redirect(reverse('signup') + '?invalid=missing')
@@ -633,13 +730,23 @@ class SignupView(View):
 
         # email is not unique on auth.User, so this can legitimately match
         # more than one row; either way the address is taken.
-        if User.objects.filter(email=email).exists():
+        if User.objects.filter(email__iexact=email).exists():
             return redirect(reverse('signup') + '?in_use=true')
 
-        username = generate_username(email)
-        user = User.objects.create(email=email, username=username)
-        user.set_password(password)
-        user.save()
+        # Reserve the address first. The functional unique constraint is
+        # the arbiter when concurrent requests both pass the advisory
+        # auth.User check above; the losing transaction creates no User.
+        with transaction.atomic():
+            try:
+                identity = EmailIdentity.objects.create(
+                    normalized_email=email)
+            except IntegrityError as error:
+                if _is_email_identity_conflict(error):
+                    return redirect(reverse('signup') + '?in_use=true')
+                raise
+            user = _create_signup_user(email, password)
+            identity.user = user
+            identity.save(update_fields=["user"])
 
         # No cart is created here: get_cart() owns that, and creating one
         # unconditionally on a OneToOneField is an unprotected insert.
@@ -678,6 +785,7 @@ class CartView(View, BaseCartView):
         # showing a number the buyer is not going to be charged.
         has_pwyw = any(cp.product.is_pwyw for cp in cart_products)
         has_unavailable = any(cp.product.noorder for cp in cart_products)
+        pwyw_checkout_blocker = Payments.pwyw_checkout_blocker(cart)
         return render(request, 'cart.html', context={
             'title': 'Cart',
             'products': cart_products,
@@ -685,17 +793,11 @@ class CartView(View, BaseCartView):
             'has_physical': has_physical,
             'has_pwyw': has_pwyw,
             'has_unavailable': has_unavailable,
+            'pwyw_checkout_blocker': pwyw_checkout_blocker,
         })
 
 
 class AddToCartView(View, BaseCartView):
-    # What a PositiveBigIntegerField can physically hold. Python ints are
-    # arbitrary precision, so without this a 20-digit quantity parses happily
-    # and then 500s at write time on BIGINT overflow. This is a storage
-    # capacity guard, not a purchase limit -- whether there should be a
-    # product-level cap on quantity is a separate, still-open decision.
-    MAX_QUANTITY = 9223372036854775807
-
     # POST only: a GET here is triggerable cross-site by an <img> tag or a
     # link prefetch, with no CSRF token involved.
     def post(self, request, product_id: int, quantity: int):
@@ -718,13 +820,22 @@ class AddToCartView(View, BaseCartView):
         if not product.is_purchasable():
             return HttpResponseBadRequest("Product is not purchasable.")
         cart = self.get_cart(request)
+        pwyw_add_blocker = Payments.pwyw_add_to_cart_blocker(
+            cart, product, quantity)
+        if pwyw_add_blocker is not None:
+            messages.error(request, pwyw_add_blocker)
+            return redirect('cart')
 
         cart_product, created = CartProduct.objects.get_or_create(
             cart=cart, product=product, defaults={'quantity': quantity})
         if not created:
             # Adding a product that's already in the cart adds to what's
             # there rather than silently discarding the new quantity.
-            cart_product.quantity += quantity
+            try:
+                cart_product.quantity = self.quantity_sum(
+                    cart_product.quantity, quantity)
+            except CartQuantityOverflow as error:
+                return HttpResponseBadRequest(str(error))
             cart_product.save()
 
         cart.products.add(cart_product)
@@ -781,6 +892,18 @@ class CheckoutView(View, BaseCartView):
                 request,
                 "Sorry, these are no longer available and need to be removed "
                 "before checking out: " + ", ".join(unavailable) + ".")
+            return redirect('cart')
+        coupon_warning = Payments.pwyw_coupon_warning(cart, coupon=coupon)
+        if coupon_warning is not None:
+            messages.warning(request, coupon_warning)
+            coupon = None
+        pwyw_checkout_blocker = Payments.pwyw_checkout_blocker(
+            cart, coupon=coupon)
+        if pwyw_checkout_blocker is not None:
+            logger.info(
+                "Blocked checkout for cart %s: %s",
+                cart.pk, pwyw_checkout_blocker)
+            messages.error(request, pwyw_checkout_blocker)
             return redirect('cart')
         user = request.user if request.user.is_authenticated else None
         order = Order.create_from_cart(cart, user=user)
@@ -839,8 +962,10 @@ class StripeWebhookView(View):
     solely by the signature on the body. Every path out of here that is not a
     verified payload is a 400 before any state is touched.
 
-    Everything runs synchronously: the work is one UPDATE and one email, and
-    a queue would be more moving parts than the whole feature.
+    Everything runs synchronously, but each post-payment action has a durable
+    completion marker on the order.  A redelivery of a paid event resumes any
+    action whose marker is still empty; this matters when a worker disappears
+    after the paid transition has committed but before fulfilment finishes.
     """
 
     # Both mean "the money arrived". async_payment_succeeded is the delayed
@@ -863,6 +988,13 @@ class StripeWebhookView(View):
     # pay-what-you-want with a floor of zero, and the owner's decision is that
     # a $0 order is still an order and the book still gets delivered.
     PAID_PAYMENT_STATUSES = frozenset({"paid", "no_payment_required"})
+
+    # How long a fulfilment claim stays valid. Long enough that a worker
+    # working through a slow Stripe lookup and two SMTP sends keeps its claim
+    # -- the gunicorn timeout is 60s, so no live request can outlast this --
+    # and short enough that a worker killed mid-fulfilment is retried well
+    # inside the three days Stripe keeps redelivering.
+    FULFILMENT_LEASE = timedelta(minutes=15)
 
     def post(self, request):
         secret = getattr(settings, "STRIPE_WEBHOOK_SECRET", "")
@@ -929,23 +1061,103 @@ class StripeWebhookView(View):
                 pk=order.pk, status=Order.Status.PENDING).update(**fields)
 
         if not updated:
+            order.refresh_from_db()
+            if order.status == Order.Status.PAID:
+                logger.info(
+                    "Order #%s is already PAID; retrying incomplete "
+                    "fulfilment for Stripe session %s.",
+                    order.pk, session.get("id"))
+                self.fulfil_order(order)
+                return
             logger.info(
                 "Order #%s is already past PENDING; ignoring a duplicate "
                 "delivery of Stripe session %s.", order.pk, session.get("id"))
             return
 
         order.refresh_from_db()
-        # Only the delivery that actually moved the row gets here, so this
-        # runs once per order -- which is exactly what keeps a webhook
-        # re-delivery from emailing the customer their book a second time.
-        # All three calls are best-effort by construction: the payment is
-        # already recorded and must not be undone by a secondary lookup, a
-        # missing file or an SMTP outage.
-        order.reconcile_line_items()
-        # Before notify_owner, so the owner's email can report whether the
-        # customer actually got their download.
-        order.deliver_digital_goods()
-        order.notify_owner()
+        self.fulfil_order(order)
+
+    def fulfil_order(self, order: Order) -> None:
+        """Run only the paid order actions that have not completed yet.
+
+        The PAID transition deliberately commits before this method.  Each
+        successful action writes its own marker, so a crash at any point is
+        repaired by Stripe's next delivery rather than turning PAID into a
+        terminal, unfulfilled state.
+        """
+        if not self.claim_fulfilment(order):
+            logger.info(
+                "Order #%s fulfilment is already claimed by another worker; "
+                "leaving it to them.", order.pk)
+            return
+        try:
+            order.refresh_from_db()
+            if order.reconciled_at is None:
+                # Whether the owner has already been told about this order
+                # *before* this attempt can change the answer. See below.
+                notified_before = order.notified_at is not None
+                order.reconcile_line_items()
+                order.refresh_from_db()
+                if notified_before and order.reconciled_at is not None:
+                    # An earlier delivery could not reach Stripe, so the owner
+                    # was emailed a pick list built from the cart snapshot and
+                    # told it was unverified. This attempt got the real
+                    # quantities, which may differ -- the customer can change
+                    # them on Stripe's hosted page. Clearing the marker
+                    # reissues the notification below, because otherwise the
+                    # only instruction the owner ever received says to ship
+                    # numbers the database now knows are wrong.
+                    #
+                    # Bounded to one extra email per order: reconciled_at only
+                    # goes null -> set once, so this can never fire twice.
+                    logger.info(
+                        "Order #%s reconciled on a retry after the owner was "
+                        "notified from an unverified snapshot; reissuing the "
+                        "notification.", order.pk)
+                    Order.objects.filter(pk=order.pk).update(notified_at=None)
+                    order.notified_at = None
+
+            order.refresh_from_db()
+            if (order.digital_delivery_sent_at is None
+                    and order.digital_items()):
+                order.deliver_digital_goods()
+
+            # Kept last so the owner's message reports the final reconciliation
+            # and digital-delivery outcome.
+            order.refresh_from_db()
+            if order.notified_at is None:
+                order.notify_owner()
+        finally:
+            self.release_fulfilment(order)
+
+    def claim_fulfilment(self, order: Order) -> bool:
+        """Take the exclusive right to fulfil this order, or report defeat.
+
+        One conditional UPDATE, which both Postgres and SQLite apply
+        atomically, so of two workers racing on the same order exactly one
+        sees a row count of 1. Nothing else here serialises them: the row lock
+        in handle_paid is released with its transaction, and each completion
+        marker is only written once its side effect has already happened, so
+        without this both workers would read null markers and both would send.
+        """
+        now = timezone.now()
+        return bool(
+            Order.objects.filter(pk=order.pk).filter(
+                Q(fulfilment_claimed_at__isnull=True)
+                | Q(fulfilment_claimed_at__lt=now - self.FULFILMENT_LEASE)
+            ).update(fulfilment_claimed_at=now))
+
+    @staticmethod
+    def release_fulfilment(order: Order) -> None:
+        """Drop the claim so the next delivery can pick up anything left.
+
+        Released rather than left to expire because a run that finished with
+        an action still incomplete -- a bounced owner email, say -- should be
+        retried by Stripe's next delivery immediately, not after the lease
+        runs out.
+        """
+        Order.objects.filter(pk=order.pk).update(fulfilment_claimed_at=None)
+        order.fulfilment_claimed_at = None
 
     def handle_cancelled(self, session, reason: str) -> None:
         order = self.find_order(session)
@@ -1125,7 +1337,7 @@ class LoginView(View):
         return render(request, 'login.html', context={'title': 'Log In', 'valid': valid})
 
     def post(self, request):
-        email = (request.POST.get('email') or '').strip()
+        email = normalize_email_identity(request.POST.get('email') or '')
         password = request.POST.get('password') or ''
         if not email or not password:
             return redirect(reverse('login') + '?valid=false')
@@ -1133,7 +1345,7 @@ class LoginView(View):
         # email is not unique on auth.User, so .get() here could raise
         # MultipleObjectsReturned and 500 the login page. Try each match
         # instead: only the one whose password checks out authenticates.
-        for candidate in User.objects.filter(email=email):
+        for candidate in User.objects.filter(email__iexact=email):
             user = authenticate(request, email=email,
                                 username=candidate.username, password=password)
             if user is not None:
@@ -1161,6 +1373,12 @@ class MailingListSubscribeView(View):
     Everything after this -- the confirmation email, the activation page, the
     unsubscribe page -- is django-newsletter's.
     """
+
+    # None means "trust the submitted interest". Anything truthy here
+    # overrides the form field server-side; keep the sentinel falsy value as
+    # exactly None so a future empty string cannot silently fall back to user
+    # input and reopen the tampering hole this subclass closes.
+    forced_interest: Optional[str] = None
 
     def submitted(self, request) -> Dict[str, Any]:
         """The submitted fields, from a form post or a JSON body.
@@ -1228,6 +1446,8 @@ class MailingListSubscribeView(View):
                 'message': error,
             }, status=400)
 
+        self._form = form
+
         if form.is_bot():
             # Answered exactly like a success, minus the subscription: telling
             # a bot it was caught only teaches whoever wrote it.
@@ -1243,10 +1463,10 @@ class MailingListSubscribeView(View):
                 email)
             return self.respond(request)
 
+        interest = self.forced_interest or form.cleaned_data.get("interest", "")
         _subscription, to_confirm = mailing.subscribe(
             email=email,
-            newsletter=mailing.newsletter_for(
-                form.cleaned_data.get("interest", "")),
+            newsletter=mailing.newsletter_for(interest),
             name=form.cleaned_data.get("name", ""),
             ip=get_storable_client_ip(request),
             also_all=form.cleaned_data.get("all_updates", False))
@@ -1263,13 +1483,63 @@ class MailingListSubscribeView(View):
               "check your email for a link to confirm.")
 
     def respond(self, request):
+        target = self.next_url()
         if self.wants_json(request):
-            return self.json_response({"ok": True, "message": self.ANSWER})
+            payload = {"ok": True, "message": self.ANSWER}
+            if target:
+                payload["next"] = target
+            return self.json_response(payload)
+        if target:
+            return redirect(target)
         return render(request, 'mailing_list_result.html', context={
             'title': 'Subscribe for updates',
             'ok': True,
             'message': self.ANSWER,
         })
+
+    ENCODED_CONTROL = re.compile(r"%(?:0[0-9a-f]|1[0-9a-f]|7f)",
+                                 flags=re.IGNORECASE)
+
+    @staticmethod
+    def normalized_netloc(netloc: str) -> str:
+        # Lower only ASCII A-Z. Python's Unicode lower() maps U+212A KELVIN
+        # SIGN to ASCII "k", so non-ASCII lookalikes must pass through
+        # unchanged instead of collapsing onto an allowlisted ASCII host.
+        return ascii_lowercase(netloc)
+
+    def next_url(self) -> str:
+        form = getattr(self, "_form", None)
+        if form is None:
+            return ""
+        return self.allowed_next(form.cleaned_data.get("next", ""))
+
+    def allowed_next(self, target: str) -> str:
+        target = (target or "").strip()
+        if not target:
+            return ""
+        if any(ord(char) < 32 or ord(char) == 127 for char in target):
+            return ""
+        if self.ENCODED_CONTROL.search(target):
+            return ""
+
+        allowed = {self.normalized_netloc(entry)
+                   for entry in getattr(settings,
+                                        "MAILING_LIST_ALLOWED_NEXT_HOSTS", ())}
+        if not allowed:
+            return ""
+
+        try:
+            parsed = urlparse(target)
+        except ValueError:
+            return ""
+        normalized_netloc = self.normalized_netloc(parsed.netloc)
+        if normalized_netloc not in allowed:
+            return ""
+        normalized_target = parsed._replace(netloc=normalized_netloc).geturl()
+        if not url_has_allowed_host_and_scheme(
+                normalized_target, allowed, require_https=True):
+            return ""
+        return target
 
     # Confirmations one address can be sent per hour, whoever asks. Low: there
     # is no legitimate reason to need a fourth, and this is the ceiling on
@@ -1313,6 +1583,10 @@ class MailingListSubscribeView(View):
             cache.set(key, 1, 3600)
             count = 1
         return count > limit
+
+
+class MailingListSubscribeAllView(MailingListSubscribeView):
+    forced_interest = mailing.ALL_SLUG
 
 
 @method_decorator(staff_member_required, name='dispatch')

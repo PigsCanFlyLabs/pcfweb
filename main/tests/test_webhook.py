@@ -1,22 +1,32 @@
 """Tests for the Stripe webhook endpoint."""
 
+import contextlib
 import json
+import threading
 import time
+import traceback
+from datetime import timedelta
 from unittest import mock
 
 import stripe
 from django.conf import settings
 from django.core import mail
-from django.test import Client, override_settings
+from django.db import connection as django_connection
+from django.test import Client, TransactionTestCase, override_settings
+from django.utils import timezone
 
+from main import models as main_models
 from main.models import Order, OrderItem
 from main.payments import Payments
 from main.tests.base import (
     WEBHOOK_URL,
     OWNER_EMAIL,
     stripe_signature,
+    ORDER_TEST_SETTINGS,
     OrderTestBase,
+    OrderTestMixin,
 )
+from main.views import StripeWebhookView
 
 
 class WebhookSignatureTest(OrderTestBase):
@@ -664,9 +674,7 @@ class WebhookIdempotencyTest(OrderTestBase):
         self.assertEqual(self.order.status, Order.Status.FULFILLED)
         self.assertEqual(len(mail.outbox), 0)
 
-    def test_a_redelivery_after_a_failed_email_does_not_retry_the_email(self):
-        # Deliberate: the order is recorded either way, and re-mailing on
-        # every one of Stripe's retries is exactly the flood being avoided.
+    def test_a_redelivery_after_a_failed_email_retries_the_email(self):
         with mock.patch("main.models.send_mail",
                         side_effect=OSError("SMTP is down")):
             with self.assertLogs("main.models", level="ERROR"):
@@ -675,7 +683,32 @@ class WebhookIdempotencyTest(OrderTestBase):
         response = self.deliver(self.event_body(self.order))
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        self.order.refresh_from_db()
+        self.assertIsNotNone(self.order.notified_at)
+
+    def test_redelivery_resumes_after_a_crash_just_after_marking_paid(self):
+        body = self.event_body(self.order)
+
+        with mock.patch.object(
+                StripeWebhookView, "fulfil_order",
+                side_effect=SystemExit("simulated worker crash")):
+            with self.assertRaisesRegex(SystemExit, "simulated worker crash"):
+                self.deliver(body)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertIsNone(self.order.reconciled_at)
+        self.assertIsNone(self.order.notified_at)
         self.assertEqual(len(mail.outbox), 0)
+
+        response = self.deliver(body)
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertIsNotNone(self.order.reconciled_at)
+        self.assertIsNotNone(self.order.notified_at)
+        self.assertEqual(len(self.order_emails()), 1)
 
 
 class WebhookEmailFailureTest(OrderTestBase):
@@ -764,18 +797,19 @@ class WebhookUnhandledEventTest(OrderTestBase):
 class WebhookInterleavedDeliveryTest(OrderTestBase):
     """The race the idempotency guard exists to close.
 
-    NOT a threaded test. A genuine two-thread version was written and then
-    abandoned: against the SQLite test database both threads die with
-    "database table is locked" before either reaches the guard, so it measures
-    SQLite's shared-cache locking rather than this code, and making it pass
-    would need exactly the elaborate synchronisation that produces flaky
-    tests. Postgres -- what prod runs, and where select_for_update is a real
-    row lock -- is not available in CI.
+    NOT a threaded test, and it does not need to be. What is covered here is
+    the specific interleaving that matters for the PENDING -> PAID transition:
+    two deliveries that both observe the order as PENDING before either
+    writes. That is precisely what a read-then-write check gets wrong, and it
+    is deterministic.
 
-    What is covered instead is the specific interleaving that matters: two
-    deliveries that both observe the order as PENDING before either writes.
-    That is precisely what a read-then-write check gets wrong, and it is
-    deterministic.
+    An earlier note here recorded that a threaded version had been abandoned
+    because both threads died with "database table is locked" on SQLite. That
+    applies to overlapping the paid transition itself, which holds a write
+    lock for its whole duration. It is not true of the *fulfilment* overlap,
+    which happens after that transaction has committed --
+    ``WebhookConcurrentWorkerTest`` below does run two real connections, and
+    has to, because that race is invisible to a single-process test.
     """
 
     def setUp(self):
@@ -820,4 +854,209 @@ class WebhookInterleavedDeliveryTest(OrderTestBase):
         self.assertTrue(reentered)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertEqual(len(self.order_emails()), 1)
+
+
+
+@override_settings(**ORDER_TEST_SETTINGS)
+class WebhookConcurrentWorkerTest(OrderTestMixin, TransactionTestCase):
+    """Two Gunicorn workers fulfilling the same order at the same time.
+
+    ``scripts/start-server.sh`` runs gunicorn with ``--workers 4``, so the
+    duplicate deliveries Stripe makes of one event land in processes that
+    share no memory. Nothing in the request path serialises them: the
+    ``select_for_update`` in ``handle_paid`` is released with its
+    transaction, well before fulfilment starts, and every completion marker
+    is written only *after* the side effect it records. So the window between
+    "is ``notified_at`` still null?" and "``notified_at`` is now set" spans an
+    entire SMTP send, and a second worker looking in that window sees null and
+    sends the same email again.
+
+    ``TransactionTestCase`` rather than ``TestCase``: the second worker runs
+    on its own database connection, and can only see rows that are actually
+    committed. (The abandoned threaded test described on
+    ``WebhookInterleavedDeliveryTest`` overlapped the PENDING -> PAID
+    transaction itself, which is what deadlocked SQLite. Overlapping the
+    e-mail send instead touches no open write transaction, so it neither
+    locks nor needs synchronisation beyond the handoff below.)
+    """
+
+    @contextlib.contextmanager
+    def as_a_separate_worker_process(self):
+        """Run the enclosed request as a worker that shares no memory.
+
+        A second gunicorn worker has its own copy of every class attribute,
+        so any *process-local* bookkeeping on the view is empty there however
+        busy this process is. Every mutable set on the class is therefore
+        swapped for a fresh one for the duration; the view's genuinely
+        constant sets are frozensets and are deliberately left alone.
+
+        Against a database-backed claim this does nothing whatsoever, which
+        is precisely the point. The guarantee under test has to survive being
+        run in a process that shares nothing with the one already fulfilling,
+        so a guard that lives in memory must not be what makes this pass.
+        """
+        saved = {name: value for name, value in vars(StripeWebhookView).items()
+                 if type(value) is set}
+        for name in saved:
+            setattr(StripeWebhookView, name, set())
+        try:
+            yield
+        finally:
+            for name, value in saved.items():
+                setattr(StripeWebhookView, name, value)
+
+    def test_a_second_worker_mid_send_does_not_repeat_the_owner_email(self):
+        order = self.place_order()
+        body = self.event_body(order)
+        overlapped = []
+        failures = []
+        real_send = main_models.send_mail
+
+        def second_worker():
+            """The losing delivery, on its own connection and its own memory."""
+            try:
+                with self.as_a_separate_worker_process():
+                    Client().post(
+                        WEBHOOK_URL, data=body,
+                        content_type="application/json",
+                        HTTP_STRIPE_SIGNATURE=stripe_signature(body))
+            except Exception:                      # pragma: no cover - reported
+                failures.append(traceback.format_exc())
+            finally:
+                # A thread that opened a connection has to close it, or the
+                # test database cannot be torn down.
+                django_connection.close()
+
+        def send_and_overlap(*args, **kwargs):
+            # Hold the first worker *inside* its send -- the exact window
+            # where its notified_at is still null -- and run the whole of the
+            # second worker's delivery there. Deterministic: no sleeps, and
+            # the second worker is complete before the first one's mail goes.
+            if not overlapped:
+                overlapped.append(True)
+                thread = threading.Thread(target=second_worker)
+                thread.start()
+                thread.join(timeout=30)
+                self.assertFalse(thread.is_alive(),
+                                 "the second worker never finished")
+            return real_send(*args, **kwargs)
+
+        with mock.patch("main.models.send_mail", send_and_overlap):
+            self.deliver(body)
+
+        self.assertEqual(failures, [], "the second worker raised")
+        self.assertTrue(overlapped, "the deliveries never actually overlapped")
+        # The whole point: the owner is told once, not once per worker.
+        self.assertEqual(len(self.order_emails()), 1)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertIsNotNone(order.notified_at)
+        # And the claim is handed back, so a later delivery can still repair
+        # anything this one left undone.
+        self.assertIsNone(order.fulfilment_claimed_at)
+
+
+class WebhookFulfilmentClaimTest(OrderTestBase):
+    """The claim is a lease, so a worker that dies cannot wedge an order."""
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order()
+        # A paid order with everything still to do, i.e. what a worker that
+        # died just after the PAID commit leaves behind.
+        Order.objects.filter(pk=self.order.pk).update(
+            status=Order.Status.PAID, reconciled_at=None, notified_at=None)
+
+    def test_a_live_claim_holds_fulfilment_off(self):
+        Order.objects.filter(pk=self.order.pk).update(
+            fulfilment_claimed_at=timezone.now())
+
+        with self.assertLogs("main.views", level="INFO"):
+            response = self.deliver(self.event_body(self.order))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertIsNone(self.order.notified_at)
+        self.assertEqual(len(self.order_emails()), 0)
+
+    def test_a_claim_left_behind_by_a_dead_worker_is_reclaimed(self):
+        # No process holds this any more; the worker that took it is gone.
+        stale = timezone.now() - StripeWebhookView.FULFILMENT_LEASE
+        Order.objects.filter(pk=self.order.pk).update(
+            fulfilment_claimed_at=stale - timedelta(seconds=1))
+
+        response = self.deliver(self.event_body(self.order))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertIsNotNone(self.order.notified_at)
+        self.assertIsNone(self.order.fulfilment_claimed_at)
+        self.assertEqual(len(self.order_emails()), 1)
+
+
+class WebhookReconciliationRetryNotificationTest(OrderTestBase):
+    """The owner's e-mail *is* the pick list, so it cannot outlive its facts.
+
+    When the first delivery cannot reach Stripe, the owner is told the
+    quantities are the cart's and unverified. The retry path added for crash
+    recovery then re-runs reconciliation on the next delivery -- and if that
+    one succeeds it can replace those quantities, because a customer can
+    change them on Stripe's hosted page. Without this, the notification marker
+    is already set, no new e-mail goes out, and the only instruction the owner
+    ever received tells them to ship numbers the database now knows are wrong.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order(product_pk=100, quantity=2)
+
+    def test_a_retry_that_finally_reconciles_reissues_the_notification(self):
+        body = self.event_body(self.order)
+
+        # First delivery: Stripe's line-item lookup is unreachable.
+        self.line_items_error = RuntimeError("Stripe is unreachable")
+        with self.assertLogs("main.models", level="ERROR"):
+            self.deliver(body)
+
+        self.order.refresh_from_db()
+        self.assertIsNone(self.order.reconciled_at)
+        self.assertIsNotNone(self.order.notified_at)
+        first = self.order_emails()
+        self.assertEqual(len(first), 1)
+        self.assertIn("2 x", first[0].body)
+        self.assertIn("could not be re-read from Stripe", first[0].body)
+
+        # Second delivery: Stripe answers this time, and reports that the
+        # customer actually bought five, not the two in the cart snapshot.
+        self.line_items_error = None
+        self.billed_quantities = {100: 5}
+
+        response = self.deliver(body)
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertIsNotNone(self.order.reconciled_at)
+        self.assertEqual(self.order.items.first().quantity, 5)
+
+        emails = self.order_emails()
+        self.assertEqual(len(emails), 2)
+        corrected = emails[1]
+        self.assertIn("5 x", corrected.body)
+        self.assertIn("[adjusted at checkout, was 2]", corrected.body)
+        # The caveat is gone, because these numbers really did come from
+        # Stripe this time.
+        self.assertNotIn("could not be re-read from Stripe", corrected.body)
+
+    def test_a_retry_that_still_cannot_reconcile_does_not_re_notify(self):
+        # The owner has already been told, and nothing new has been learned,
+        # so a redelivery must not turn Stripe's retries into an e-mail flood.
+        body = self.event_body(self.order)
+        self.line_items_error = RuntimeError("Stripe is unreachable")
+
+        with self.assertLogs("main.models", level="ERROR"):
+            self.deliver(body)
+        with self.assertLogs("main.models", level="ERROR"):
+            self.deliver(body)
+
         self.assertEqual(len(self.order_emails()), 1)

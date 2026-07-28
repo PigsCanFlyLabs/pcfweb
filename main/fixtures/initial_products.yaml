@@ -8,11 +8,19 @@
 # external_product_id is intentionally unset; the Stripe product id is
 # generated lazily on first add-to-cart (see CartProduct.generate_price_id).
 #
-# Three of the four O'Reilly titles below now carry an e-book ASIN, so they
+# Four of the five O'Reilly titles below now carry an e-book ASIN, so they
 # show the "Buy on Amazon (ebook)" button; pk 101 deliberately does not -- see
 # the comment on that row. That button is driven by `ebook_asin` (or an
 # explicit `kindle_link`) and renders only when one is set -- an absent value
 # produces no button rather than a dead one.
+#
+# High Performance Spark ships as two rows: pk 101 is the 1st edition (Karau
+# and Warren) and pk 108 is the 2nd (Karau, Polak and Warren, Spark 4.x).
+# They are separate products with separate ISBNs, not one row
+# updated in place -- the 1st edition is still in print and still sold, and
+# overwriting it would have silently repointed every existing link to it.
+# Both rows name their edition, as pk 100 does; neither is the unsuffixed
+# "High Performance Spark".
 #
 # The values belong here, not in the admin. `ebook_asin` used to be in
 # seed_products' SEED_PROTECTED_FIELDS, which made a fixture carrying one exit
@@ -30,6 +38,22 @@
 # keys present here to .update(), so an absent key is never written.
 # print_asin, default_asin, external_product_id and stock stay admin/runtime-
 # owned and must not appear in this file at all.
+#
+# Cross-links (`x_links`, `ebook_x_links`) are many-to-many and are written by
+# a second pass in seed_products, not by the create/update that handles every
+# other key here -- neither of those can carry an M2M at all. Two rules follow
+# from how that pass works, and breaking either one stops the primary pod
+# booting under `set -e`:
+#
+#   1. Every pk named must exist. Forward references are fine (104 names 106
+#      below, which is read later); references to nothing are not.
+#   2. `x_links` is SYMMETRICAL, so any two rows that both declare it must
+#      list each other. 104 lists 105 and 106, so 105 and 106 each list 104.
+#      A one-sided declaration seeds and then unseeds itself depending on
+#      fixture order, so seed_products rejects it rather than guessing.
+#
+# `ebook_x_links` is directional and takes no such pairing: a print row points
+# at the e-book row, and the e-book does not point back at the paperback.
 - model: main.product
   pk: 100
   fields:
@@ -62,6 +86,12 @@
     image_name: "book_covers/learning_spark_1ed.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # A 2015 book about Spark 1.x, superseded by a 2nd edition that is a
+    # different book by different authors. Advisory only: this stays on sale
+    # and stays listed, and the flag adds nothing but a sentence saying the
+    # edition may be dated. `noorder` is what stops a sale, and it is not set
+    # here and must not be added -- people buy this one deliberately.
+    out_of_date: true
     # On O'Reilly's learning platform, so the Safari trial link is a
     # true statement for this title. Explicit rather than inferred from
     # the ISBN -- see Product.on_oreilly_safari.
@@ -69,7 +99,14 @@
 - model: main.product
   pk: 101
   fields:
-    name: "High Performance Spark"
+    # Carries its edition in the name, following pk 100. Both editions are in
+    # print and both are sold here, so an unsuffixed "High Performance Spark"
+    # sitting next to pk 108 reads as *the* book rather than the older one --
+    # and this row is the cheaper of the two, so it is the one a shopper
+    # scanning on price lands on first. Renaming the row is the whole fix
+    # here: no badge, no cross-link, no delisting. It is still in print and
+    # still purchasable.
+    name: "High Performance Spark (1st edition)"
     description: >-
       Best practices for scaling and optimizing Apache Spark. If you've used
       Spark to solve medium-sized problems but still struggle to realize the
@@ -88,7 +125,8 @@
     # B0725YT69J now 404s on .com, .co.uk, .ca and .de alike. The 2nd
     # edition's B0H3CMNN3Q is NOT a substitute -- it is a different book
     # (Karau, Polak and Warren, covering Spark 4.x) sold under a different
-    # listing, so pointing this row's "Buy on Kindle" link at it would sell
+    # listing, and it now has its own row at pk 108, which is where that ASIN
+    # belongs. Pointing this row's "Buy on Kindle" link at it would sell
     # the reader something other than the product on the page. Leaving it
     # unset drops the link entirely, which get_alt_links() does by filtering
     # out falsy URLs -- no link beats a wrong one.
@@ -134,6 +172,9 @@
     image_name: "book_covers/kubeflow_for_ml.jpg"
     cat: "B"
     tax_code: "txcd_35010000"
+    # Kubeflow moved on considerably after this was written. Same advisory-
+    # only meaning as pk 100: still for sale, still listed, still in the feed.
+    out_of_date: true
     # On O'Reilly's learning platform, so the Safari trial link is a
     # true statement for this title. Explicit rather than inferred from
     # the ISBN -- see Product.on_oreilly_safari.
@@ -225,6 +266,14 @@
     tax_code: "txcd_35010000"
     delivery_type: "PHYSICAL"
     sells_ebook: false
+    # The three DC4K SKUs are one book in three formats, so all three name
+    # the other two. Symmetrical, so 105 and 106 each list 104 in turn.
+    x_links: [105, 106]
+    # Directional: this paperback's e-book is pk 106. Renders a button to pk
+    # 106's own product page -- not an add-to-cart on this page, which could
+    # only either sell a paperback as a download or put a product the visitor
+    # never named into their cart.
+    ebook_x_links: [106]
 - model: main.product
   pk: 105
   fields:
@@ -235,7 +284,7 @@
     # source lines if you must but do not edit the words.
     #
     # The closing sentence carries no dollar figure on purpose: the copy
-    # already says "(roughly) $10.42 more" and `price` below is 3042, so a
+    # already says "(roughly) $14.42 more" and `price` below is 3442, so a
     # second figure in the closer would contradict both on the product page.
     description: |-
       How do you solve the biggest problems of today? You harness the power of teamwork, with computers, friends, or garden gnomes. Distributed Computing 4 Kids and Executives teaches how to solve big problems with garden gnomes (and later computers). These techniques power modern AI, search, and recommendation systems.
@@ -250,8 +299,8 @@
 
       Big Data and Large Language Models don't have to mean a big headache. Grab your helper, pour some tea, and get started!
 
-      This special executive edition is the almost exact same content as regular Distributed Computing 4 Kids and Executives but it costs (roughly) $10.42 more with a different ISBN. You might be saying to yourself, "Holden, why would I want this special executive edition?" the answer is to be even more executive, and support creation of books like these. You're not just reading a book for kids and executives, you're reading the executive edition. The extra also helps keep a developer from turning to a life of enterprise support contracts.
-    price: 3042
+      This special executive edition is the almost exact same content as regular Distributed Computing 4 Kids and Executives but it costs (roughly) $14.42 more with a different ISBN. You might be saying to yourself, "Holden, why would I want this special executive edition?" the answer is to be even more executive, and support creation of books like these. You're not just reading a book for kids and executives, you're reading the executive edition. The extra also helps keep a developer from turning to a life of enterprise support contracts.
+    price: 3442
     # Its own ISBN, distinct from pk 104's -- that difference is what this SKU
     # is. Self-published like the standard edition, so on_oreilly_safari stays
     # unset: the Safari link tracks the publisher, never the ISBN.
@@ -265,6 +314,13 @@
     tax_code: "txcd_35010000"
     delivery_type: "PHYSICAL"
     sells_ebook: false
+    x_links: [104, 106]
+    # There is no separate Executive e-book, so the executive edition points
+    # at the same pk 106 the standard paperback does. That is a real answer
+    # to "where is the e-book?" rather than a missing one; the button says
+    # which product it lands on, so nobody is told they are getting an
+    # executive-edition download.
+    ebook_x_links: [106]
 - model: main.product
   pk: 106
   fields:
@@ -308,6 +364,13 @@
     # <stem>.zip under settings.BOOK_ASSET_ROOT; must match the archive
     # committed to the pcfweb-book-assets repo.
     digital_asset_name: "distributed_computing_4_kids"
+    x_links: [104, 105]
+    # No ebook_x_links, and this blank is the correct one -- do not "complete
+    # the set" by adding [104, 105] here. The field is directional and means
+    # "the e-book you can buy instead of this"; pointing it back at the two
+    # paperbacks would render "Get the e-book: ...(print edition)" buttons on
+    # the e-book's own page. The key is omitted rather than set to [], so the
+    # relation stays admin-editable if a second e-book edition ever exists.
 # "Fast Data Processing with Spark" (Packt, 2013) -- Holden's first book and
 # the first book written about Apache Spark. Listed for the history, not for
 # sale: noorder makes is_purchasable() false, which suppresses the buy button,
@@ -359,3 +422,74 @@
     on_oreilly_safari: false
     delivery_type: "PHYSICAL"
     sells_ebook: false
+# High Performance Spark, 2nd edition -- a new product, not an edit to pk 101.
+# Every identifier below was verified against a live retrieved page; the two
+# that could not be are left unset with the reason recorded on the key.
+- model: main.product
+  pk: 108
+  fields:
+    # O'Reilly's own catalogue title for this edition, verbatim. pk 101 was
+    # renamed to "High Performance Spark (1st edition)" when this row landed,
+    # so neither of the two is the unsuffixed one.
+    name: "High Performance Spark, 2nd Edition"
+    description: >-
+      The second edition, rewritten for Spark 4.x. Holden Karau, Adi Polak,
+      and Rachel Warren walk you through the secrets of the Spark code base
+      and demonstrate the performance optimizations that make data pipelines
+      run faster, scale to larger datasets, and avoid costly antipatterns --
+      with new use cases, new code examples, and a treatment of Structured
+      Streaming that is new to this edition. For data engineers, software
+      engineers, data scientists, and system administrators who are already
+      past the basics.
+    # O'Reilly's US list price for the paperback, verified 2026-07-27 on the
+    # Amazon listing below, which shows "List Price: $65.99" beside a
+    # discounted street price. The street price is not what we charge.
+    price: 6599
+    isbn: "9781098145859"
+    print_isbn: "9781098145859"
+    # ebook_isbn is deliberately unset: NOT FOUND, not forgotten. The three
+    # sibling O'Reilly rows carry a retail EPUB ISBN distinct from both the
+    # print ISBN and O'Reilly's platform id, but no such number is published
+    # anywhere reachable for this edition. O'Reilly's own catalogue record
+    # (archive_id 9781098145842) carries a single `isbn` field and it holds
+    # 9781098145859 -- the print ISBN, not an EPUB one. 9781098145842 itself
+    # is the platform id from the /library/view/ URL, which this file has
+    # never used as an ebook_isbn on any row. Bookshop, ebooks.com, Kobo and
+    # VitalSource are all behind bot walls, and Google Books and Open Library
+    # have no record of this edition at all. Do not fill this in by adjusting
+    # a digit of the print ISBN: a wrong ISBN reaches Google Merchant as a
+    # wrong <g:gtin>. Add it only from a page that states it.
+    #
+    # Kindle edition ASIN, verified 2026-07-27 against the live Amazon
+    # listing: /dp/B0H3CMNN3Q returns a real product page titled "High
+    # Performance Spark ... eBook : Karau, Holden, Polak, Adi, Warren,
+    # Rachel: Kindle Store", published by O'Reilly Media, whose description
+    # reads "the second edition of High Performance Spark presents new use
+    # cases, code examples, and best practices for Spark 4.x and beyond".
+    # Edition linkage, not title matching: the paperback page for ISBN-13
+    # 978-1098145859 carries a KINDLE format swatch pointing at this exact
+    # ASIN, which is Amazon stating the two are one book in two formats.
+    ebook_asin: "B0H3CMNN3Q"
+    # ISBN-10 1098145852, read off the paperback listing's own product
+    # details, where it appears beside "ISBN-13 978-1098145859".
+    amazon_link: "https://www.amazon.com/dp/1098145852"
+    amazon_in_link: "https://www.amazon.in/dp/1098145852"
+    # No bookshop_link and no bookshop_ebook_link. Bookshop.org serves a
+    # Cloudflare interstitial to every request made here, so whether it lists
+    # this edition could not be established either way. An unverified button
+    # is the one thing this file does not ship -- see pk 100, whose Bookshop
+    # link was removed for landing on "No results found."
+    #
+    # No flipkart_link either, and this one is not a blocked-page guess: the
+    # search URL the sibling rows use, /search?q=<isbn>, was retrieved for
+    # this ISBN on 2026-07-27 and returned 2,244 results consisting of
+    # watches and phone cases, with zero occurrences of the title or any
+    # author name. That is a dead button, so there is none.
+    image_name: "book_covers/high_performance_spark_2ed.jpg"
+    cat: "B"
+    tax_code: "txcd_35010000"
+    # On O'Reilly's learning platform -- confirmed by the catalogue record at
+    # archive_id 9781098145842, whose web_url is
+    # /library/view/high-performance-spark/9781098145842/ -- so the Safari
+    # trial link is a true statement for this title.
+    on_oreilly_safari: true

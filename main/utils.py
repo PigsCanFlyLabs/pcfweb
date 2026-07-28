@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.core.mail import get_connection
+from django.core.mail import get_connection, send_mail
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,35 @@ def admin_recipients() -> List[str]:
         # string form so a mis-set env var is not a crash in a webhook.
         recipients.append(entry if isinstance(entry, str) else entry[1])
     return [r for r in recipients if r]
+
+
+def email_admins(subject: str, body: str, error_logger: logging.Logger,
+                 failure_message: str) -> bool:
+    """Mail ADMINS, and never let alert delivery be the loud failure.
+
+    Startup and management-command alerts are best-effort notifications: if
+    SMTP is down, the original problem still needs to stay visible in logs and
+    stdout/stderr rather than being replaced by a secondary mail exception.
+    """
+    recipients = admin_recipients()
+    if not recipients:
+        error_logger.error(
+            "No ADMINS configured, so nobody was mailed: %s",
+            failure_message)
+        return False
+    try:
+        send_mail(
+            subject,
+            body,
+            settings.DEFAULT_FROM_EMAIL,
+            recipients,
+            fail_silently=False,
+        )
+    except Exception:
+        error_logger.exception(
+            "Could not email %s: %s", ", ".join(recipients), failure_message)
+        return False
+    return True
 
 
 def generate_username(email: str):

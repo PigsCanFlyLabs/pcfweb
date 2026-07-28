@@ -6,7 +6,7 @@ for the length of every rollout the new schema is written by code that has
 never heard of the new columns. A NOT NULL column with no database default
 makes an old pod's INSERT fail, which 500s checkout for real customers.
 
-Five classes, because three independent features each added columns needing
+Six classes, because four independent features each added columns needing
 this guard and the checks are not interchangeable:
 
 ``RollingDeployOldCodeWriteTest``      issues a genuine old-code INSERT.
@@ -23,6 +23,10 @@ this guard and the checks are not interchangeable:
                                        the same safety: NULLable rather than
                                        NOT NULL-with-a-default.
 ``ProductFormatIdentifierMigrationTest`` the isbn -> print_isbn data backfill.
+``RollingDeployCrossLinkColumnTest``   the two columns 0013 adds, one taking
+                                       each route: ``msrp`` NULLable,
+                                       ``out_of_date`` NOT NULL with a
+                                       db_default.
 
 The DDL classes are deliberately separate rather than merged: their recorders
 have different shapes, and collapsing them would mean one feature's guard
@@ -433,3 +437,106 @@ class ProductFormatIdentifierMigrationTest(TestCase):
         self.assertEqual(values[200], ("9781449358624", "9781449358624"))
         self.assertEqual(values[201], (None, None))
         self.assertEqual(values[202], ("", ""))
+
+
+class RollingDeployCrossLinkColumnTest(PostgresDDLRecorder, TestCase):
+    """The two columns migration 0013 adds to main_product.
+
+    A TestCase rather than a SimpleTestCase like its DDL-only siblings: the
+    last test here issues a real INSERT, so it needs a database. The recorded
+    PostgreSQL DDL still needs no server -- those statements are collected,
+    never executed.
+
+    Same hazard as every class above: `migrate` runs on web-primary while
+    pods on the previous image keep writing Products, and an INSERT from one
+    of those names only the columns that existed before 0013. The two new
+    columns take the two different routes to surviving that, so they are
+    checked differently:
+
+    ``msrp`` is NULLable -- an omitted column simply lands NULL, which is
+    also the value that means "no MSRP recorded", so an old-code write
+    produces a correct row rather than merely a legal one.
+
+    ``out_of_date`` is NOT NULL, so it needs a default that stays in the
+    schema. Django's AddField would otherwise backfill one and immediately
+    ``DROP DEFAULT``, which is the exact bug 0009 shipped; db_default is what
+    keeps it.
+
+    The M2M fields 0013 adds are deliberately not covered here. They are
+    separate through tables, not columns on main_product, so no old-code
+    Product INSERT can fail to write them -- there is nothing to omit.
+    """
+
+    def test_msrp_is_nullable_and_absent_from_old_code_inserts(self):
+        # Anti-vacuity: the column has to be missing from the old-code column
+        # list for the raw-INSERT guards to be exercising anything. If a
+        # future edit "helpfully" adds it there, this fails.
+        from main.tests.test_stock import OLD_CODE_PRODUCT_COLUMNS as STOCK_LIST
+
+        for column_list in (
+                RollingDeployOldCodeProductInsertTest.OLD_CODE_PRODUCT_COLUMNS,
+                STOCK_LIST):
+            self.assertNotIn("msrp", column_list)
+            self.assertNotIn("out_of_date", column_list)
+
+        statements = self.add_named_field_ddl("Product", "msrp")
+        add_column = [s for s, _ in statements if "ADD COLUMN" in s]
+
+        self.assertEqual(len(add_column), 1, statements)
+        self.assertIn("msrp", add_column[0])
+        self.assertNotIn("NOT NULL", add_column[0])
+
+    def test_out_of_date_keeps_a_real_database_default(self):
+        statements = self.add_named_field_ddl("Product", "out_of_date")
+        add_column = [s for s, _ in statements if "ADD COLUMN" in s]
+
+        self.assertEqual(len(add_column), 1, statements)
+        self.assertIn("NOT NULL", add_column[0])
+        self.assertIn("DEFAULT", add_column[0])
+        self.assertEqual(
+            [s for s, _ in statements if "DROP DEFAULT" in s],
+            [],
+            f"out_of_date loses its database default: {statements}")
+
+    def test_this_check_would_notice_a_missing_db_default(self):
+        """Guards the guard: the failure mode is still detectable.
+
+        A BooleanField declared the way out_of_date would be *without* a
+        db_default must still produce the ADD COLUMN ... DEFAULT followed by
+        DROP DEFAULT, or the assertion above passes vacuously.
+        """
+        field = django_models.BooleanField(default=False)
+        field.set_attributes_from_name("flag_without_a_db_default")
+
+        statements = self.add_field_ddl(Product, field)
+
+        self.assertTrue(
+            [s for s, _ in statements if "ADD COLUMN" in s and "DEFAULT" in s],
+            statements)
+        self.assertTrue(
+            [s for s, _ in statements if "DROP DEFAULT" in s], statements)
+
+    def test_an_old_pod_can_still_write_a_product_after_0013(self):
+        """The runtime half: a genuine INSERT naming no 0013 column."""
+        columns = RollingDeployOldCodeProductInsertTest.OLD_CODE_PRODUCT_COLUMNS
+        values = [None] * len(columns)
+        for name, value in (
+                ("description", "An old product."),
+                ("name", "Old product after 0013"),
+                ("page", ""), ("price", 1000), ("image", ""),
+                ("image_name", ""), ("tax_code", "txcd_99999999"),
+                ("cat", "M"), ("mode", "P"),
+                ("preorder_only", False), ("noorder", False),
+                ("backorder", False)):
+            values[columns.index(name)] = value
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f'INSERT INTO main_product ({", ".join(columns)}) VALUES '
+                f'({", ".join(["%s"] * len(columns))})',
+                values)
+
+        product = Product.objects.get(name="Old product after 0013")
+        # The database supplied both of these, not the ORM.
+        self.assertIsNone(product.msrp)
+        self.assertFalse(product.out_of_date)

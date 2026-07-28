@@ -52,6 +52,9 @@ urlpatterns = [
     # unsubscribing are django-newsletter's pages, under /newsletter/.
     path('mailing-list/subscribe', views.MailingListSubscribeView.as_view(),
          name='mailing-list-subscribe'),
+    path('mailing-list/subscribe-all',
+         views.MailingListSubscribeAllView.as_view(),
+         name='mailing-list-subscribe-all'),
 
     # General
     path('', views.HomeView.as_view(), name="home"),

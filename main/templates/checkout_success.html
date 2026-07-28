@@ -3,6 +3,15 @@
 {% block content %}
 <div class="container">
     <section class="section" style="min-height: 35.6vh;">
+        {% if messages %}
+        <div class="row">
+            <div class="col-lg-12">
+                {% for message in messages %}
+                <div class="alert alert-warning" role="alert">{{ message }}</div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
         <div class="section-heading text-center">
             <h2>Checkout Successful!</h2>
             <p>You have successfully checked out.</p>
@@ -15,8 +24,15 @@
             <p>Order #{{ order.pk }} &mdash; {{ order.get_status_display }}</p>
             <ul style="list-style: none; padding: 0;">
                 {% for item in order.items.all %}
+                {# unit_amount is the snapshot of Product.price, which for a #}
+                {# pay-what-you-want line is the suggestion -- so this line and #}
+                {# the order total below can legitimately differ. Order's owner #}
+                {# email says the same thing; see order_summary_text. #}
                 <li>{{ item.quantity }} &times; {{ item.product_name }}
-                    &mdash; ${{ item.total_display_price }}</li>
+                    &mdash; ${{ item.total_display_price }}{% if item.product.is_pwyw %}
+                    <br><small class="pwyw-note">Pay what you want: shown at the
+                    suggested amount &mdash; see the order total for what was
+                    paid.</small>{% endif %}</li>
                 {% endfor %}
             </ul>
             <p>Total: ${{ order.total_display_price }} {{ order.currency|upper }}</p>

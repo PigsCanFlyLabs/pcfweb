@@ -2,12 +2,28 @@
 
 import html as html_module
 import re
+from datetime import datetime
 from unittest import mock
 
+from django.conf import settings
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from main.models import Product
 from main.tests.base import REPO_ROOT
+
+# An edition ordinal as it appears either in a credential label ("1st and 2nd
+# editions") or in a product name ("(1st edition)", ", 2nd Edition"). The two
+# are worded differently on purpose -- one reads as a sentence, the other is
+# the catalogue title -- so the comparison has to be on the numbers, not on
+# the strings. Requiring the ordinal suffix keeps plain digits elsewhere in a
+# title out of it: "Distributed Computing 4 Kids" names no edition.
+_EDITION_ORDINAL = re.compile(r"(\d+)(?:st|nd|rd|th)\b", re.IGNORECASE)
+
+
+def editions_named(text: str) -> set[int]:
+    """The edition numbers *text* claims, as ints. Empty if it claims none."""
+    return {int(n) for n in _EDITION_ORDINAL.findall(text)}
 
 
 class StaticPagesTest(TestCase):
@@ -211,7 +227,10 @@ class ServicesPageTest(ServicesPageMixin, TestCase):
         section = self.services_section()
         expected = {
             "Learning Spark (1st edition)": "9781449358624",
-            "High Performance Spark (1st and 2nd editions)": "9781491943205",
+            # The 2nd edition's ISBN: the label names both editions, so it
+            # links the newer one. See the note on
+            # ServicesPageView.HIGH_PERFORMANCE_SPARK.
+            "High Performance Spark (1st and 2nd editions)": "9781098145859",
             "Fast Data Processing with Spark": "9781782167068",
             "Kubeflow for Machine Learning": "9781492050124",
             "Scaling Python with Ray": "9781098118808",
@@ -289,12 +308,71 @@ class ServicesPageBookLinksTest(ServicesPageMixin, TestCase):
                 r'<a href="/book/(\d+)">([^<]+)</a>', section):
             with self.subTest(isbn=isbn):
                 response = self.client.get(f"/book/{isbn}", follow=True)
-                # The credential titles carry an edition suffix the product
-                # name does not, so compare on the part before the bracket.
+                # Compare on the part before the bracket: a credential's
+                # edition suffix is worded for the sentence ("1st and 2nd
+                # editions") and does not match the product's own suffix
+                # ("(1st edition)", ", 2nd Edition") even when both mean the
+                # same book. Stripping it is what makes this check general.
+                #
+                # The cost is that this test cannot see a label and a
+                # destination disagreeing about WHICH edition they mean --
+                # both reduce to the same stem. That is deliberate here and
+                # covered by test_cited_editions_land_on_the_edition_they_name
+                # below; do not try to make this one do both jobs.
                 stem = title.split(" (")[0]
 
                 self.assertEqual(response.status_code, 200)
                 self.assertContains(response, stem)
+
+    def test_cited_editions_land_on_the_edition_they_name(self):
+        """A citation naming an edition must reach that edition's page.
+
+        The stem comparison above is blind to this by construction, so
+        nothing detected it when pk 101 was renamed to "High Performance
+        Spark (1st edition)" and the credential citing "1st and 2nd editions"
+        went on pointing at it: the label promised both editions and the page
+        it reached said it was only the first. The reader is the one who finds
+        out.
+
+        The rule, which matches what the credentials mean: a label naming a
+        single edition must reach that edition, a label naming several must
+        reach the newest one it names (the one in print), and a label naming
+        no edition must not land on an edition-specific page at all.
+        """
+        section = self.services_section()
+        cited = re.findall(r'<a href="/book/(\d+)">([^<]+)</a>', section)
+        # Anti-vacuity: the citations are really there to be checked.
+        self.assertEqual(len(cited), 5)
+
+        saw_an_edition_claim = False
+        for isbn, label in cited:
+            with self.subTest(label=label):
+                response = self.client.get(f"/book/{isbn}")
+                self.assertEqual(response.status_code, 302)
+                pk = int(response["Location"].rsplit("/", 1)[-1])
+                reached_name = Product.objects.get(pk=pk).name
+
+                claimed = editions_named(html_module.unescape(label))
+                reached = editions_named(reached_name)
+
+                if claimed:
+                    saw_an_edition_claim = True
+                    self.assertEqual(
+                        reached, {max(claimed)},
+                        f"{label!r} names edition(s) "
+                        f"{sorted(claimed)} so it must link the newest of "
+                        f"them, edition {max(claimed)}; /book/{isbn} reaches "
+                        f"pk {pk}, {reached_name!r}.")
+                else:
+                    self.assertEqual(
+                        reached, set(),
+                        f"{label!r} names no edition, but /book/{isbn} "
+                        f"reaches pk {pk}, {reached_name!r}, which is "
+                        "specific to one.")
+
+        # Anti-vacuity: at least one citation really does make an edition
+        # claim, so the branch that matters was actually exercised.
+        self.assertTrue(saw_an_edition_claim)
 
 
 @override_settings(THUMBNAIL_DEBUG=False)
@@ -725,6 +803,68 @@ class HomePageWithoutSeedDataTest(TestCase):
 
 
 @override_settings(THUMBNAIL_DEBUG=False)
+class ProductListingTitleLinksTest(TestCase):
+    fixtures = ["initial_products"]
+
+    CARD_LINK_PATTERN = re.compile(
+        r'<a\b[^>]*href="(?P<image_href>/product/\d+)"[^>]*>\s*'
+        r'<img[^>]*>\s*</a>\s*</div>\s*<div class="down-content">\s*<h4>\s*'
+        r'<a\b[^>]*href="(?P<title_href>/product/\d+)"[^>]*>'
+        r'(?P<title>.*?)</a>\s*</h4>',
+        re.DOTALL,
+    )
+
+    def assert_title_links_match_cover_links(self, response, expected_products):
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+        matches = list(self.CARD_LINK_PATTERN.finditer(html))
+
+        self.assertEqual(
+            len(matches), len(expected_products),
+            "each rendered product card should have a title link and a "
+            "cover link")
+
+        actual = set()
+        for match in matches:
+            image_href = match.group("image_href")
+            title_href = match.group("title_href")
+            self.assertEqual(title_href, image_href)
+            actual.add((
+                title_href,
+                html_module.unescape(match.group("title")).strip(),
+            ))
+
+        expected = {
+            (f"/product/{product.pk}", product.name)
+            for product in expected_products
+        }
+        self.assertEqual(actual, expected)
+
+    def test_all_products_listing_links_each_title_to_its_cover_destination(
+            self):
+        response = self.client.get("/products")
+        products = Product.objects.exclude(noorder=True)
+
+        self.assert_title_links_match_cover_links(response, products)
+
+    def test_books_category_listing_links_each_title_to_its_cover_destination(
+            self):
+        response = self.client.get("/products/B")
+        products = Product.objects.filter(
+            cat=Product.Categories.BOOKS).exclude(noorder=True)
+
+        self.assert_title_links_match_cover_links(response, products)
+
+    def test_books_category_query_links_each_title_to_its_cover_destination(
+            self):
+        response = self.client.get("/products", {"category": "B"})
+        products = Product.objects.filter(
+            cat=Product.Categories.BOOKS).exclude(noorder=True)
+
+        self.assert_title_links_match_cover_links(response, products)
+
+
+@override_settings(THUMBNAIL_DEBUG=False)
 class PageSmokeTest(TestCase):
     """These pages had no coverage at all; at minimum they must render."""
 
@@ -746,6 +886,8 @@ class PageSmokeTest(TestCase):
         # cart -- and Payments.checkout returns (url, session_id).
         model_payments.create_product.return_value = "prod_test"
         model_payments.create_price.return_value = "price_test"
+        payments.pwyw_add_to_cart_blocker.return_value = None
+        payments.pwyw_checkout_blocker.return_value = None
         payments.checkout.return_value = (
             "https://checkout.example/session", "cs_test_smoke")
         Product.objects.filter(pk=100).update(stock=1)
@@ -894,3 +1036,126 @@ class FamilyPageTest(TestCase):
         response = self.client.get("/family")
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "family.html")
+
+
+class FrozenDatetime(datetime):
+    """A datetime whose ``now()`` is pinned to :data:`frozen_year`.
+
+    A subclass rather than a Mock so that every other use of the patched
+    symbol keeps behaving like a real datetime; only ``now()`` is stolen.
+
+    ``NowNode`` calls ``datetime.now(tz=tzinfo)``, so the tz it asks for is
+    honoured: the instant is built *in* that zone rather than in UTC and
+    reinterpreted. Midday on 15 June is chosen so the result is roughly six
+    months and twelve hours from the nearest year boundary -- no real zone
+    offset (at most +14/-12 hours) can drag the frozen year to an adjacent
+    one, whatever TIME_ZONE is in force.
+    """
+
+    frozen_year = 2000
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(cls.frozen_year, 6, 15, 12, 0, 0, tzinfo=tz)
+
+
+def frozen_at(year):
+    """A ``FrozenDatetime`` subclass reporting ``year`` from ``now()``."""
+    return type("FrozenAt%d" % year, (FrozenDatetime,),
+                {"frozen_year": year})
+
+
+class FooterCopyrightTest(TestCase):
+    """The footer copyright range, which every page inherits from base.html.
+
+    The point of these tests is that the end of the range *follows a clock*
+    rather than being pinned to a literal. That property is impossible to
+    check against the real clock: today the live year and any freshly
+    hardcoded year are the same number, so an oracle built on the current
+    year passes just as happily against a literal template. Instead the
+    clock the tag actually reads is frozen to two years that are not this
+    year and cannot both be satisfied by any single literal.
+
+    Nothing here compares against a hardcoded *current* year, so no
+    assertion in this class can start failing because a new year began.
+    """
+
+    # Deliberately far-future and mutually exclusive: a template frozen at
+    # either one would fail the other.
+    FROZEN_YEARS = (2031, 2043)
+
+    # Extremes of the real offset range, either side of the project's UTC.
+    # The frozen year must survive all of them.
+    FROZEN_ZONES = ("UTC", "Pacific/Kiritimati", "Etc/GMT+12",
+                    "America/Los_Angeles")
+
+    # `{% now %}` is rendered by django.template.defaulttags.NowNode, which
+    # calls `datetime.now(tz=...)` against the `datetime` symbol imported
+    # into that module -- NOT django.utils.timezone.now(), which it only
+    # consults for the tzinfo argument. Patching timezone.now would leave
+    # the tag reading the real clock and quietly prove nothing.
+    NOW_SYMBOL = "django.template.defaulttags.datetime"
+
+    def django_year(self):
+        """The year *Django's* clock is in, which is what the tag renders.
+
+        Not ``datetime.now().year``: that is the host's local year, and the
+        host need not be on TIME_ZONE. Between 00:00 UTC on 1 January and
+        midnight locally, a machine behind UTC is still in the old year
+        while the footer correctly shows the new one -- a red CI run with
+        no product regression, i.e. the exact bomb this class exists to
+        design out.
+
+        This mirrors NowNode's own tz choice through
+        ``django.utils.timezone``, which is a separate code path from the
+        one under test and is untouched by the patch above -- so it still
+        reports the real year when the template has stopped reading a clock.
+        """
+        if not settings.USE_TZ:
+            return datetime.now().year
+        return timezone.localtime(timezone.now(),
+                                  timezone.get_current_timezone()).year
+
+    def footer_years(self):
+        response = self.client.get("/privacy")
+        self.assertEqual(response.status_code, 200)
+        match = re.search(
+            r"Copyright © (\d{4})-(\d{4}) Pigs Can Fly Labs",
+            response.content.decode())
+        self.assertIsNotNone(match, "footer copyright line missing")
+        assert match is not None  # for mypy
+        return int(match.group(1)), int(match.group(2))
+
+    def test_footer_copyright_starts_at_the_founding_year(self):
+        start, _ = self.footer_years()
+        self.assertEqual(start, 2022)
+
+    def test_footer_copyright_end_year_follows_the_clock(self):
+        """A literal end year cannot track two different frozen clocks.
+
+        If the template is ever changed back to a hardcoded year this
+        fails, whatever year is hardcoded -- including the current one.
+        """
+        for year in self.FROZEN_YEARS:
+            for zone in self.FROZEN_ZONES:
+                with self.subTest(frozen_year=year, time_zone=zone):
+                    with override_settings(TIME_ZONE=zone):
+                        with mock.patch(self.NOW_SYMBOL, frozen_at(year)):
+                            _, end = self.footer_years()
+                    self.assertEqual(
+                        end, year,
+                        "footer end year did not follow a clock frozen at "
+                        f"{year} under TIME_ZONE={zone}; it is not reading "
+                        "the clock")
+
+    def test_footer_copyright_shows_the_real_year_when_not_frozen(self):
+        """The frozen test above would also pass on a template hardcoded to
+        2031, so pin the unfrozen render to the real clock as well.
+
+        The expected year comes from Django's clock in Django's timezone --
+        the same instant and zone the tag reads -- not from the host's local
+        wall clock, so a host behind TIME_ZONE cannot turn New Year's Day
+        into a false failure.
+        """
+        _, end = self.footer_years()
+        self.assertEqual(end, self.django_year())

@@ -5,12 +5,15 @@
   stylesheet, nothing to load from us. The endpoint it posts to is CSRF
   exempt precisely so this works from another origin.
 
-  One value to set, explicit in the form -- nothing is inferred from which
+  Two values to set, explicit in the form -- nothing is inferred from which
   site the form is on:
 
     * "interest" -- the slug of the list people are signing up for. Leave it
       out entirely and they land on the general list. The slugs are in the
       admin under Interest areas.
+
+    * "next" -- optional; where to send the visitor afterwards, so they stay
+      on your site instead of landing on ours. See below.
 
   The "all_updates" checkbox is ticked by default. When it is ticked the
   person is subscribed to the "All" list instead of the topic above -- All
@@ -18,7 +21,17 @@
   is what makes "everything" an opt-in the person can see and untick, rather
   than something we do to them quietly.
 
-  After submitting, the visitor lands on a thank-you page on pigscanfly.ca.
+  ABOUT "next"
+
+  Without it, the visitor lands on a thank-you page on pigscanfly.ca. With
+  it, they land on the page you name -- but only if its host is on an
+  allowlist we keep, and only over https. This endpoint is open to the
+  internet, so without that allowlist it would be an open redirect with our
+  domain on it.
+
+  If the host is not on that allowlist, or the URL is anything other than a
+  plain absolute https:// one, the field is silently ignored. The signup still
+  happens; the visitor just sees our thank-you page instead.
 
   Signing up sends a confirmation email; nobody is added to the list until
   they click the link in it.
@@ -31,6 +44,11 @@
 
   <!-- Which list. Change or remove; removing means the general list. -->
   <input type="hidden" name="interest" value="general">
+
+  <!-- Where to send them afterwards. Uncomment and point it at a page of
+       your own; it must be an absolute https:// URL and its host must be on
+       our allowlist. Anything else is ignored and they see our page. -->
+  <!-- <input type="hidden" name="next" value="https://example.com/thanks/"> -->
 
   <label class="pcf-signup-all">
     <input type="checkbox" name="all_updates" value="1" checked>

@@ -198,6 +198,23 @@ class AddToCartWithoutJavascriptTest(CartTestBase):
         self.assertEqual(
             CartProduct.objects.get().quantity, AddToCartView.MAX_QUANTITY)
 
+    def test_adding_to_a_line_cannot_overflow_the_quantity_column(self):
+        self.client.post(
+            "/add-to-cart/100/1",
+            {"quantity": str(AddToCartView.MAX_QUANTITY)},
+        )
+
+        response = self.client.post("/add-to-cart/100/1")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.content,
+            (f"Combined quantity must be at most "
+             f"{AddToCartView.MAX_QUANTITY}.").encode(),
+        )
+        self.assertEqual(
+            CartProduct.objects.get().quantity, AddToCartView.MAX_QUANTITY)
+
     def test_a_non_numeric_posted_quantity_is_a_400(self):
         response = self.client.post("/add-to-cart/100/1", {"quantity": "abc"})
         self.assertEqual(response.status_code, 400)
@@ -267,6 +284,78 @@ class CartAuthenticationTest(CartTestBase):
         existing.refresh_from_db()
         self.assertEqual(existing.quantity, 5)
         self.assertEqual(list(user_cart.products.all()), [existing])
+
+    def test_login_merge_cannot_overflow_the_quantity_column(self):
+        user = self.make_user()
+        user_cart = Cart.objects.create(user=user)
+        product = Product.objects.get(pk=100)
+        existing = CartProduct.objects.create(
+            cart=user_cart, product=product,
+            quantity=AddToCartView.MAX_QUANTITY,
+            price_id="price_existing")
+        # Build the FK-only shape the admin can create: this is the one place
+        # the overflow branch must repair the M2M link instead of assuming it.
+
+        self.client.post("/add-to-cart/100/1")
+        session_cart_id = self.client.session["cart_id"]
+        session_line = CartProduct.objects.get(cart_id=session_cart_id)
+        self.client.force_login(user)
+
+        response = self.client.get("/cart")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            (f"We capped {product.name} at {AddToCartView.MAX_QUANTITY} "
+             "because the combined cart quantity would not fit in storage."),
+        )
+        existing.refresh_from_db()
+        self.assertEqual(existing.quantity, AddToCartView.MAX_QUANTITY)
+        self.assertEqual(list(user_cart.products.all()), [existing])
+        self.assertFalse(
+            CartProduct.objects.filter(pk=session_line.pk).exists())
+        self.assertFalse(Cart.objects.filter(pk=session_cart_id).exists())
+        self.assertNotIn("cart_id", self.client.session)
+
+        Product.objects.filter(pk=product.pk).update(price=0)
+        with mock.patch("main.views.Payments.checkout") as checkout:
+            checkout.return_value = (
+                "https://checkout.example/session", "cs_merge_recovered")
+            checkout_response = self.client.post("/checkout")
+
+        self.assertRedirects(
+            checkout_response, "https://checkout.example/session",
+            fetch_redirect_response=False)
+
+    def test_login_merge_recovers_and_still_merges_innocent_products(self):
+        user = self.make_user()
+        user_cart = Cart.objects.create(user=user)
+        existing = CartProduct.objects.create(
+            cart=user_cart, product=Product.objects.get(pk=100),
+            quantity=AddToCartView.MAX_QUANTITY, price_id="price_existing")
+        user_cart.products.add(existing)
+
+        self.client.post("/add-to-cart/100/1")
+        self.client.post("/add-to-cart/101/4")
+        session_cart_id = self.client.session["cart_id"]
+        self.client.force_login(user)
+
+        response = self.client.get("/cart")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            (f"We capped {existing.product.name} at "
+             f"{AddToCartView.MAX_QUANTITY} "
+             "because the combined cart quantity would not fit in storage."),
+        )
+        self.assertEqual(
+            sorted((cp.product_id, cp.quantity)
+                   for cp in user_cart.products.order_by("product_id")),
+            [(100, AddToCartView.MAX_QUANTITY), (101, 4)],
+        )
+        self.assertFalse(Cart.objects.filter(pk=session_cart_id).exists())
+        self.assertNotIn("cart_id", self.client.session)
 
     def test_login_merges_distinct_products_into_the_user_cart(self):
         user = self.make_user()
@@ -545,6 +634,65 @@ class CartNotSoldHereTest(CartTestBase):
         self.assertNotIn("unavailable-notice", html)
         self.assertNotIn("Not sold here", html)
         self.assertIn("39.99", html)
+
+    def test_a_mixed_pwyw_cart_warns_that_checkout_is_blocked(self):
+        client = Client()
+        cart = Cart.objects.create()
+        session = client.session
+        session["cart_id"] = cart.cart_id
+        session.save()
+        fixed = Product.objects.get(pk=104)
+        pwyw = Product.objects.get(pk=106)
+        first = CartProduct.objects.create(cart=cart, product=fixed, quantity=1)
+        second = CartProduct.objects.create(cart=cart, product=pwyw, quantity=1)
+        cart.products.add(first, second)
+
+        html = client.get("/cart").content.decode()
+
+        self.assertIn("pwyw-checkout-blocker", html)
+        self.assertIn("only line in its checkout", html)
+        self.assertIn("Distributed Computing 4 Kids", html)
+        self.assertIn("disabled", html)
+        self.assertNotIn('name="coupon"', html)
+
+    def test_a_single_pwyw_line_explains_the_stripe_rules_without_blocking_checkout(self):
+        client = Client()
+        client.post("/add-to-cart/106/1")
+
+        html = client.get("/cart").content.decode()
+
+        self.assertIn("pwyw-notice", html)
+        self.assertNotIn("pwyw-checkout-blocker", html)
+        self.assertNotIn('name="coupon"', html)
+
+    def test_adding_a_pwyw_item_to_a_non_empty_cart_is_refused(self):
+        self.client.post("/add-to-cart/104/1")
+
+        response = self.client.post("/add-to-cart/106/1", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        self.assertContains(response, "only line in its checkout")
+        self.assertContains(response, "Distributed Computing 4 Kids")
+        self.assertEqual(CartProduct.objects.filter(product_id=106).count(), 0)
+
+    def test_adding_anything_to_a_cart_that_already_holds_pwyw_is_refused(self):
+        self.client.post("/add-to-cart/106/1")
+
+        response = self.client.post("/add-to-cart/104/1", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        self.assertContains(response, "only line in its checkout")
+        self.assertContains(response, "Distributed Computing 4 Kids")
+        self.assertEqual(CartProduct.objects.filter(product_id=104).count(), 0)
+
+    def test_adding_the_same_pwyw_item_twice_is_refused(self):
+        self.client.post("/add-to-cart/106/1")
+
+        response = self.client.post("/add-to-cart/106/1", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        self.assertContains(response, "checked out one at a time")
+        self.assertEqual(CartProduct.objects.get(product_id=106).quantity, 1)
 
     def test_a_noorder_line_does_not_trigger_the_shipping_notice(self):
         """It is not being shipped, so a delivery warning is noise."""

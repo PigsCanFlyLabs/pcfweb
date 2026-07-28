@@ -176,7 +176,7 @@ class BookAssetAuditTest(BookAssetRootMixin, TestCase):
         self.archive.unlink()
 
         with mock.patch(
-                "main.management.commands.check_book_assets.send_mail",
+                "main.utils.send_mail",
                 side_effect=OSError("connection refused")):
             _, _, logs = self.run_over_a_broken_catalogue()
 
