@@ -345,6 +345,12 @@ class Base(Configuration):
     MAILING_LIST_SIGNUP_RATE_LIMIT = parse_int(
         os.getenv("MAILING_LIST_SIGNUP_RATE_LIMIT"), 20)
 
+    # Absolute hosts the embeddable signup form may redirect back to through
+    # its `next` field. Exact netlocs only, so a host with a port must be
+    # listed with that port.
+    MAILING_LIST_ALLOWED_NEXT_HOSTS: List[str] = parse_comma_list(
+        os.getenv("MAILING_LIST_ALLOWED_NEXT_HOSTS", ""))
+
     # How many freshly imported addresses the import page will email the
     # "we've updated our list" notice to. Above this it imports and says to
     # write a mailing instead: the notice loop runs inside one request, and a
