@@ -30,6 +30,13 @@ SHIPPING_NOTICE_TEXT = "shipping times for physical goods are currently long"
 WEBHOOK_SECRET = "whsec_test_secret_value"
 WEBHOOK_URL = "/stripe/webhook"
 OWNER_EMAIL = "owner@example.com"
+NEVER_CACHE_DIRECTIVES = {
+    "max-age=0",
+    "no-cache",
+    "no-store",
+    "must-revalidate",
+    "private",
+}
 
 # The repository root. Resolved from this file rather than the working
 # directory because the packaging tests read Dockerfile/.gitignore/build.sh
@@ -54,6 +61,24 @@ def stripe_signature(payload: str, secret: str = WEBHOOK_SECRET,
         secret.encode(), f"{timestamp}.{payload}".encode(),
         hashlib.sha256).hexdigest()
     return f"t={timestamp},v1={signature}"
+
+
+def cache_control_directives(response) -> set[str]:
+    return {
+        directive.strip().lower()
+        for directive in response["Cache-Control"].split(",")
+        if directive.strip()
+    }
+
+
+def assert_never_cache_response(testcase, response) -> None:
+    directives = cache_control_directives(response)
+    testcase.assertEqual(directives, NEVER_CACHE_DIRECTIVES)
+    testcase.assertNotIn("public", directives)
+    testcase.assertFalse(
+        any(directive == "s-maxage" or directive.startswith("s-maxage=")
+            for directive in directives))
+    testcase.assertIn("Expires", response)
 
 
 """The settings every order test needs. Kept as a dict rather than applied

@@ -27,6 +27,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views import View
+from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 
 import stripe
@@ -845,6 +846,7 @@ class GoogleProductFeed(View):
 
 
 
+@method_decorator(never_cache, name="dispatch")
 class CartView(View, BaseCartView):
     def get(self, request):
         cart = self.get_cart(request)
@@ -936,9 +938,10 @@ class AddToCartView(View, BaseCartView):
                     chosen_amount = parse_pwyw_amount(posted_amount)
                 except PwywAmountError as error:
                     # Same shape as the add-to-cart refusals this replaces:
-                    # say why on the cart, which is the only page in the
-                    # buying flow that renders queued messages, and add
-                    # nothing. The product page has no messages block.
+                    # say why on the cart and add nothing. Base renders
+                    # queued messages everywhere now, but the cart redirect is
+                    # still deliberate: it returns the buyer to the checkout
+                    # surface instead of posting feedback to a product GET.
                     messages.error(request, str(error))
                     return redirect('cart')
 
@@ -1047,6 +1050,10 @@ class CheckoutView(View, BaseCartView):
         if not cart.products.exists():
             # Stripe rejects a session with no line items anyway; bailing here
             # keeps empty checkouts from leaving orphan PENDING orders behind.
+            messages.error(
+                request,
+                "Your cart is empty. Add something to your cart before "
+                "checking out.")
             return redirect('cart')
         # Stock is re-checked here, not just at add-to-cart: a cart can sit for
         # days, and stock is edited by hand in the admin, so what was
@@ -1114,6 +1121,7 @@ class CheckoutView(View, BaseCartView):
         return redirect(redirect_url)
 
 
+@method_decorator(never_cache, name="dispatch")
 class CheckoutSuccessView(View, BaseCartView):
     """Where Stripe sends the customer after a completed Checkout session.
 
@@ -1373,6 +1381,18 @@ class StripeWebhookView(View):
                     and order.digital_items()):
                 order.deliver_digital_goods()
 
+            order.refresh_from_db()
+            if order.receipt_sent_at is None and order.customer_email:
+                # Best-effort: the receipt is a courtesy and must never
+                # block delivery or the owner notification. Caught rather
+                # than propagated, and the failure is recorded on the row.
+                try:
+                    order.send_receipt()
+                except Exception:
+                    logger.exception(
+                        "Order #%s: receipt send raised unexpectedly.",
+                        order.pk)
+
             # Kept last so the owner's message reports the final reconciliation
             # and digital-delivery outcome.
             order.refresh_from_db()
@@ -1509,6 +1529,7 @@ class StripeWebhookView(View):
         return fields
 
 
+@method_decorator(never_cache, name="dispatch")
 class DigitalDownloadView(View):
     """Serve a purchased book from a signed, expiring link.
 
@@ -1578,6 +1599,7 @@ class DigitalDownloadView(View):
             content_type="application/zip")
 
 
+@method_decorator(never_cache, name="dispatch")
 class CheckoutCancelView(View, BaseCartView):
     def get(self, request):
         return render(request, 'checkout_cancel.html', context={'title': 'Cancelled! - Checkout'})
@@ -1840,6 +1862,7 @@ class MailingListSubscribeAllView(MailingListSubscribeView):
     forced_interest = mailing.ALL_SLUG
 
 
+@method_decorator(never_cache, name="dispatch")
 @method_decorator(staff_member_required, name='dispatch')
 class AdminHomeView(View):
     """One page listing where everything in the admin actually lives.

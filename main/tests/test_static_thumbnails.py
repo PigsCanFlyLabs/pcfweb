@@ -47,7 +47,7 @@ from PIL import Image
 from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.test import SimpleTestCase, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 
 from main.management.commands.pregenerate_thumbnails import (
     COVER_PREFIX, _cover_tree_is_wholly_absent, iter_expected_thumbnails,
@@ -777,3 +777,55 @@ class ThumbnailStorageSettingsTest(SimpleTestCase):
         """
         self.assertTrue(settings.STATIC_URL.startswith("/"))
         self.assertTrue(settings.THUMBNAIL_MEDIA_URL.startswith("/"))
+
+
+class DevStaticServingTest(SimpleTestCase):
+    def response_body(self, response):
+        return b"".join(response.streaming_content)
+
+    def test_source_static_file_wins_over_stale_collected_copy(self):
+        from main.urls import dev_static_serve
+
+        request = RequestFactory().get("/static/assets/css/main.css")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            collected = root / "collected"
+            (source / "assets/css").mkdir(parents=True)
+            (collected / "assets/css").mkdir(parents=True)
+            (source / "assets/css/main.css").write_bytes(b"live-source")
+            (collected / "assets/css/main.css").write_bytes(b"stale-copy")
+
+            with override_settings(
+                    STATICFILES_DIRS=[source], STATIC_ROOT=collected,
+                    DEBUG=True):
+                response = dev_static_serve(
+                    request, "assets/css/main.css")
+
+        self.assertEqual(self.response_body(response), b"live-source")
+
+    def test_static_root_fallback_serves_generated_thumbnail(self):
+        from main.urls import dev_static_serve
+
+        request = RequestFactory().get(
+            "/static/assets/images/book_covers/book.jpg.290x380_q85.jpg")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            collected = root / "collected"
+            source.mkdir()
+            (collected / "assets/images/book_covers").mkdir(parents=True)
+            thumb = (
+                collected
+                / "assets/images/book_covers/book.jpg.290x380_q85.jpg")
+            thumb.write_bytes(b"generated-thumbnail")
+
+            with override_settings(
+                    STATICFILES_DIRS=[source], STATIC_ROOT=collected,
+                    DEBUG=True):
+                response = dev_static_serve(
+                    request,
+                    "assets/images/book_covers/book.jpg.290x380_q85.jpg")
+
+        self.assertEqual(
+            self.response_body(response), b"generated-thumbnail")

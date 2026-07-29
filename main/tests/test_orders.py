@@ -15,7 +15,8 @@ from django.test import Client, RequestFactory, TransactionTestCase, override_se
 from main.models import Cart, CartProduct, Order, OrderItem, Product
 from main.tests.base import (
     ORDER_TEST_SETTINGS, OrderTestBase, OrderTestMixin,
-    OWNER_EMAIL, stripe_signature, WEBHOOK_URL)
+    OWNER_EMAIL, stripe_signature, WEBHOOK_URL,
+    assert_never_cache_response)
 from main.views import StripeWebhookView
 
 
@@ -81,6 +82,13 @@ class CheckoutCreatesOrderTest(OrderTestBase):
             self.assertEqual(params["client_reference_id"], str(order.pk))
             self.assertEqual(params["metadata"], {"order_id": str(order.pk)})
         self.assertEqual(order.stripe_session_id, "cs_after_retry")
+
+    def test_an_empty_cart_checkout_lands_on_an_explanation(self):
+        response = self.client.post("/checkout", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        self.assertContains(response, "Your cart is empty.")
+        self.assertFalse(Order.objects.exists())
 
     def test_a_logged_in_buyers_order_is_attached_to_them(self):
         user = User.objects.create_user(
@@ -296,6 +304,22 @@ class CheckoutSuccessPageTest(OrderTestBase):
         self.assertContains(response, f"Order #{order.pk}")
         self.assertContains(response, "Learning Spark")
         self.assertContains(response, "Paid")
+
+    def test_the_success_page_is_marked_uncacheable(self):
+        order = self.place_order()
+        self.deliver(self.event_body(order))
+
+        response = self.client.get(
+            f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        assert_never_cache_response(self, response)
+
+    def test_the_cancel_page_is_marked_uncacheable(self):
+        response = self.client.get("/checkout/cancel")
+
+        self.assertEqual(response.status_code, 200)
+        assert_never_cache_response(self, response)
 
     def test_an_unknown_session_id_just_renders_the_plain_page(self):
         response = self.client.get("/checkout/success?session_id=cs_nope")
