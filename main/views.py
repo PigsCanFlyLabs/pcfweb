@@ -307,7 +307,7 @@ class ProductsView(View):
             return render(request, 'products.html', context={
                 'title': 'Products',
                 'type': 'producs',
-                'products': Product.objects.exclude(noorder=True).order_by(F('publication_year').desc(nulls_last=True), 'pk')
+                'products': Product.objects.exclude(noorder=True).order_by(F('release_date').desc(nulls_last=True), 'pk')
             })
         else:
             cat = category or request.GET["category"]
@@ -329,7 +329,7 @@ class ProductsView(View):
             return render(request, 'products.html', context={
                 'title': f'Products - {cat_name}',
                 'type': cat_name,
-                'products': Product.objects.filter(cat=cat).exclude(noorder=True).order_by(F('publication_year').desc(nulls_last=True), 'pk'),
+                'products': Product.objects.filter(cat=cat).exclude(noorder=True).order_by(F('release_date').desc(nulls_last=True), 'pk'),
                 'extra_style': extra_style
             })
 

@@ -12,10 +12,19 @@ class Migration(migrations.Migration):
     operations = [
         migrations.AddField(
             model_name="product",
-            name="publication_year",
-            field=models.IntegerField(
+            name="release_date",
+            field=models.DateField(
                 blank=True,
-                help_text="The year this product was first published. An integer rather than a date because most rows are books where only the year is reliably known; inventing a month and day would be misleading precision. NULLable so an old pod's INSERT that omits it lands NULL safely during a rolling deploy.",
+                help_text=(
+                    "The date this product was first published/released. "
+                    "NULLable so an old pod's INSERT that omits it lands "
+                    "NULL safely during a rolling deploy. "
+                    "A January-1 date is a documented sentinel meaning "
+                    "\u201conly the year is reliably known\u201d; templates "
+                    "MUST render only the year for such rows. "
+                    "DISTINCT from date_available (when it can be bought): "
+                    "this is when it actually came out."
+                ),
                 null=True,
             ),
         ),

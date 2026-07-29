@@ -96,7 +96,7 @@
     # true statement for this title. Explicit rather than inferred from
     # the ISBN -- see Product.on_oreilly_safari.
     on_oreilly_safari: true
-    publication_year: 2015
+    release_date: 2015-02-27
 - model: main.product
   pk: 101
   fields:
@@ -142,7 +142,7 @@
     # true statement for this title. Explicit rather than inferred from
     # the ISBN -- see Product.on_oreilly_safari.
     on_oreilly_safari: true
-    publication_year: 2017
+    release_date: 2017-06-16
 - model: main.product
   pk: 102
   fields:
@@ -181,7 +181,7 @@
     # true statement for this title. Explicit rather than inferred from
     # the ISBN -- see Product.on_oreilly_safari.
     on_oreilly_safari: true
-    publication_year: 2020
+    release_date: 2020-10-13
 - model: main.product
   pk: 103
   fields:
@@ -236,7 +236,7 @@
 # `print_isbn or ebook_isbn or upc`, so duplicating one identifier onto a
 # sibling row would give two SKUs the same GTIN in the Google Merchant feed --
 # which the catalogue-wide uniqueness test correctly rejects.
-    publication_year: 2022
+    release_date: 2022-11-29
 - model: main.product
   pk: 104
   fields:
@@ -263,6 +263,7 @@
     # <g:gtin> in the Merchant feed and its "signed on request" note.
     print_isbn: "9781960595997"
     image_name: "book_covers/distributed_computing_4_kids.jpg"
+    release_date: 2026-01-01
     cat: "B"
     # get_brand() defaults the Books category to O'Reilly, which is right for
     # the four titles above and wrong for this one.
@@ -313,6 +314,7 @@
     # ebook_isbn stays unset rather than borrowing pk 106's.
     print_isbn: "9781960595003"
     image_name: "book_covers/distributed_computing_4_kids.jpg"
+    release_date: 2026-01-01
     cat: "B"
     brand: "Pigs Can Fly Labs"
     tax_code: "txcd_35010000"
@@ -356,6 +358,7 @@
     # it here once the Kindle listing exists, and do not invent one before
     # then or this row could point at somebody else's book.
     image_name: "book_covers/distributed_computing_4_kids.jpg"
+    release_date: 2026-01-01
     cat: "B"
     brand: "Pigs Can Fly Labs"
     # Digital Books - downloaded - non-subscription - with permanent rights.
@@ -429,7 +432,7 @@
 # High Performance Spark, 2nd edition -- a new product, not an edit to pk 101.
 # Every identifier below was verified against a live retrieved page; the two
 # that could not be are left unset with the reason recorded on the key.
-    publication_year: 2013
+    release_date: 2013-10-23
 - model: main.product
   pk: 108
   fields:
@@ -498,4 +501,4 @@
     # /library/view/high-performance-spark/9781098145842/ -- so the Safari
     # trial link is a true statement for this title.
     on_oreilly_safari: true
-    publication_year: 2025
+    release_date: 2026-06-05

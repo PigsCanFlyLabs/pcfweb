@@ -58,8 +58,8 @@
 				  <br><small class="pwyw-label">Pay what you want &mdash; suggested amount, or nothing at all</small>
 				  {% endif %}
 				</span>
-				{% if product.publication_year %}
-				<span class="pub-year">{{ product.publication_year }}</span>
+				{% if product.release_date %}
+				<span class="pub-year">{{ product.release_date.year }}</span>
 				{% endif %}
                             </div>
                         </div>
