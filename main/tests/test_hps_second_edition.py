@@ -13,6 +13,7 @@ verified are asserted to be *blank*, deliberately: a test that pinned a
 guessed EPUB ISBN would make the guess permanent.
 """
 
+import re
 from io import StringIO
 from unittest import mock
 
@@ -288,29 +289,38 @@ class SecondEditionSeedsOnACleanDeployTest(TestCase):
         self.assertIn(Product.AMAZON_EBOOK_LABEL, body)
 
 
+@override_settings(THUMBNAIL_DEBUG=False)
 class ProductsPageReleaseDateOrderingTest(TestCase):
-    """The products page sorts by release_date DESC, NULLS LAST, pk tiebreak.
+    """The /products and /products/<category> pages sort by release_date DESC,
+    NULLS LAST, with pk as the tiebreaker.
 
-    This is the test the owner asked for: High Performance Spark 2nd edition
-    (pk 108, released 2026-06-05) must outrank the 1st edition (pk 101, released
-    2017) on the rendered /products page. NULL release_date rows sink rather than float -- NULLS LAST.
+    This exercises the REAL VIEW via ``self.client.get`` and derives the order
+    from product-card links parsed out of the rendered HTML.  It does not
+    construct a queryset, import the view's ordering expression, or inspect
+    ``order_by`` — it tests what the browser sees.
     """
 
     fixtures = ["initial_products"]
 
     @staticmethod
-    def _ordered_product_pks():
-        """Return product pks from the view's ACTUAL queryset order."""
-        from main.models import Product
-        from django.db.models import F
-        qs = (Product.objects
-              .exclude(noorder=True)
-              .order_by(F('release_date').desc(nulls_last=True), 'pk'))
-        return list(qs.values_list('pk', flat=True))
+    def _product_pks_from_html(html: str) -> list[int]:
+        """Extract product PKs from ``/product/<pk>`` links in render order."""
+        pks: list[int] = []
+        seen: set[int] = set()
+        for m in re.finditer(r'/product/(\d+)', html):
+            pk = int(m.group(1))
+            if pk not in seen:
+                seen.add(pk)
+                pks.append(pk)
+        return pks
 
-    def test_hps_2nd_edition_outranks_1st_edition(self):
-        """pk 108 (2026-06-05) before pk 101 (2017-06-16) in the rendered page."""
-        pks = self._ordered_product_pks()
+    # -- main /products page --------------------------------------------------
+
+    def test_hps_2nd_edition_outranks_1st_edition_in_the_rendered_page(self):
+        """pk 108 (2026-06-05) appears before pk 101 (2017-06-16)
+        in the rendered /products page."""
+        response = self.client.get("/products")
+        pks = self._product_pks_from_html(response.content.decode())
 
         self.assertIn(108, pks, "HPS 2nd edition missing from products page")
         self.assertIn(101, pks, "HPS 1st edition missing from products page")
@@ -320,50 +330,59 @@ class ProductsPageReleaseDateOrderingTest(TestCase):
 
         self.assertLess(
             idx_108, idx_101,
-            f"HPS 2nd edition (pk 108, 2026-06-05) must appear before "
-            f"HPS 1st edition (pk 101, 2017-06-16). Got order: {pks}"
+            f"HPS 2nd edition (pk 108) must appear before "
+            f"HPS 1st edition (pk 101). Got order: {pks}",
         )
 
     def test_products_are_ordered_newest_first(self):
-        """The overall order is release_date DESC, with pk tiebreak."""
-        pks = self._ordered_product_pks()
+        """The overall /products order matches release_date DESC, pk tiebreak."""
+        response = self.client.get("/products")
+        pks = self._product_pks_from_html(response.content.decode())
 
-        # All eight non-noorder products now have release_date:
-        # 108 (2026-06-05), then 104, 105, 106 (2026-01-01, pk tiebreak),
+        # 108 (2026-06-05), then 104/105/106 (2026-01-01, pk tiebreak),
         # 103 (2022-11-29), 102 (2020-10-13), 101 (2017-06-16), 100 (2015-02-27)
         expected = [108, 104, 105, 106, 103, 102, 101, 100]
         self.assertEqual(
             pks, expected,
-            f"Expected products in newest-first order "
-            f"{expected}, got {pks}"
+            f"Expected newest-first order {expected}, got {pks}",
         )
 
     def test_null_release_date_sinks_to_bottom(self):
         """NULL release_date rows appear last (NULLS LAST)."""
-        from main.models import Product
-
-        # All fixture products have release_date, so temporarily NULL one
-        original_date = Product.objects.get(pk=100).release_date
+        original = Product.objects.get(pk=100).release_date
         Product.objects.filter(pk=100).update(release_date=None)
         try:
-            pks = self._ordered_product_pks()
+            response = self.client.get("/products")
+            pks = self._product_pks_from_html(response.content.decode())
 
-            self.assertIn(100, pks,
-                          "Product 100 missing from queryset")
-
-            # NULL sorts last: pk 100 should be the final element
-            expected_last_idx = len(pks) - 1
+            self.assertIn(100, pks, "Product 100 missing from rendered page")
             self.assertEqual(
-                pks.index(100), expected_last_idx,
-                f"Null-date product must be last. Got order: {pks}"
+                pks[-1], 100,
+                f"Null-date product must be last. Got order: {pks}",
             )
         finally:
-            Product.objects.filter(pk=100).update(release_date=original_date)
+            Product.objects.filter(pk=100).update(release_date=original)
 
-    def test_no_products_are_missing(self):
-        """All non-noorder products are present."""
-        pks = self._ordered_product_pks()
+    def test_no_products_are_missing_from_products_page(self):
+        """All non-noorder products are present in the rendered /products page."""
+        response = self.client.get("/products")
+        pks = self._product_pks_from_html(response.content.decode())
 
         # pk 107 is noorder=True, so it is excluded from /products
         expected = {100, 101, 102, 103, 104, 105, 106, 108}
         self.assertEqual(set(pks), expected)
+
+    # -- category page /products/B -------------------------------------------
+
+    def test_category_page_books_sorted_newest_first(self):
+        """The /products/B category page also sorts by release_date DESC."""
+        response = self.client.get("/products/B")
+        pks = self._product_pks_from_html(response.content.decode())
+
+        # Same expected order as the main /products page — all non-noorder
+        # products are currently in the Books category.
+        expected = [108, 104, 105, 106, 103, 102, 101, 100]
+        self.assertEqual(
+            pks, expected,
+            f"Expected books in newest-first order {expected}, got {pks}",
+        )
