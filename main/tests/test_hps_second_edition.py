@@ -286,3 +286,88 @@ class SecondEditionSeedsOnACleanDeployTest(TestCase):
         body = response.content.decode()
         self.assertIn(f"https://www.amazon.com/dp/{SECOND_EDITION_ASIN}", body)
         self.assertIn(Product.AMAZON_EBOOK_LABEL, body)
+
+
+class ProductsPagePublicationYearOrderingTest(TestCase):
+    """The products page sorts by publication year, newest first, NULLS LAST.
+
+    This is the test the owner asked for: High Performance Spark 2nd edition
+    (pk 108, published 2025) must outrank the 1st edition (pk 101, published
+    2017) on the rendered /products page. Products with no publication year
+    (DC4K, pks 104-106) must sink rather than float -- NULLS LAST.
+    """
+
+    fixtures = ["initial_products"]
+
+    def _product_pks_from_products_page(self):
+        """Parse /products HTML and return product pks in DOM order."""
+        import re
+        response = self.client.get("/products")
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+        # Each product card links to /product/<pk>
+        pks = [int(m) for m in re.findall(r'/product/(\d+)', html)]
+        # Deduplicate while preserving order (each card has multiple links)
+        seen = set()
+        ordered = []
+        for pk in pks:
+            if pk not in seen:
+                seen.add(pk)
+                ordered.append(pk)
+        return ordered
+
+    def test_hps_2nd_edition_outranks_1st_edition(self):
+        """pk 108 (2025) before pk 101 (2017) in the rendered page."""
+        pks = self._product_pks_from_products_page()
+
+        self.assertIn(108, pks, "HPS 2nd edition missing from products page")
+        self.assertIn(101, pks, "HPS 1st edition missing from products page")
+
+        idx_108 = pks.index(108)
+        idx_101 = pks.index(101)
+
+        self.assertLess(
+            idx_108, idx_101,
+            f"HPS 2nd edition (pk 108, 2025) must appear before "
+            f"HPS 1st edition (pk 101, 2017). Got order: {pks}"
+        )
+
+    def test_products_are_ordered_newest_first(self):
+        """The overall order is publication_year DESC, with pk tiebreak."""
+        pks = self._product_pks_from_products_page()
+
+        # Products that HAVE dates should be ordered newest-first:
+        # 108 (2025), 103 (2022), 102 (2020), 101 (2017), 100 (2015), 107 (2013)
+        dated_pks = [p for p in pks if p in (100, 101, 102, 103, 108)]
+        expected_dated = [108, 103, 102, 101, 100]
+        self.assertEqual(
+            dated_pks, expected_dated,
+            f"Expected dated products in newest-first order "
+            f"{expected_dated}, got {dated_pks}"
+        )
+
+    def test_undated_products_sink_to_the_bottom(self):
+        """NULL publication_year rows appear last (NULLS LAST)."""
+        pks = self._product_pks_from_products_page()
+
+        # DC4K pks 104, 105, 106 have no publication year
+        undated = {104, 105, 106}
+        dated = {100, 101, 102, 103, 107, 108}
+
+        # Every dated product must appear before every undated one
+        last_dated_idx = max(pks.index(p) for p in dated if p in pks)
+        for undated_pk in undated:
+            self.assertIn(undated_pk, pks)
+            self.assertGreater(
+                pks.index(undated_pk), last_dated_idx,
+                f"Undated product pk={undated_pk} must appear after all "
+                f"dated products. Got order: {pks}"
+            )
+
+    def test_no_products_are_missing(self):
+        """All non-noorder products are present."""
+        pks = self._product_pks_from_products_page()
+
+        # pk 107 is noorder=True, so it is excluded from /products
+        expected = {100, 101, 102, 103, 104, 105, 106, 108}
+        self.assertEqual(set(pks), expected)
