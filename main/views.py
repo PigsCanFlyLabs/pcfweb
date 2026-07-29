@@ -1318,6 +1318,18 @@ class StripeWebhookView(View):
                     and order.digital_items()):
                 order.deliver_digital_goods()
 
+            order.refresh_from_db()
+            if order.receipt_sent_at is None and order.customer_email:
+                # Best-effort: the receipt is a courtesy and must never
+                # block delivery or the owner notification. Caught rather
+                # than propagated, and the failure is recorded on the row.
+                try:
+                    order.send_receipt()
+                except Exception:
+                    logger.exception(
+                        "Order #%s: receipt send raised unexpectedly.",
+                        order.pk)
+
             # Kept last so the owner's message reports the final reconciliation
             # and digital-delivery outcome.
             order.refresh_from_db()
