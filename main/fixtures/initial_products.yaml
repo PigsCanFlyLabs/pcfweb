@@ -96,6 +96,7 @@
     # true statement for this title. Explicit rather than inferred from
     # the ISBN -- see Product.on_oreilly_safari.
     on_oreilly_safari: true
+    publication_year: 2015
 - model: main.product
   pk: 101
   fields:
@@ -141,6 +142,7 @@
     # true statement for this title. Explicit rather than inferred from
     # the ISBN -- see Product.on_oreilly_safari.
     on_oreilly_safari: true
+    publication_year: 2017
 - model: main.product
   pk: 102
   fields:
@@ -179,6 +181,7 @@
     # true statement for this title. Explicit rather than inferred from
     # the ISBN -- see Product.on_oreilly_safari.
     on_oreilly_safari: true
+    publication_year: 2020
 - model: main.product
   pk: 103
   fields:
@@ -233,6 +236,7 @@
 # `print_isbn or ebook_isbn or upc`, so duplicating one identifier onto a
 # sibling row would give two SKUs the same GTIN in the Google Merchant feed --
 # which the catalogue-wide uniqueness test correctly rejects.
+    publication_year: 2022
 - model: main.product
   pk: 104
   fields:
@@ -425,6 +429,7 @@
 # High Performance Spark, 2nd edition -- a new product, not an edit to pk 101.
 # Every identifier below was verified against a live retrieved page; the two
 # that could not be are left unset with the reason recorded on the key.
+    publication_year: 2013
 - model: main.product
   pk: 108
   fields:
@@ -493,3 +498,4 @@
     # /library/view/high-performance-spark/9781098145842/ -- so the Safari
     # trial link is a true statement for this title.
     on_oreilly_safari: true
+    publication_year: 2025

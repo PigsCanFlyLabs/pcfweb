@@ -17,7 +17,7 @@ from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.http import (
     FileResponse, Http404, HttpResponse, HttpResponseBadRequest,
     JsonResponse)
@@ -307,7 +307,7 @@ class ProductsView(View):
             return render(request, 'products.html', context={
                 'title': 'Products',
                 'type': 'producs',
-                'products': Product.objects.exclude(noorder=True)
+                'products': Product.objects.exclude(noorder=True).order_by(F('publication_year').desc(nulls_last=True), 'pk')
             })
         else:
             cat = category or request.GET["category"]
@@ -329,7 +329,7 @@ class ProductsView(View):
             return render(request, 'products.html', context={
                 'title': f'Products - {cat_name}',
                 'type': cat_name,
-                'products': Product.objects.filter(cat=cat).exclude(noorder=True),
+                'products': Product.objects.filter(cat=cat).exclude(noorder=True).order_by(F('publication_year').desc(nulls_last=True), 'pk'),
                 'extra_style': extra_style
             })
 

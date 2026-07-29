@@ -54,6 +54,9 @@
 	    <div class="col-lg-4">
 		<div class="right-content">
 		    <h4>{{ product.name }}{% if not product.noorder %} {{ product.stock_description }}{% endif %}</h4>
+		    {% if product.publication_year %}
+		    <p class="pub-year">Published {{ product.publication_year }}</p>
+		    {% endif %}
 		    {% comment %}
 		       A noorder product is not sold through this site at all, so
 		       its price is meaningless -- and for a title listed only for

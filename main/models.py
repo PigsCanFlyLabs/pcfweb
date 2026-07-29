@@ -125,6 +125,17 @@ class Product(models.Model):
         ),
     )
     date_available = models.DateField(null=True, blank=True)
+    publication_year = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "The year this product was first published. An integer rather "
+            "than a date because most rows are books where only the year is "
+            "reliably known; inventing a month and day would be misleading "
+            "precision. NULLable so an old pod's INSERT that omits it lands "
+            "NULL safely during a rolling deploy."
+        ),
+    )
     brand = models.CharField(null=True, blank=True, max_length=200)
     sizes = models.CharField(null=True, blank=True, max_length=200)
 
