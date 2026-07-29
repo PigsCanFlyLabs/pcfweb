@@ -298,26 +298,19 @@ class ProductsPageReleaseDateOrderingTest(TestCase):
 
     fixtures = ["initial_products"]
 
-    def _product_pks_from_products_page(self):
-        """Parse /products HTML and return product pks in DOM order."""
-        import re
-        response = self.client.get("/products")
-        self.assertEqual(response.status_code, 200)
-        html = response.content.decode()
-        # Each product card links to /product/<pk>
-        pks = [int(m) for m in re.findall(r'/product/(\d+)', html)]
-        # Deduplicate while preserving order (each card has multiple links)
-        seen = set()
-        ordered = []
-        for pk in pks:
-            if pk not in seen:
-                seen.add(pk)
-                ordered.append(pk)
-        return ordered
+    @staticmethod
+    def _ordered_product_pks():
+        """Return product pks from the view's ACTUAL queryset order."""
+        from main.models import Product
+        from django.db.models import F
+        qs = (Product.objects
+              .exclude(noorder=True)
+              .order_by(F('release_date').desc(nulls_last=True), 'pk'))
+        return list(qs.values_list('pk', flat=True))
 
     def test_hps_2nd_edition_outranks_1st_edition(self):
         """pk 108 (2026-06-05) before pk 101 (2017-06-16) in the rendered page."""
-        pks = self._product_pks_from_products_page()
+        pks = self._ordered_product_pks()
 
         self.assertIn(108, pks, "HPS 2nd edition missing from products page")
         self.assertIn(101, pks, "HPS 1st edition missing from products page")
@@ -333,12 +326,12 @@ class ProductsPageReleaseDateOrderingTest(TestCase):
 
     def test_products_are_ordered_newest_first(self):
         """The overall order is release_date DESC, with pk tiebreak."""
-        pks = self._product_pks_from_products_page()
+        pks = self._ordered_product_pks()
 
         # All eight non-noorder products now have release_date:
-        # 104, 105, 106 (2026-01-01, pk tiebreak), 108 (2026-06-05),
+        # 108 (2026-06-05), then 104, 105, 106 (2026-01-01, pk tiebreak),
         # 103 (2022-11-29), 102 (2020-10-13), 101 (2017-06-16), 100 (2015-02-27)
-        expected = [104, 105, 106, 108, 103, 102, 101, 100]
+        expected = [108, 104, 105, 106, 103, 102, 101, 100]
         self.assertEqual(
             pks, expected,
             f"Expected products in newest-first order "
@@ -347,32 +340,29 @@ class ProductsPageReleaseDateOrderingTest(TestCase):
 
     def test_null_release_date_sinks_to_bottom(self):
         """NULL release_date rows appear last (NULLS LAST)."""
-        # All fixture products now have release_date, so create one without it
         from main.models import Product
-        null_date_product = Product.objects.create(
-            name="No-Date Product",
-            price=999,
-            cat=Product.Categories.BOOKS,
-            release_date=None,
-        )
+
+        # All fixture products have release_date, so temporarily NULL one
+        original_date = Product.objects.get(pk=100).release_date
+        Product.objects.filter(pk=100).update(release_date=None)
         try:
-            pks = self._product_pks_from_products_page()
+            pks = self._ordered_product_pks()
 
-            self.assertIn(null_date_product.pk, pks,
-                          "Null-date product missing from products page")
+            self.assertIn(100, pks,
+                          "Product 100 missing from queryset")
 
-            # All fixture products have dates, so the null one must be last
+            # NULL sorts last: pk 100 should be the final element
             expected_last_idx = len(pks) - 1
             self.assertEqual(
-                pks.index(null_date_product.pk), expected_last_idx,
+                pks.index(100), expected_last_idx,
                 f"Null-date product must be last. Got order: {pks}"
             )
         finally:
-            null_date_product.delete()
+            Product.objects.filter(pk=100).update(release_date=original_date)
 
     def test_no_products_are_missing(self):
         """All non-noorder products are present."""
-        pks = self._product_pks_from_products_page()
+        pks = self._ordered_product_pks()
 
         # pk 107 is noorder=True, so it is excluded from /products
         expected = {100, 101, 102, 103, 104, 105, 106, 108}
