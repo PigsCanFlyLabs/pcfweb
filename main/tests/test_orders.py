@@ -374,7 +374,11 @@ class CheckoutSuccessReconciliationTest(OrderTestBase):
         self.assertEqual(order.status, Order.Status.PAID)
         self.assertIsNotNone(order.paid_at)
         self.assertIsNotNone(order.notified_at)
+        self.assertIsNotNone(order.receipt_sent_at)
         self.assertEqual(len(self.order_emails()), 1)
+        receipt_emails = [m for m in mail.outbox
+                          if "Your receipt" in m.subject]
+        self.assertEqual(len(receipt_emails), 1)
 
     def test_stripe_reports_unpaid_order_stays_pending(self):
         """A session Stripe says is unpaid must not be treated as paid."""
@@ -409,7 +413,12 @@ class CheckoutSuccessReconciliationTest(OrderTestBase):
         self.assertEqual(order.status, Order.Status.PAID)
         self.assertIsNotNone(order.notified_at)
         self.assertIsNotNone(order.digital_delivery_sent_at)
+        self.assertIsNotNone(order.receipt_sent_at,
+                            "$0 order must also get a receipt")
         self.assertEqual(len(self.order_emails()), 1)
+        receipt_emails = [m for m in mail.outbox
+                          if "Your receipt" in m.subject]
+        self.assertEqual(len(receipt_emails), 1)
 
     def test_already_paid_order_does_not_call_stripe(self):
         """DoS protection: the Stripe call is skipped when already PAID."""
@@ -567,6 +576,74 @@ class OrderModelTest(OrderTestBase):
 
 
 
+class CheckoutSuccessReceiptTest(OrderTestBase):
+    """Receipt idempotency and failure isolation on the reconciliation path.
+
+    PR #73 added Order.send_receipt() to fulfil_order, which the
+    success-page reconciliation now calls. These tests assert that
+    the receipt obeys the same idempotency guarantees as every other
+    fulfilment action, and that a receipt failure does not cascade.
+    """
+
+    def _mock_stripe_session(self, order, **overrides):
+        """Return a patch object for stripe.checkout.Session.retrieve."""
+        session = self.session_payload(order, **overrides)
+        return mock.patch(
+            "stripe.checkout.Session.retrieve",
+            return_value=session)
+
+    def test_receipt_is_not_resent_when_already_sent(self):
+        """The receipt marker is honoured on the reconciliation path."""
+        order = self.place_order(product_pk=100, quantity=1)
+        self.deliver(self.event_body(order))
+        order.refresh_from_db()
+        self.assertIsNotNone(order.receipt_sent_at)
+        receipt_count_before = len(
+            [m for m in mail.outbox if "Your receipt" in m.subject])
+        self.assertEqual(receipt_count_before, 1)
+
+        # Load the success page -- order is already PAID, so no Stripe call.
+        with mock.patch(
+                "stripe.checkout.Session.retrieve") as retrieve:
+            response = self.client.get(
+                f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        retrieve.assert_not_called()
+        receipt_count_after = len(
+            [m for m in mail.outbox if "Your receipt" in m.subject])
+        self.assertEqual(receipt_count_after, 1)
+
+    def test_receipt_failure_does_not_block_fulfilment(self):
+        """A receipt send failure must not stop the order from being PAID
+        or prevent the owner notification."""
+        order = self.place_order(product_pk=100, quantity=1)
+
+        with self._mock_stripe_session(order):
+            with mock.patch.object(
+                    Order, "send_receipt",
+                    side_effect=RuntimeError("SMTP is down")):
+                with self.assertLogs("main.views", level="ERROR"):
+                    response = self.client.get(
+                        f"/checkout/success"
+                        f"?session_id={order.stripe_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PAID,
+                         "order must be PAID even when receipt send fails")
+        self.assertIsNotNone(order.notified_at,
+                            "owner must be notified even when receipt fails")
+        self.assertIsNone(order.receipt_sent_at,
+                          "receipt marker must stay null on failure")
+        # The receipt error is recorded by send_receipt itself on failure,
+        # but if the mock raises BEFORE that code runs, receipt_error
+        # stays at the default. Both are acceptable outcomes for a
+        # failure in the wild; the important thing is the marker was not set.
+        self.assertEqual(len(self.order_emails()), 1,
+                         "owner notification must still go out")
+
+
 @override_settings(**ORDER_TEST_SETTINGS)
 class CheckoutSuccessConcurrencyTest(OrderTestMixin, TransactionTestCase):
     """A webhook delivery and a success-page reconciliation that overlap.
@@ -661,5 +738,11 @@ class CheckoutSuccessConcurrencyTest(OrderTestMixin, TransactionTestCase):
         self.assertEqual(len(self.order_emails()), 1)
         # Exactly one download email.
         self.assertEqual(len(self.customer_emails()), 1)
+        # Exactly one buyer receipt.
+        receipt_emails = [m for m in mail.outbox
+                          if "Your receipt" in m.subject]
+        self.assertEqual(len(receipt_emails), 1,
+                         "concurrent webhook + success page must send "
+                         "exactly one buyer receipt")
         # The claim is handed back.
         self.assertIsNone(order.fulfilment_claimed_at)
