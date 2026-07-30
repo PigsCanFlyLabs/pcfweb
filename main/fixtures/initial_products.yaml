@@ -263,7 +263,7 @@
     # <g:gtin> in the Merchant feed and its "signed on request" note.
     print_isbn: "9781960595997"
     image_name: "book_covers/distributed_computing_4_kids.jpg"
-    release_date: 2026-01-01
+    release_date: 2026-06-28
     cat: "B"
     # get_brand() defaults the Books category to O'Reilly, which is right for
     # the four titles above and wrong for this one.
@@ -314,7 +314,7 @@
     # ebook_isbn stays unset rather than borrowing pk 106's.
     print_isbn: "9781960595003"
     image_name: "book_covers/distributed_computing_4_kids.jpg"
-    release_date: 2026-01-01
+    release_date: 2026-06-28
     cat: "B"
     brand: "Pigs Can Fly Labs"
     tax_code: "txcd_35010000"
@@ -358,7 +358,7 @@
     # it here once the Kindle listing exists, and do not invent one before
     # then or this row could point at somebody else's book.
     image_name: "book_covers/distributed_computing_4_kids.jpg"
-    release_date: 2026-01-01
+    release_date: 2026-06-28
     cat: "B"
     brand: "Pigs Can Fly Labs"
     # Digital Books - downloaded - non-subscription - with permanent rights.
