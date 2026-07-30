@@ -18,6 +18,7 @@ from main.digital import (
     DigitalAssetError, download_url, link_lifetime_days, open_asset,
     site_base_url)
 from main.payments import Payments
+from main.socials import social_links
 from main.utils import admin_recipients, normalize_email, smtp_connection
 from typing import Any, Dict, List, Optional, Tuple, cast
 
@@ -1844,7 +1845,37 @@ class Order(models.Model):
             f"write to {settings.DEFAULT_FROM_EMAIL} and include your "
             "order number.",
         ]
+        lines += self.stay_in_touch_lines()
         return "\n".join(lines)
+
+    def stay_in_touch_lines(self) -> List[str]:
+        """The mailing list, the Discord and the socials, as plain text.
+
+        The receipt is the second half of the checkout success page: the buyer
+        who closed the tab before reading it still gets this. Absolute URLs
+        throughout -- a receipt is built inside a Stripe webhook, where there
+        is no request whose host could be borrowed.
+
+        No tracking parameters and nothing pre-subscribed. The list here is a
+        link to the same double opt-in signup as everywhere else: having
+        bought something is not consent to be mailed about the next thing.
+        """
+        lines = [
+            "",
+            "Stay in touch",
+            "-------------",
+            "New books, new editions and the occasional discount: "
+            f"{absolute_site_url(reverse('subscribe'))}",
+            f"Chat with us on Discord: {absolute_site_url(reverse('discord'))}",
+        ]
+        lines += [f"{link.label}: {link.url}" for link in social_links()]
+        lines += [
+            "",
+            "And if you have a minute: what made you buy this? Reply to this "
+            "mail and tell us. It is the only way we find out, and it is what "
+            "decides what gets written next.",
+        ]
+        return lines
 
     def send_receipt(self) -> bool:
         if not self.customer_email:
@@ -1930,6 +1961,108 @@ class OrderItem(models.Model):
 
     def __repr__(self) -> str:
         return f'<OrderItem: {self.quantity} x {self.product_name}>'
+
+
+class PurchaseFeedback(models.Model):
+    """Why somebody bought, in their own words.
+
+    Asked once, on the checkout success page, beside the mailing list signup
+    and the socials. Nothing about fulfilment reads this: it is a note from
+    the buyer, so the row *is* the record and the mail to the owner is
+    best-effort on top of it.
+
+    Hung off the Order rather than off a person, because most buyers have no
+    account here -- the order number is the one name both sides of the
+    conversation can use. CASCADE for the same reason: with the order gone
+    there is no longer a "this" that the answer is about.
+    """
+
+    order = models.ForeignKey(
+        Order, on_delete=models.CASCADE, related_name='feedback')
+    reason = models.TextField()
+    # "You can quote me on that." Off unless they ticked it, and it records
+    # permission rather than a preference: a note sent to us privately is not
+    # a testimonial, and nothing in the codebase may treat one as public
+    # without this being True.
+    may_quote = models.BooleanField(default=False)
+    # What to call them if they said we may quote them. Their own answer, not
+    # the name Stripe put on the order: a buyer willing to be quoted is not
+    # thereby willing to be quoted under their full legal name.
+    quote_name = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    # Longest answer kept. Enforced on the form, so an over-long submission is
+    # cut before it is written rather than rejected -- somebody who typed two
+    # pages should not lose them to a validation error. Generous, because a
+    # paragraph or two is exactly the thing worth reading; the ceiling only
+    # exists so an open endpoint cannot be used to write a megabyte per POST.
+    MAX_REASON_LENGTH = 2000
+
+    # Notes one order may carry. A second thought later is welcome; this is
+    # the ceiling that stops one session id being a way to fill the table.
+    MAX_PER_ORDER = 5
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'Feedback on order #{self.order_id}'
+
+    def __repr__(self) -> str:
+        return f'<PurchaseFeedback: order #{self.order_id}>'
+
+    @classmethod
+    def has_room(cls, order: Order) -> bool:
+        """Whether this order is allowed another note."""
+        return cls.objects.filter(order=order).count() < cls.MAX_PER_ORDER
+
+    def quote_permission(self) -> str:
+        """The "may we quote you" answer, spelled out.
+
+        Read by the owner deciding whether a sentence can go on the site, so
+        it says what was actually granted rather than True/False: permission
+        to be quoted without a name is a different permission from both of
+        the other two answers.
+        """
+        if not self.may_quote:
+            return "no"
+        if self.quote_name:
+            return f"yes, as {self.quote_name}"
+        return "yes, but they did not say what to call them"
+
+    def notify_owner(self) -> bool:
+        """Mail the note to whoever gets order notifications.
+
+        Never raises. This runs inside a page the buyer is looking at, and the
+        row is already saved: a send failure costs a notification, not the
+        answer, and the admin lists these anyway.
+        """
+        recipients = admin_recipients()
+        if not recipients:
+            logger.warning(
+                "Order #%s: nobody to send purchase feedback to. Set the "
+                "ORDER_NOTIFICATION_EMAIL env var.", self.order_id)
+            return False
+        body = "\n".join([
+            f"Order #{self.order_id}",
+            f"May we quote it: {self.quote_permission()}",
+            "",
+            self.reason,
+        ])
+        try:
+            send_mail(
+                f"[pigscanfly] Why they bought — order #{self.order_id}",
+                body,
+                settings.DEFAULT_FROM_EMAIL,
+                recipients,
+                fail_silently=False,
+            )
+        except Exception:
+            logger.exception(
+                "Order #%s: failed to mail the purchase feedback on. It is "
+                "still in the admin.", self.order_id)
+            return False
+        return True
 
 
 # The list every signup that does not name one lands on, and the list for

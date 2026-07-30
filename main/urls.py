@@ -45,6 +45,12 @@ urlpatterns = [
          name='checkout-success'),
     path('checkout/cancel', views.CheckoutCancelView.as_view(),
          name='checkout-cancel'),
+    # "What made you buy this?", posted from the success page. Unlike the
+    # mailing list signup this one is CSRF-protected: it is only ever
+    # rendered on a page of ours, and the order it writes to is named by the
+    # Stripe session id rather than by anything guessable.
+    path('checkout/feedback', views.PurchaseFeedbackView.as_view(),
+         name='purchase-feedback'),
     # Stripe's callback. POST only and CSRF exempt; the signature on the body
     # is the only authentication. Register this URL in the Stripe Dashboard.
     path('stripe/webhook', views.StripeWebhookView.as_view(),

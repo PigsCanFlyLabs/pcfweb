@@ -11,7 +11,11 @@
 		{# works pasted onto another site. See MailingListSubscribeView. #}
 		<form method="post" action="{% if signup_action %}{{ signup_action }}{% else %}{% url 'mailing-list-subscribe' %}{% endif %}">
 		  <label for="id_email_field">E-mail:</label>
-		  <input type="email" name="email" required id="id_email_field" autocomplete="email">
+		  {# signup_email pre-fills the box where the address is already known #}
+		  {# -- the checkout success page knows where the receipt went. It is #}
+		  {# a value in a field on a form they still have to submit: nothing  #}
+		  {# is subscribed until they press the button.                       #}
+		  <input type="email" name="email" required id="id_email_field" autocomplete="email" value="{{ signup_email|default:'' }}">
 		  {% if forced_interest %}
 		  <input type="hidden" name="interest" value="{{ forced_interest }}">
 		  {% elif areas|length > 1 %}

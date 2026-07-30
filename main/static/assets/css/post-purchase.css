@@ -1,0 +1,83 @@
+/**** ./main/static/assets/css/post-purchase.css ***/
+/* The "while you are here" block under a finished order: the socials, the
+   feedback form, and the mailing list signup that follows them. */
+.post-purchase {
+    margin-top: 40px;
+}
+
+/* The theme's header is absolutely positioned over the top 100px of the
+   page, and every page that looks right clears it with the 250px
+   .page-heading banner. The checkout pages start straight into a container
+   instead, which is why "Checkout Successful!" was behind the nav. These
+   need the clearance, not the banner. */
+.checkout-outcome {
+    padding-top: 120px;
+}
+
+.follow-us h4,
+.purchase-feedback h4 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+
+/* Stacked on a phone, so the question needs air above it; side by side from
+   Bootstrap's lg breakpoint up, where the two are separate columns and the
+   gap would only misalign their headings. */
+.purchase-feedback {
+    margin-top: 24px;
+}
+
+@media (min-width: 992px) {
+    .purchase-feedback {
+        margin-top: 0;
+    }
+}
+
+.follow-us-list {
+    list-style: none;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+}
+
+.follow-us-list a {
+    color: #2a2a2a;
+    text-decoration: none;
+}
+
+.follow-us-list a:hover {
+    text-decoration: underline;
+}
+
+.follow-us-list .fa {
+    margin-right: 6px;
+}
+
+.purchase-feedback textarea,
+.purchase-feedback input[type="text"] {
+    width: 100%;
+    max-width: 480px;
+    padding: 8px 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    margin-bottom: 12px;
+    display: block;
+}
+
+.purchase-feedback label {
+    display: block;
+    margin-bottom: 6px;
+}
+
+.purchase-feedback label[for="id_may_quote"] {
+    font-weight: 400;
+}
+
+.purchase-feedback button {
+    margin-top: 6px;
+}
+
+/* .sr-only, used on the textarea's label, is Bootstrap's -- the theme
+   already loads bootstrap.min.css on every page. */

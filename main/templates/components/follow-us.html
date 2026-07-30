@@ -1,0 +1,31 @@
+{% comment %}
+The accounts worth following, plus the Discord door.
+
+The socials come from settings via main.socials.social_links(), so an
+account we do not have is simply absent rather than a dead link, and only
+https URLs get this far. Discord is a link to /discord rather than to the
+invite: the invite is a bearer token and that page is the captcha gate in
+front of it.
+{% endcomment %}
+<div class="follow-us">
+    <h4>Follow along</h4>
+    <p>Where the next book, the next edition and the occasional half-finished
+        idea show up first.</p>
+    <ul class="follow-us-list">
+        <li>
+            <a href="{% url 'discord' %}">
+                <i class="fa fa-comments" aria-hidden="true"></i> Discord
+            </a>
+        </li>
+        {% for link in social_links %}
+        <li>
+            {# rel="me noopener noreferrer": "me" is what Mastodon reads to  #}
+            {# verify a link back, the other two are the usual precautions   #}
+            {# for a target="_blank" link.                                   #}
+            <a href="{{ link.url }}" target="_blank" rel="me noopener noreferrer">
+                <i class="fa {{ link.icon }}" aria-hidden="true"></i> {{ link.label }}
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+</div>

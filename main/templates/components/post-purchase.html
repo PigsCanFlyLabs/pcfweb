@@ -1,0 +1,29 @@
+{% comment %}
+The "now what?" block under a finished order: join the list, follow us
+somewhere, tell us why you bought this.
+
+Three asks and no more, in the order of what they cost the person reading.
+Every one of them is opt-in on this page and nowhere else: the signup is the
+same double opt-in form as the rest of the site, because having bought
+something is not consent to be mailed about the next thing.
+
+Context comes from main.views.post_purchase_context, which both the success
+page and the feedback thank-you page fill in -- somebody who answered one
+ask still gets offered the other two.
+{% endcomment %}
+<section class="section post-purchase">
+    <div class="section-heading text-center">
+        <h3>While you are here</h3>
+    </div>
+    <div class="row">
+        <div class="col-lg-6">
+            {% include 'components/follow-us.html' %}
+        </div>
+        <div class="col-lg-6">
+            {% if ask_for_feedback %}
+            {% include 'components/purchase-feedback.html' %}
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% include 'components/subscribe.html' %}

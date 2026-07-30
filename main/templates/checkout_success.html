@@ -1,8 +1,18 @@
 {% extends 'base.html' %}
+{% load static %}
+
+{% block custom_css %}
+<link rel="stylesheet" href="{% static 'assets/css/post-purchase.css' %}">
+{% endblock custom_css %}
 
 {% block content %}
-<div class="container">
-    <section class="section" style="min-height: 35.6vh;">
+{# checkout-outcome clears the absolutely positioned header, which was #}
+{# sitting over the first heading on this page. See post-purchase.css.  #}
+<div class="container checkout-outcome">
+    {# No min-height here any more: it was holding an otherwise near-empty #}
+    {# page off the footer, and the block at the bottom of this template   #}
+    {# now fills that space with something useful.                         #}
+    <section class="section">
         <div class="section-heading text-center">
             <h2>Checkout Successful!</h2>
             <p>You have successfully checked out.</p>
@@ -38,5 +48,6 @@
         </div>
         {% endif %}
     </section>
+    {% include 'components/post-purchase.html' %}
 </div>
 {% endblock content %}
