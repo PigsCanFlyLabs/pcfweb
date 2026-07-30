@@ -37,12 +37,15 @@ from main.digital import (
     BadSignature, DigitalAssetError, SignatureExpired, link_lifetime_days,
     open_asset, parse_download_token)
 from main.forms import (
-    MailingListImportForm, MailingListSendForm, MailingListSignupForm)
+    MailingListImportForm, MailingListSendForm, MailingListSignupForm,
+    PurchaseFeedbackForm)
 from main.models import (
     PWYW_ROUND_DOWN_BELOW, Cart, CartProduct, EmailIdentity,
-    MailingListMessage, Order, Product, PwywAmountError, SuppressedAddress,
-    normalize_email_identity, parse_pwyw_amount, send_batch_size)
+    MailingListMessage, Order, Product, PurchaseFeedback, PwywAmountError,
+    SuppressedAddress, normalize_email_identity, parse_pwyw_amount,
+    send_batch_size)
 from main.payments import Payments
+from main.socials import social_links
 from main.utils import (
     generate_username, get_country_code, get_storable_client_ip)
 from pigscanfly.hostnames import ascii_lowercase
@@ -52,6 +55,26 @@ logger = logging.getLogger(__name__)
 
 class CartQuantityOverflow(ValueError):
     """Combining valid cart quantities would exceed the storage column."""
+
+
+def over_cache_limit(key: str, limit: int) -> bool:
+    """Count one hit against an hourly bucket and say whether it is over.
+
+    The rate-limiting primitive behind every open endpoint here (the mailing
+    list signup, the post-checkout feedback form). Deliberately crude: the
+    cache is per worker process, so the real ceiling is this times the worker
+    count. That bounds a flood without needing a shared cache the site does
+    not otherwise run.
+    """
+    try:
+        count = cache.get_or_set(key, 0, 3600)
+        # incr is atomic where the backend supports it; a missing key means
+        # it expired between the two calls, which is a reset, not an error.
+        count = cache.incr(key) if count is not None else 1
+    except ValueError:
+        cache.set(key, 1, 3600)
+        count = 1
+    return count > limit
 
 
 # /healthz is served by main.middleware.HealthCheckMiddleware rather than a
@@ -1152,10 +1175,12 @@ class CheckoutSuccessView(View, BaseCartView):
             self.get_cart(request).clear()
             if order.status == Order.Status.PENDING:
                 self._reconcile_with_stripe(order, session_id)
-        return render(request, 'checkout_success.html', context={
+        context = {
             'title': 'Success! - Checkout',
             'order': order,
-        })
+        }
+        context.update(post_purchase_context(request, order))
+        return render(request, 'checkout_success.html', context=context)
 
     def _reconcile_with_stripe(self, order: Order, session_id: str) -> None:
         """Ask Stripe for the real payment status, server-side.
@@ -1210,6 +1235,157 @@ class CheckoutSuccessView(View, BaseCartView):
 
         order.refresh_from_db()
         webhook.fulfil_order(order)
+
+
+def post_purchase_context(request, order: Optional[Order]) -> Dict[str, Any]:
+    """Everything the "now what?" block below a completed order needs.
+
+    Three asks, in the order they cost the buyer anything: join the list,
+    follow us somewhere, and tell us what made you buy this. Shared by the
+    success page and by the page the feedback form posts to, so somebody who
+    answered one of them still gets offered the other two.
+
+    Nothing here subscribes, records or infers anything about the buyer. The
+    signup is the same double opt-in form as everywhere else -- having bought
+    something is not consent to be mailed -- and the pre-filled address and
+    pre-selected list are conveniences on a form they still have to submit.
+    """
+    products = []
+    if order is not None:
+        products = [item.product for item in order.items.all()]
+    return {
+        'areas': mailing.interest_choices(request),
+        'selected_area': mailing.interest_for_products(products),
+        # Stripe's record of where the receipt went, which is the address
+        # somebody signing up here would type anyway. Only ever a value in a
+        # form field: it is not submitted, and not subscribed, unless they
+        # press the button.
+        'signup_email': order.customer_email if order is not None else '',
+        'social_links': social_links(),
+        # The feedback form needs an order to attach an answer to, and the
+        # session id is how it names one (see PurchaseFeedbackView). No order
+        # -- somebody who reached this page without one -- means no form.
+        'feedback_session_id': (
+            order.stripe_session_id or '' if order is not None else ''),
+        'ask_for_feedback': (order is not None
+                             and bool(order.stripe_session_id)
+                             and PurchaseFeedback.has_room(order)),
+    }
+
+
+@method_decorator(never_cache, name="dispatch")
+class PurchaseFeedbackView(View):
+    """Where the checkout success page's "what made you buy this?" is posted.
+
+    CSRF-protected, unlike the signup endpoint next door: this form is only
+    ever rendered by us on a page of ours, so there is always a token to
+    send, and nothing about it is meant to work pasted onto another site.
+
+    The order is named by the Stripe session id, which is what the buyer
+    holds -- Stripe substitutes it into the success URL. That is the only
+    authority this endpoint recognises: an order primary key in the markup
+    would be a number anybody could change to write a note onto somebody
+    else's purchase.
+    """
+
+    def get(self, request):
+        # Somebody following the action URL by hand. There is nothing to show
+        # here -- the form lives on the success page -- so send them home.
+        return redirect('home')
+
+    ANSWER = ("Thank you — that is the sort of thing that decides what gets "
+              "written next.")
+    EMPTY = "There was nothing in the box, so there was nothing to send."
+
+    def post(self, request):
+        form = PurchaseFeedbackForm(request.POST)
+        if not form.is_valid():
+            # The only way here is an empty answer: every other field is
+            # optional and the long ones truncate rather than reject.
+            return self.render_result(
+                request, order=self.order_for(request.POST.get("session_id")),
+                ok=False, message=self.EMPTY, status=400)
+
+        order = self.order_for(form.cleaned_data["session_id"])
+
+        if form.is_bot():
+            # Answered exactly like a real submission, minus the writing.
+            logger.info("Dropped a honeypotted purchase feedback submission.")
+            return self.render_result(request, order=order)
+
+        if self.over_rate_limit(request):
+            logger.warning(
+                "Dropping purchase feedback: over the rate limit.")
+            return self.render_result(request, order=order)
+
+        if order is None:
+            # A submission carrying a session id that matches no order: a
+            # stale page, or somebody poking the endpoint. Answered like the
+            # rest rather than saying which -- "no such order" on a URL
+            # anybody can post to is an oracle for whether a session id is
+            # one of ours.
+            logger.info(
+                "Purchase feedback arrived for a session id that matches no "
+                "order; nothing stored.")
+            return self.render_result(request, order=None)
+
+        if not PurchaseFeedback.has_room(order):
+            logger.warning(
+                "Order #%s already has %s feedback notes; dropping another.",
+                order.pk, PurchaseFeedback.MAX_PER_ORDER)
+            return self.render_result(request, order=order)
+
+        feedback = PurchaseFeedback.objects.create(
+            order=order,
+            reason=form.cleaned_data["reason"],
+            may_quote=form.cleaned_data["may_quote"],
+            quote_name=form.cleaned_data["quote_name"],
+        )
+        # Best effort, and deliberately after the row is written: the note is
+        # saved and visible in the admin whether or not the mail goes out.
+        feedback.notify_owner()
+        return self.render_result(request, order=order)
+
+    @staticmethod
+    def order_for(session_id: Optional[str]) -> Optional[Order]:
+        if not session_id:
+            return None
+        return Order.objects.filter(
+            stripe_session_id=session_id).prefetch_related('items').first()
+
+    def render_result(self, request, order: Optional[Order], ok: bool = True,
+                      message: Optional[str] = None, status: int = 200):
+        """The page that answers a submission.
+
+        Carries the mailing list and the socials as well, because this is
+        where somebody who answered the question ends up: the other two asks
+        would otherwise be lost with the page they were on.
+        """
+        context = {
+            'title': 'Thank you' if ok else 'Sorry',
+            'ok': ok,
+            'message': message or self.ANSWER,
+        }
+        context.update(post_purchase_context(request, order))
+        if ok:
+            # Answered; the form on this page would only invite a duplicate.
+            context['ask_for_feedback'] = False
+        return render(request, 'purchase_feedback_result.html',
+                      context=context, status=status)
+
+    def over_rate_limit(self, request) -> bool:
+        """Whether this source has had its hour's worth.
+
+        Keyed on the source only, unlike the mailing list's limit: there is no
+        third party to protect here -- a submission cannot cause mail to
+        anybody but the owner -- so the thing being bounded is writes to the
+        table, and the per-order ceiling covers the rest.
+        """
+        limit = getattr(settings, "PURCHASE_FEEDBACK_RATE_LIMIT", 10)
+        if not limit:
+            return False
+        source = get_storable_client_ip(request) or "unparseable-source"
+        return over_cache_limit(f"purchase-feedback:{source}", limit)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -1847,15 +2023,7 @@ class MailingListSubscribeView(View):
 
     @staticmethod
     def _over(key: str, limit: int) -> bool:
-        try:
-            count = cache.get_or_set(key, 0, 3600)
-            # incr is atomic where the backend supports it; a missing key means
-            # it expired between the two calls, which is a reset, not an error.
-            count = cache.incr(key) if count is not None else 1
-        except ValueError:
-            cache.set(key, 1, 3600)
-            count = 1
-        return count > limit
+        return over_cache_limit(key, limit)
 
 
 class MailingListSubscribeAllView(MailingListSubscribeView):
@@ -1927,6 +2095,11 @@ class AdminHomeView(View):
                           "Paid orders to pick, pack and mark fulfilled."),
                 self.link('admin:main_product_changelist', "Products",
                           "Prices, stock and the links on each product page."),
+                self.link('admin:main_purchasefeedback_changelist',
+                          "Why they bought",
+                          "What buyers typed on the checkout success page. "
+                          "Read-only; “may quote” is their permission, not a "
+                          "setting."),
             ]),
             ("Site", [
                 self.link('admin:index', "Django admin",

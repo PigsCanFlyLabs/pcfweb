@@ -18,6 +18,7 @@ touches the network.
 |---|---|---|---|---|
 | `Order.notify_owner()` | Stripe webhook marks an order paid | `DEFAULT_FROM_EMAIL` | `ADMINS` (`ORDER_NOTIFICATION_EMAIL`) | `Order.notification_error`, pod log |
 | `Order._deliver_digital_goods()` | Same webhook, orders with digital items | `DEFAULT_FROM_EMAIL` | the customer | `Order.digital_delivery_error`, pod log |
+| `PurchaseFeedback.notify_owner()` | A buyer answers "what made you buy this?" on the checkout success page | `DEFAULT_FROM_EMAIL` | `ADMINS` (`ORDER_NOTIFICATION_EMAIL`) | pod log only — the answer itself is a row in the admin, so a failed send loses only the notification |
 | `manage.py check_book_assets` | Primary pod startup | `DEFAULT_FROM_EMAIL` | `ADMINS` | pod log only |
 | Django's `AdminEmailHandler` | Any 500 while `DEBUG=False` | `SERVER_EMAIL` | `ADMINS` | pod log only |
 | Password reset (`django.contrib.auth`) | User asks on `/accounts/` | `DEFAULT_FROM_EMAIL` | the user | the request 500s |

@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block custom_css %}
+<link rel="stylesheet" href="{% static 'assets/css/post-purchase.css' %}">
+{% endblock custom_css %}
+
+{% block content %}
+<div class="container checkout-outcome">
+    <section class="section">
+        <div class="section-heading text-center">
+            <h2>{% if ok %}Thank you{% else %}Sorry{% endif %}</h2>
+            <p>{{ message }}</p>
+        </div>
+        {% comment %}
+        The other two asks come along, because this is where somebody who
+        answered the question ends up -- the page they were on is gone, and
+        with it the mailing list form and the socials.
+        {% endcomment %}
+        {% include 'components/post-purchase.html' %}
+    </section>
+</div>
+{% endblock content %}

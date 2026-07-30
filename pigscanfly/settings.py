@@ -402,6 +402,37 @@ class Base(Configuration):
     DISCORD_SUPPORT_EMAIL = os.getenv(
         "DISCORD_SUPPORT_EMAIL", "support@pigscanfly.ca")
 
+    # SOCIAL ACCOUNTS
+    # Where "follow us" points, one variable per network. Only the YouTube
+    # channel the about page already links has a default: an account nobody
+    # has told this file about is not one to guess a URL for, and an empty
+    # value renders no link at all rather than a dead one.
+    #
+    # Adding or rotating one is a ConfigMap edit (see deploy.yaml), not a
+    # rebuild. main.socials.social_links() drops anything that is not an
+    # https URL with a host in it, for the same reason /discord validates its
+    # invite halves: a half-finished edit must cost a link, not hand a
+    # visitor's browser a scheme we did not intend.
+    SOCIAL_YOUTUBE_URL = os.getenv(
+        "SOCIAL_YOUTUBE_URL", "https://www.youtube.com/user/holdenkarau")
+    SOCIAL_MASTODON_URL = os.getenv("SOCIAL_MASTODON_URL", "")
+    SOCIAL_BLUESKY_URL = os.getenv("SOCIAL_BLUESKY_URL", "")
+    SOCIAL_TWITCH_URL = os.getenv("SOCIAL_TWITCH_URL", "")
+    SOCIAL_INSTAGRAM_URL = os.getenv("SOCIAL_INSTAGRAM_URL", "")
+    SOCIAL_LINKEDIN_URL = os.getenv("SOCIAL_LINKEDIN_URL", "")
+
+    # POST-PURCHASE FEEDBACK
+    # "Why did you buy this?", asked once on the checkout success page. The
+    # answers are stored (PurchaseFeedback) and mailed to whoever gets order
+    # notifications; ORDER_NOTIFICATION_EMAIL below is the recipient, so
+    # there is nothing extra to configure.
+    #
+    # Submissions one source may make per hour. The form is reachable by
+    # anyone holding a Stripe session id, so it needs the same kind of
+    # ceiling the signup endpoint has. 0 disables the limit.
+    PURCHASE_FEEDBACK_RATE_LIMIT = parse_int(
+        os.getenv("PURCHASE_FEEDBACK_RATE_LIMIT"), 10)
+
     # MAILING LIST SETTINGS
 
     # Where confirmations and mailings come from. Falls back to

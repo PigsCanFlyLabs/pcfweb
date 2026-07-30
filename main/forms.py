@@ -1,4 +1,4 @@
-"""Forms for the mailing list."""
+"""Forms for the mailing list and for post-checkout feedback."""
 
 from typing import Optional
 
@@ -7,6 +7,7 @@ from django import forms
 from newsletter.models import Newsletter
 
 from main.mailing import parse_addresses
+from main.models import PurchaseFeedback
 from main.utils import normalize_email
 
 
@@ -63,6 +64,60 @@ class MailingListSignupForm(forms.Form):
     def is_bot(self) -> bool:
         filled = (self.cleaned_data.get("website") or "").strip().lower()
         return filled not in self.NOT_FILLED_IN
+
+
+class PurchaseFeedbackForm(forms.Form):
+    """The "what made you buy this?" box on the checkout success page.
+
+    A plain Form rather than a ModelForm: the order this belongs to is *not*
+    a field the browser gets to choose. It is resolved by the view from the
+    Stripe session id the buyer already holds, and a ModelForm would put an
+    order primary key in the markup for anybody to change.
+    """
+
+    # Which order this is about, as Stripe's session id and not as an order
+    # pk. Stripe substitutes it into the success URL, so the buyer has it and
+    # nobody else does, and it is not guessable or enumerable the way "#124"
+    # is. Not required, because a submission the view cannot place is
+    # answered like every other one rather than error-ing at the buyer.
+    session_id = forms.CharField(max_length=255, required=False)
+    reason = forms.CharField(
+        required=True,
+        widget=forms.Textarea(attrs={"rows": 4}),
+        label="What made you buy this?")
+    # "You can quote me on that", plus what to call them if so. Two fields
+    # because permission and attribution are different answers: somebody may
+    # be happy to be quoted without being happy to be named.
+    may_quote = forms.BooleanField(required=False)
+    quote_name = forms.CharField(max_length=100, required=False)
+    # Hidden in the markup and invisible to a person; bots fill it in. Same
+    # trick, and the same field name, as the signup form above.
+    website = forms.CharField(max_length=200, required=False)
+
+    def clean_reason(self) -> str:
+        """Trim rather than reject.
+
+        Somebody who typed more than the column keeps is telling us something
+        at length, which is the good case. Losing all of it to a validation
+        error on a page they will never come back to is the bad one, so the
+        ceiling truncates.
+        """
+        reason = (self.cleaned_data.get("reason") or "").strip()
+        return reason[:PurchaseFeedback.MAX_REASON_LENGTH]
+
+    def clean_quote_name(self) -> str:
+        """Collapse whitespace, so a name cannot be a paragraph.
+
+        This is the string that would appear beside a quote if one is ever
+        used, and it is typed by whoever holds a session id.
+        """
+        collapsed = " ".join(
+            (self.cleaned_data.get("quote_name") or "").split())
+        return collapsed[:100]
+
+    def is_bot(self) -> bool:
+        filled = (self.cleaned_data.get("website") or "").strip().lower()
+        return filled not in MailingListSignupForm.NOT_FILLED_IN
 
 
 class MailingListImportForm(forms.Form):

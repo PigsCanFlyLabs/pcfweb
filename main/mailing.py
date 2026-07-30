@@ -11,9 +11,10 @@ once somebody has unsubscribed.
 import csv
 import io
 import logging
+import re
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from django.conf import settings
 from django.contrib.sites.shortcuts import get_current_site
@@ -31,7 +32,7 @@ from newsletter.models import Newsletter, Subscription
 from newsletter.utils import get_default_sites, make_activation_code
 
 from main.models import (
-    ALL_INTEREST_SLUG, DEFAULT_INTEREST_SLUG, SuppressedAddress,
+    ALL_INTEREST_SLUG, DEFAULT_INTEREST_SLUG, Product, SuppressedAddress,
     mailing_list_from_email)
 from main.utils import normalize_email, smtp_connection
 
@@ -70,6 +71,78 @@ def interest_choices(request=None) -> List[Newsletter]:
             newsletters = newsletters.filter(site__id=site_id)
     return sorted(
         newsletters, key=lambda n: (n.slug != DEFAULT_SLUG, n.title))
+
+
+# The list for anyone who bought a book we do not run a dedicated list for.
+# Seeded by migration 0014 along with the rest; if it is not there, the general
+# list is the answer instead -- see interest_for_products.
+BOOKS_SLUG = "books"
+
+# Everything that is not a letter or a digit, which is where a product name and
+# a list title differ: "Distributed Computing 4 Kids (and Executives)" against
+# "Distributed Computing 4 Kids and Executives", or "High Performance Spark,
+# 2nd Edition" against "High Performance Spark".
+NON_ALPHANUMERIC = re.compile(r"[^a-z0-9]+")
+
+# Shortest normalized title allowed to match a product name by prefix. Guards
+# against a list somebody titles "Us" or "AI" matching half the catalogue.
+MIN_TITLE_PREFIX = 4
+
+
+def normalized_title(text: str) -> str:
+    return NON_ALPHANUMERIC.sub("", (text or "").lower())
+
+
+def interest_for_products(products: Iterable[Any]) -> str:
+    """Which list to pre-select for somebody who just bought these.
+
+    Used by the checkout success page, and *only* to decide which entry of a
+    dropdown starts selected -- the buyer picks, and the subscription itself
+    comes from what they submit. That is what makes matching a product name
+    against a list title an acceptable way to do this: nothing is subscribed
+    on the strength of the guess, and the failure mode is the general list
+    being pre-selected for a book that has its own.
+
+    An order spanning two topics gets the general list rather than whichever
+    of the two happens to be found first: with no single answer, the honest
+    pre-selection is "updates from us", which is also what an unticked
+    everything-checkbox then means.
+
+    Deliberately not a column on Product. A per-row slug would need keeping
+    in step with the seeded lists by hand, and getting it wrong there would
+    subscribe people to the wrong list rather than merely pre-select one.
+    """
+    titles = {}
+    for newsletter in Newsletter.objects.filter(visible=True):
+        if newsletter.slug in {DEFAULT_SLUG, ALL_SLUG}:
+            # Neither is a topic: they are "everything" and "the rest".
+            continue
+        normalized = normalized_title(newsletter.title)
+        if len(normalized) >= MIN_TITLE_PREFIX:
+            titles[normalized] = newsletter.slug
+
+    matched = set()
+    saw_a_book = False
+    for product in products:
+        if product is None:
+            # An OrderItem whose Product row has since been deleted still
+            # names the thing that was bought, but there is nothing to read a
+            # category off, so it cannot vote.
+            continue
+        if getattr(product, "cat", None) == Product.Categories.BOOKS:
+            saw_a_book = True
+        name = normalized_title(getattr(product, "name", ""))
+        for normalized, slug in titles.items():
+            # Prefix rather than equality: the list is for the work, and the
+            # products are its editions and formats.
+            if name.startswith(normalized):
+                matched.add(slug)
+
+    if len(matched) == 1:
+        return matched.pop()
+    if not matched and saw_a_book and BOOKS_SLUG in titles.values():
+        return BOOKS_SLUG
+    return DEFAULT_SLUG
 
 
 def default_newsletter() -> Newsletter:

@@ -52,6 +52,36 @@ class OrderAdmin(admin.ModelAdmin):
     readonly_fields = tuple(
         f.name for f in Order._meta.fields if f.name != "status")
 
+@admin.register(PurchaseFeedback)
+class PurchaseFeedbackAdmin(admin.ModelAdmin):
+    """Why people bought, in their own words.
+
+    Entirely read-only: this is somebody else's sentence. Editing it here
+    would make a quote attributable to a buyer that the buyer did not write,
+    and the "may we quote you" answer beside it is a permission, not a
+    setting to flip.
+    """
+
+    list_display = ("order", "created_at", "may_quote", "quote_name",
+                    "summary")
+    list_filter = ("may_quote", "created_at")
+    search_fields = ("reason", "quote_name", "order__pk",
+                     "order__customer_email")
+    date_hierarchy = "created_at"
+    readonly_fields = tuple(f.name for f in PurchaseFeedback._meta.fields)
+
+    def has_add_permission(self, request):
+        # There is no such thing as feedback the owner wrote.
+        return False
+
+    @admin.display(description="what they said")
+    def summary(self, obj):
+        """The first line, so the changelist reads as a list of answers."""
+        first = (obj.reason or "").strip().splitlines()
+        text = first[0] if first else ""
+        return text if len(text) <= 120 else f"{text[:117]}…"
+
+
 @admin.register(SuppressedAddress)
 class SuppressedAddressAdmin(admin.ModelAdmin):
     """The never-email list. Add one here; add many from the import page."""

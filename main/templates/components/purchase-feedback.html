@@ -1,0 +1,34 @@
+{% comment %}
+"What made you buy this?", asked once, on the page that says the payment
+went through.
+
+Rendered only when there is an order to attach an answer to, and named by
+the Stripe session id rather than by an order number -- see
+PurchaseFeedbackView. CSRF token, unlike the signup form beside it: this
+form is ours, on a page of ours, and is not meant to work anywhere else.
+{% endcomment %}
+<div class="purchase-feedback">
+    <h4>What made you buy this?</h4>
+    <p>One line is plenty. We are a very small press, and this is genuinely
+        how we work out what to write next.</p>
+    <form method="post" action="{% url 'purchase-feedback' %}">
+        {% csrf_token %}
+        <input type="hidden" name="session_id" value="{{ feedback_session_id }}">
+        <label for="id_reason" class="sr-only">What made you buy this?</label>
+        <textarea name="reason" id="id_reason" rows="4" required
+                  maxlength="2000"
+                  placeholder="A friend recommended it, my kid asked, the cover…"></textarea>
+        <label for="id_may_quote">
+            <input type="checkbox" name="may_quote" value="1" id="id_may_quote">
+            You may quote me on the site
+        </label>
+        <label for="id_quote_name">If so, call me:</label>
+        <input type="text" name="quote_name" id="id_quote_name" maxlength="100"
+               placeholder="A first name, an initial, anything you like">
+        {# Honeypot: invisible to a person, filled in by bots. #}
+        <div style="position:absolute;left:-5000px;" aria-hidden="true">
+            <input type="text" name="website" tabindex="-1" autocomplete="off">
+        </div>
+        <button type="submit" class="main-dark-button">Send it</button>
+    </form>
+</div>
