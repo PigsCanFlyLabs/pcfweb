@@ -3,6 +3,12 @@
 # A new table, so a rolling deploy needs nothing special from it: an old pod
 # has never heard of this model and writes nothing here, and the new pod's
 # only writer is the checkout success page's feedback form.
+#
+# Numbered 0023 rather than 0022: PR #75's release_date migration took that
+# number on main while this branch was open. Renumbering rather than adding a
+# merge migration keeps the graph linear, and is safe precisely because this
+# one has never been applied anywhere -- it has only ever existed on this
+# branch.
 
 import django.db.models.deletion
 from django.db import migrations, models
@@ -11,7 +17,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("main", "0021_order_receipt_fields"),
+        ("main", "0022_release_date"),
     ]
 
     operations = [
