@@ -56,10 +56,18 @@ class OrderAdmin(admin.ModelAdmin):
 class PurchaseFeedbackAdmin(admin.ModelAdmin):
     """Why people bought, in their own words.
 
-    Entirely read-only: this is somebody else's sentence. Editing it here
-    would make a quote attributable to a buyer that the buyer did not write,
-    and the "may we quote you" answer beside it is a permission, not a
-    setting to flip.
+    Unwritable and unamendable: this is somebody else's sentence. Editing it
+    here would make a quote attributable to a buyer who did not write it, and
+    the "may we quote you" answer beside it is a permission, not a setting to
+    flip.
+
+    Deletable, though, and deliberately so. Somebody who writes in asking for
+    their words to be taken down needs a way to have that happen, and this
+    row is the right granularity for it: the alternative is deleting the
+    order, which is the accounting record and has to stay. "The row is the
+    record" (see PurchaseFeedback.notify_owner) is about a failed
+    notification email not losing the answer -- it was never a claim that
+    staff cannot remove one on request.
     """
 
     list_display = ("order", "created_at", "may_quote", "quote_name",

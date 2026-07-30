@@ -1329,22 +1329,43 @@ class PurchaseFeedbackView(View):
                 "order; nothing stored.")
             return self.render_result(request, order=None)
 
-        if not PurchaseFeedback.has_room(order):
-            logger.warning(
-                "Order #%s already has %s feedback notes; dropping another.",
-                order.pk, PurchaseFeedback.MAX_PER_ORDER)
-            return self.render_result(request, order=order)
-
-        feedback = PurchaseFeedback.objects.create(
-            order=order,
-            reason=form.cleaned_data["reason"],
-            may_quote=form.cleaned_data["may_quote"],
-            quote_name=form.cleaned_data["quote_name"],
-        )
-        # Best effort, and deliberately after the row is written: the note is
-        # saved and visible in the admin whether or not the mail goes out.
-        feedback.notify_owner()
+        feedback = self.record(order, form)
+        if feedback is not None:
+            # Best effort, and deliberately outside the transaction that
+            # wrote the row: the note is saved and visible in the admin
+            # whether or not the mail goes out, and an SMTP timeout must not
+            # be something a database lock is held across.
+            feedback.notify_owner()
         return self.render_result(request, order=order)
+
+    @staticmethod
+    def record(order: Order, form: PurchaseFeedbackForm
+               ) -> Optional[PurchaseFeedback]:
+        """Write the note, or None when the order is already at its cap.
+
+        The count and the write happen under one lock on the order row.
+        Checking first and writing after is not enough on its own: two POSTs
+        carrying the same session id can each see four notes and each write a
+        fifth, and the per-source limiter does not stop that -- it allows ten
+        an hour, and says nothing about two arriving at once.
+
+        Same lock-then-act shape the success page's reconciliation uses. On
+        SQLite select_for_update does nothing, which is accurate rather than
+        broken: writes are serialised there anyway.
+        """
+        with transaction.atomic():
+            Order.objects.select_for_update().filter(pk=order.pk).first()
+            if not PurchaseFeedback.has_room(order):
+                logger.warning(
+                    "Order #%s already has %s feedback notes; dropping "
+                    "another.", order.pk, PurchaseFeedback.MAX_PER_ORDER)
+                return None
+            return PurchaseFeedback.objects.create(
+                order=order,
+                reason=form.cleaned_data["reason"],
+                may_quote=form.cleaned_data["may_quote"],
+                quote_name=form.cleaned_data["quote_name"],
+            )
 
     @staticmethod
     def order_for(session_id: Optional[str]) -> Optional[Order]:
