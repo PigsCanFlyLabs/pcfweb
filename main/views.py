@@ -157,7 +157,7 @@ class HomeView(View):
 
     def get(self, request):
         highlights = map(
-            lambda cat: ((cat, cat.label), list(Product.objects.filter(cat = cat).exclude(noorder=True).order_by('-price')[:3])),
+            lambda cat: ((cat, cat.label), list(Product.objects.filter(cat = cat).exclude(noorder=True).order_by_release_date()[:3])),
             Product.Categories)
         # Only show categories with elements in them.
         highlights = list(filter(lambda x: len(x[1]) != 0, highlights))
@@ -330,7 +330,7 @@ class ProductsView(View):
             return render(request, 'products.html', context={
                 'title': 'Products',
                 'type': 'producs',
-                'products': Product.objects.exclude(noorder=True)
+                'products': Product.objects.exclude(noorder=True).order_by_release_date()
             })
         else:
             cat = category or request.GET["category"]
@@ -352,7 +352,7 @@ class ProductsView(View):
             return render(request, 'products.html', context={
                 'title': f'Products - {cat_name}',
                 'type': cat_name,
-                'products': Product.objects.filter(cat=cat).exclude(noorder=True),
+                'products': Product.objects.filter(cat=cat).exclude(noorder=True).order_by_release_date(),
                 'extra_style': extra_style
             })
 
