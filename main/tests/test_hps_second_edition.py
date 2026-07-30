@@ -13,6 +13,7 @@ verified are asserted to be *blank*, deliberately: a test that pinned a
 guessed EPUB ISBN would make the guess permanent.
 """
 
+import re
 from io import StringIO
 from unittest import mock
 
@@ -286,3 +287,180 @@ class SecondEditionSeedsOnACleanDeployTest(TestCase):
         body = response.content.decode()
         self.assertIn(f"https://www.amazon.com/dp/{SECOND_EDITION_ASIN}", body)
         self.assertIn(Product.AMAZON_EBOOK_LABEL, body)
+
+
+@override_settings(THUMBNAIL_DEBUG=False)
+class ProductsPageReleaseDateOrderingTest(TestCase):
+    """The /products and /products/<category> pages sort by release_date DESC,
+    NULLS LAST, with pk as the tiebreaker.
+
+    This exercises the REAL VIEW via ``self.client.get`` and derives the order
+    from product-card links parsed out of the rendered HTML.  It does not
+    construct a queryset, import the view's ordering expression, or inspect
+    ``order_by`` — it tests what the browser sees.
+    """
+
+    fixtures = ["initial_products"]
+
+    @staticmethod
+    def _product_pks_from_html(html: str) -> list[int]:
+        """Extract product PKs from ``/product/<pk>`` links in render order."""
+        pks: list[int] = []
+        seen: set[int] = set()
+        for m in re.finditer(r'/product/(\d+)', html):
+            pk = int(m.group(1))
+            if pk not in seen:
+                seen.add(pk)
+                pks.append(pk)
+        return pks
+
+    # -- main /products page --------------------------------------------------
+
+    def test_hps_2nd_edition_outranks_1st_edition_in_the_rendered_page(self):
+        """pk 108 (2026-06-05) appears before pk 101 (2017-06-16)
+        in the rendered /products page."""
+        response = self.client.get("/products")
+        pks = self._product_pks_from_html(response.content.decode())
+
+        self.assertIn(108, pks, "HPS 2nd edition missing from products page")
+        self.assertIn(101, pks, "HPS 1st edition missing from products page")
+
+        idx_108 = pks.index(108)
+        idx_101 = pks.index(101)
+
+        self.assertLess(
+            idx_108, idx_101,
+            f"HPS 2nd edition (pk 108) must appear before "
+            f"HPS 1st edition (pk 101). Got order: {pks}",
+        )
+
+    def test_products_are_ordered_newest_first(self):
+        """The overall /products order matches release_date DESC, pk tiebreak."""
+        response = self.client.get("/products")
+        pks = self._product_pks_from_html(response.content.decode())
+
+        # 104/105/106 (2026-06-28, pk tiebreak), 108 (2026-06-05),
+        # 103 (2022-11-29), 102 (2020-10-13), 101 (2017-06-16), 100 (2015-02-27)
+        expected = [104, 105, 106, 108, 103, 102, 101, 100]
+        self.assertEqual(
+            pks, expected,
+            f"Expected newest-first order {expected}, got {pks}",
+        )
+
+    def test_null_release_date_sinks_to_bottom(self):
+        """NULL release_date rows appear last (NULLS LAST)."""
+        original = Product.objects.get(pk=100).release_date
+        Product.objects.filter(pk=100).update(release_date=None)
+        try:
+            response = self.client.get("/products")
+            pks = self._product_pks_from_html(response.content.decode())
+
+            self.assertIn(100, pks, "Product 100 missing from rendered page")
+            self.assertEqual(
+                pks[-1], 100,
+                f"Null-date product must be last. Got order: {pks}",
+            )
+        finally:
+            Product.objects.filter(pk=100).update(release_date=original)
+
+    def test_no_products_are_missing_from_products_page(self):
+        """All non-noorder products are present in the rendered /products page."""
+        response = self.client.get("/products")
+        pks = self._product_pks_from_html(response.content.decode())
+
+        # pk 107 is noorder=True, so it is excluded from /products
+        expected = {100, 101, 102, 103, 104, 105, 106, 108}
+        self.assertEqual(set(pks), expected)
+
+    # -- category page /products/B -------------------------------------------
+
+    def test_category_page_books_sorted_newest_first(self):
+        """The /products/B category page also sorts by release_date DESC."""
+        response = self.client.get("/products/B")
+        pks = self._product_pks_from_html(response.content.decode())
+
+        # Same expected order as the main /products page — all non-noorder
+        # products are currently in the Books category.
+        expected = [104, 105, 106, 108, 103, 102, 101, 100]
+        self.assertEqual(
+            pks, expected,
+            f"Expected books in newest-first order {expected}, got {pks}",
+        )
+
+@override_settings(THUMBNAIL_DEBUG=False)
+class HomepageOurBooksCarouselOrderingTest(TestCase):
+    """The homepage "Our Books" carousel uses the same order_by_release_date
+    ordering as the products page, sliced to [:3].  This exercises the REAL
+    VIEW via ``self.client.get('/')`` and extracts product PKs from the
+    rendered HTML.  It never constructs a queryset or imports the view's
+    ordering expression.
+    """
+
+    fixtures = ["initial_products"]
+
+    @staticmethod
+    def _product_pks_from_html(html: str) -> list[int]:
+        """Extract product PKs from "/product/<pk>" links in render order."""
+        pks: list[int] = []
+        seen: set[int] = set()
+        for m in re.finditer(r'/product/(\d+)', html):
+            pk = int(m.group(1))
+            if pk not in seen:
+                seen.add(pk)
+                pks.append(pk)
+        return pks
+
+    def test_homepage_is_reachable(self):
+        """The homepage renders successfully."""
+        response = self.client.get('/')
+        self.assertEqual(response.status_code, 200)
+
+    def test_our_books_carousel_contains_the_three_newest_books(self):
+        """After switching from '-price' to order_by_release_date(), the [:3]
+        slice on the homepage carousel selects the three DC4K SKUs (all dated
+        2026-06-28, pk-ascending tiebreak at 104/105/106).  This drops High
+        Performance Spark 2e, Ray and Kubeflow off the homepage entirely.
+        """
+        response = self.client.get('/')
+        html = response.content.decode()
+        pks = self._product_pks_from_html(html)
+
+        # The page contains the hero link (pk 104) plus three carousel
+        # entries (104, 105, 106). After deduplication, the last three
+        # unique PKs should be the carousel.
+        unique_pks = list(dict.fromkeys(pks))
+        carousel_pks = unique_pks[-3:] if len(unique_pks) >= 3 else []
+
+        self.assertEqual(
+            carousel_pks, [104, 105, 106],
+            f"Carousel expected [104, 105, 106] but got {carousel_pks}. "
+            f"Full unique order: {unique_pks}",
+        )
+
+        # None of the other books appear in the carousel slice.
+        not_in_carousel = [108, 103, 102, 101, 100]
+        for pk in not_in_carousel:
+            self.assertNotIn(
+                pk, carousel_pks,
+                f"pk {pk} should not appear in the carousel slice "
+                f"(it was displaced by DC4K filling all three [:3] slots). "
+                f"Carousel: {carousel_pks}",
+            )
+
+    def test_carousel_ordering_matches_products_page_head(self):
+        """The homepage carousel [:3] is exactly the head of the
+        /products page ordering."""
+        home_response = self.client.get('/')
+        home_pks = list(dict.fromkeys(
+            self._product_pks_from_html(home_response.content.decode())))
+        carousel_pks = home_pks[-3:]
+
+        products_response = self.client.get('/products')
+        products_pks = self._product_pks_from_html(
+            products_response.content.decode())
+
+        self.assertEqual(
+            carousel_pks, products_pks[:3],
+            f"Homepage carousel {carousel_pks} must equal "
+            f"/products head {products_pks[:3]}",
+        )

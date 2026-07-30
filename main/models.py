@@ -62,7 +62,23 @@ class EmailIdentity(models.Model):
 
 
 # Create your models here.
+class ProductQuerySet(models.QuerySet):
+    """Custom QuerySet for Product."""
+
+    def order_by_release_date(self):
+        """Publication-date ordering shared by every product listing.
+
+        Newest first (release_date DESC NULLS LAST), with pk ASC as the
+        stable tiebreaker.  Keep the three call sites in sync by referencing
+        this one helper rather than repeating the expression inline.
+        """
+        return self.order_by(
+            models.F('release_date').desc(nulls_last=True), 'pk')
+
+
 class Product(models.Model):
+    objects = ProductQuerySet.as_manager()
+
     description = models.TextField(default="No description.")
     external_product_id = models.CharField(
         max_length=250, blank=True, null=True)
@@ -125,6 +141,17 @@ class Product(models.Model):
         ),
     )
     date_available = models.DateField(null=True, blank=True)
+    release_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text=(
+            "The date this product was first published/released. "
+            "NULLable so an old pod's INSERT that omits it lands "
+            "NULL safely during a rolling deploy. "
+            "DISTINCT from date_available (when it can be bought): "
+            "this is when it actually came out."
+        ),
+    )
     brand = models.CharField(null=True, blank=True, max_length=200)
     sizes = models.CharField(null=True, blank=True, max_length=200)
 
