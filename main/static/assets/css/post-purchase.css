@@ -34,12 +34,32 @@
     }
 }
 
+/* One row per person or project worth following (Holden, the company,
+   Liberated Bread), stacked. The rule between them is what keeps three sets
+   of icons from reading as one long undifferentiated strip. */
+.follow-target + .follow-target {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #eee;
+}
+
+.follow-target h5 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.follow-target-blurb {
+    margin-bottom: 8px;
+}
+
 .follow-us-list {
     list-style: none;
     padding: 0;
     display: flex;
     flex-wrap: wrap;
     gap: 18px;
+    margin-bottom: 0;
 }
 
 .follow-us-list a {

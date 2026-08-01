@@ -403,23 +403,62 @@ class Base(Configuration):
         "DISCORD_SUPPORT_EMAIL", "support@pigscanfly.ca")
 
     # SOCIAL ACCOUNTS
-    # Where "follow us" points, one variable per network. Only the YouTube
-    # channel the about page already links has a default: an account nobody
-    # has told this file about is not one to guess a URL for, and an empty
-    # value renders no link at all rather than a dead one.
+    # Where "follow along" points: one variable per account holder per
+    # network. Three holders, because "follow us" is three different asks --
+    # Holden writes the books, Pigs Can Fly Labs publishes them and runs the
+    # Discord, and Liberated Bread is the same company under its own name.
+    # See main/socials.py, which turns these into the rows that render.
+    #
+    # Only the YouTube channel the about page already links has a default: an
+    # account nobody has told this file about is not one to guess a URL for,
+    # and an empty value renders no link at all rather than a dead one. A
+    # holder with nothing set does not render at all.
     #
     # Adding or rotating one is a ConfigMap edit (see deploy.yaml), not a
-    # rebuild. main.socials.social_links() drops anything that is not an
-    # https URL with a host in it, for the same reason /discord validates its
-    # invite halves: a half-finished edit must cost a link, not hand a
-    # visitor's browser a scheme we did not intend.
-    SOCIAL_YOUTUBE_URL = os.getenv(
-        "SOCIAL_YOUTUBE_URL", "https://www.youtube.com/user/holdenkarau")
-    SOCIAL_MASTODON_URL = os.getenv("SOCIAL_MASTODON_URL", "")
-    SOCIAL_BLUESKY_URL = os.getenv("SOCIAL_BLUESKY_URL", "")
-    SOCIAL_TWITCH_URL = os.getenv("SOCIAL_TWITCH_URL", "")
-    SOCIAL_INSTAGRAM_URL = os.getenv("SOCIAL_INSTAGRAM_URL", "")
-    SOCIAL_LINKEDIN_URL = os.getenv("SOCIAL_LINKEDIN_URL", "")
+    # rebuild. main.socials drops anything that is not an https URL with a
+    # host in it, for the same reason /discord validates its invite halves: a
+    # half-finished edit must cost a link, not hand a visitor's browser a
+    # scheme we did not intend.
+    #
+    # The unprefixed SOCIAL_<NETWORK>_URL names these replace are still read
+    # as a fallback for Holden's row, which is where the one value they ever
+    # carried -- her YouTube channel -- belongs. They can go once nothing
+    # sets them.
+    SOCIAL_HOLDEN_SITE_URL = os.getenv("SOCIAL_HOLDEN_SITE_URL", "")
+    SOCIAL_HOLDEN_YOUTUBE_URL = os.getenv(
+        "SOCIAL_HOLDEN_YOUTUBE_URL",
+        os.getenv("SOCIAL_YOUTUBE_URL",
+                  "https://www.youtube.com/user/holdenkarau"))
+    SOCIAL_HOLDEN_MASTODON_URL = os.getenv(
+        "SOCIAL_HOLDEN_MASTODON_URL", os.getenv("SOCIAL_MASTODON_URL", ""))
+    SOCIAL_HOLDEN_BLUESKY_URL = os.getenv(
+        "SOCIAL_HOLDEN_BLUESKY_URL", os.getenv("SOCIAL_BLUESKY_URL", ""))
+    SOCIAL_HOLDEN_TWITCH_URL = os.getenv(
+        "SOCIAL_HOLDEN_TWITCH_URL", os.getenv("SOCIAL_TWITCH_URL", ""))
+    SOCIAL_HOLDEN_INSTAGRAM_URL = os.getenv(
+        "SOCIAL_HOLDEN_INSTAGRAM_URL", os.getenv("SOCIAL_INSTAGRAM_URL", ""))
+    SOCIAL_HOLDEN_LINKEDIN_URL = os.getenv(
+        "SOCIAL_HOLDEN_LINKEDIN_URL", os.getenv("SOCIAL_LINKEDIN_URL", ""))
+
+    # Pigs Can Fly Labs. No SITE_URL: this site is the site, and a link from
+    # the checkout page back to the checkout page is not a follow.
+    SOCIAL_PCFL_MASTODON_URL = os.getenv("SOCIAL_PCFL_MASTODON_URL", "")
+    SOCIAL_PCFL_BLUESKY_URL = os.getenv("SOCIAL_PCFL_BLUESKY_URL", "")
+    SOCIAL_PCFL_YOUTUBE_URL = os.getenv("SOCIAL_PCFL_YOUTUBE_URL", "")
+    SOCIAL_PCFL_TWITCH_URL = os.getenv("SOCIAL_PCFL_TWITCH_URL", "")
+    SOCIAL_PCFL_INSTAGRAM_URL = os.getenv("SOCIAL_PCFL_INSTAGRAM_URL", "")
+    SOCIAL_PCFL_LINKEDIN_URL = os.getenv("SOCIAL_PCFL_LINKEDIN_URL", "")
+
+    # Liberated Bread. Its site defaults to main.socials.LIBERATED_BREAD_URL,
+    # the same constant the homepage card and the family page use; setting
+    # this overrides that one place without touching the others.
+    SOCIAL_BREAD_SITE_URL = os.getenv("SOCIAL_BREAD_SITE_URL", "")
+    SOCIAL_BREAD_MASTODON_URL = os.getenv("SOCIAL_BREAD_MASTODON_URL", "")
+    SOCIAL_BREAD_BLUESKY_URL = os.getenv("SOCIAL_BREAD_BLUESKY_URL", "")
+    SOCIAL_BREAD_YOUTUBE_URL = os.getenv("SOCIAL_BREAD_YOUTUBE_URL", "")
+    SOCIAL_BREAD_TWITCH_URL = os.getenv("SOCIAL_BREAD_TWITCH_URL", "")
+    SOCIAL_BREAD_INSTAGRAM_URL = os.getenv("SOCIAL_BREAD_INSTAGRAM_URL", "")
+    SOCIAL_BREAD_LINKEDIN_URL = os.getenv("SOCIAL_BREAD_LINKEDIN_URL", "")
 
     # POST-PURCHASE FEEDBACK
     # "Why did you buy this?", asked once on the checkout success page. The

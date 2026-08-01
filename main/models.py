@@ -18,7 +18,7 @@ from main.digital import (
     DigitalAssetError, download_url, link_lifetime_days, open_asset,
     site_base_url)
 from main.payments import Payments
-from main.socials import social_links
+from main.socials import follow_targets
 from main.utils import admin_recipients, normalize_email, smtp_connection
 from typing import Any, Dict, List, Optional, Tuple, cast
 
@@ -1852,9 +1852,11 @@ class Order(models.Model):
         """The mailing list, the Discord and the socials, as plain text.
 
         The receipt is the second half of the checkout success page: the buyer
-        who closed the tab before reading it still gets this. Absolute URLs
-        throughout -- a receipt is built inside a Stripe webhook, where there
-        is no request whose host could be borrowed.
+        who closed the tab before reading it still gets this, grouped by whose
+        account it is the same way the page groups them -- Holden, the
+        company, Liberated Bread. Absolute URLs throughout: a receipt is built
+        inside a Stripe webhook, where there is no request whose host could be
+        borrowed.
 
         No tracking parameters and nothing pre-subscribed. The list here is a
         link to the same double opt-in signup as everywhere else: having
@@ -1866,9 +1868,16 @@ class Order(models.Model):
             "-------------",
             "New books, new editions and the occasional discount: "
             f"{absolute_site_url(reverse('subscribe'))}",
-            f"Chat with us on Discord: {absolute_site_url(reverse('discord'))}",
         ]
-        lines += [f"{link.label}: {link.url}" for link in social_links()]
+        for target in follow_targets():
+            lines.append("")
+            lines.append(f"{target.name}: {target.blurb}")
+            if target.site:
+                lines.append(f"  Website: {target.site}")
+            if target.discord:
+                lines.append(
+                    f"  Discord: {absolute_site_url(reverse('discord'))}")
+            lines += [f"  {link.label}: {link.url}" for link in target.links]
         lines += [
             "",
             "And if you have a minute: what made you buy this? Reply to this "
