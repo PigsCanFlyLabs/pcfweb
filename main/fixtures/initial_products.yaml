@@ -262,6 +262,19 @@
     # exists, so print_isbn has to be set here explicitly or this SKU loses its
     # <g:gtin> in the Merchant feed and its "signed on request" note.
     print_isbn: "9781960595997"
+    # The book is live on Amazon. Paperback listing verified 2026-08-01:
+    # /dp/1960595016 returns "Distributed Computing 4 Kids and Executives:
+    # Solving Hard Problems with Garden Gnomes and ASF Spark", publisher Pigs
+    # Can Fly Labs LLC, published July 28, 2026, $20.00. Amazon's print run
+    # carries its own ISBN-13, 9781960595010, which is deliberately NOT the
+    # 9781960595997 above -- that number identifies the copies sold and
+    # shipped from here, and it stays this row's GTIN. Do not "fix" the
+    # mismatch in either direction, and do not rewrite this link as
+    # /dp/<ISBN-10 of our print ISBN>: 1960595997 is an address Amazon has
+    # never served. Direct sales stay the page's primary CTA (the add-to-cart
+    # button); this URL only feeds the secondary "Buy on Amazon (print)" alt
+    # link.
+    amazon_link: "https://www.amazon.com/dp/1960595016"
     image_name: "book_covers/distributed_computing_4_kids.jpg"
     release_date: 2026-06-28
     cat: "B"
@@ -313,6 +326,13 @@
     # Print-only as well -- there is no separate Executive e-book -- so
     # ebook_isbn stays unset rather than borrowing pk 106's.
     print_isbn: "9781960595003"
+    # No amazon_link, checked rather than pending: an Amazon search for
+    # 9781960595003 (2026-08-01, after the standard edition and the Kindle
+    # e-book went live) returns no listing. That absence is the product
+    # working as designed -- the Executive Edition is the direct-sales
+    # exclusive, so the only place to buy it is this site. Do not point this
+    # row at pk 104's paperback listing: that would sell a shopper the
+    # standard edition from a page describing this one.
     image_name: "book_covers/distributed_computing_4_kids.jpg"
     release_date: 2026-06-28
     cat: "B"
@@ -347,16 +367,27 @@
     # Pay what you want: this is the amount Stripe pre-fills as a suggestion,
     # not a price. The floor is zero, on the owner's explicit instruction.
     #
-    # DC4K is coming to Amazon as an e-book at a fixed $12.99, so the direct
-    # PWYW suggested price is aligned to match.
+    # DC4K is live on Amazon as an e-book at a fixed $12.99 (verified
+    # 2026-08-01 on the Kindle listing carried in ebook_asin below), so the
+    # direct PWYW suggested price stays aligned to match.
     price: 1299
     is_pwyw: true
     # Digital and print-less: only ebook_isbn. `isbn` stays unset on purpose --
     # setting it would put "available signed on request" on a download.
     ebook_isbn: "9781960595980"
-    # Amazon e-book edition forthcoming. ebook_asin is fixture-owned now; set
-    # it here once the Kindle listing exists, and do not invent one before
-    # then or this row could point at somebody else's book.
+    # Kindle edition ASIN, verified 2026-08-01 the way the top of this file
+    # requires -- from the Kindle listing's own page, not derived from any
+    # ISBN. /dp/B0HC5Y42R2 returns a Kindle Store page titled "Distributed
+    # Computing 4 Kids and Executives: Solving Hard Problems with Garden
+    # Gnomes and ASF Spark", publisher Pigs Can Fly Labs LLC, published
+    # July 30, 2026, $12.99. Edition linkage confirmed in both directions:
+    # the paperback listing (pk 104's amazon_link) carries a Kindle format
+    # swatch pointing at this exact ASIN, and this listing's swatch points
+    # back at /dp/1960595016. Renders the secondary "Buy on Amazon (ebook)"
+    # alt link; the primary CTA stays the direct PWYW add-to-cart above,
+    # which is the sale we prefer -- it is the one that comes with a customer
+    # relationship instead of a royalty statement.
+    ebook_asin: "B0HC5Y42R2"
     image_name: "book_covers/distributed_computing_4_kids.jpg"
     release_date: 2026-06-28
     cat: "B"

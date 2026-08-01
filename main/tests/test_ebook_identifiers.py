@@ -38,11 +38,15 @@ class SeededKindleAsinTest(TestCase):
     admin.
     """
 
-    # Verified against the live Amazon listings.
+    # Verified against the live Amazon listings. 106 is the DC4K e-book,
+    # whose Kindle listing went live with the July 2026 Amazon launch -- the
+    # first non-O'Reilly row to carry an ASIN, seeded like the others so a
+    # fresh deploy renders its button without a human in the loop.
     EXPECTED_EBOOK_ASINS = {
         100: "B00SW0TY8O",
         102: "B08L5Q9W59",
         103: "B0BNM6PQ9Q",
+        106: "B0HC5Y42R2",
     }
 
     def setUp(self):
@@ -101,7 +105,9 @@ class SeededKindleAsinTest(TestCase):
         self.assertNotIn('href=""', body)
 
     def test_rows_with_no_kindle_edition_stay_blank(self):
-        """DC4K (104-106) has no Kindle edition; 107 has no verified ASIN."""
-        for pk in (104, 105, 106, 107):
+        """The DC4K print SKUs have no Kindle edition of their own -- the
+        launch ASIN belongs to the digital row, pk 106 -- and 107 has no
+        verified ASIN."""
+        for pk in (104, 105, 107):
             with self.subTest(pk=pk):
                 self.assertFalse(Product.objects.get(pk=pk).ebook_asin)

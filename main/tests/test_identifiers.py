@@ -152,9 +152,10 @@ class AmazonEbookLinkTest(TestCase):
     one the flag exists to prevent.
 
     So the rule is presence, not publisher: no ebook_asin (and no explicit
-    kindle_link), no button. Only the O'Reilly titles are expected to carry
-    one, and the fixture gives none of the self-published SKUs a value -- see
-    test_no_self_published_sku_offers_the_amazon_ebook_link.
+    kindle_link), no button. Since the Amazon launch the DC4K e-book (pk 106)
+    carries a verified ASIN of its own alongside the O'Reilly titles; the two
+    self-published print SKUs still do not -- see
+    test_no_self_published_print_sku_offers_the_amazon_ebook_link.
     """
 
     fixtures = ["initial_products"]
@@ -168,7 +169,7 @@ class AmazonEbookLinkTest(TestCase):
     # no ASINs at all; it seeds three of them now, so they need a row that is
     # still blank on purpose. See main/fixtures/initial_products.yaml pk 101.
     NO_ASIN_PK = 101
-    SELF_PUBLISHED_PKS = (104, 105, EBOOK_PK)
+    SELF_PUBLISHED_PRINT_PKS = (104, 105)
 
     def ebook_url(self, pk):
         links = dict(Product.objects.get(pk=pk).get_alt_links())
@@ -212,22 +213,38 @@ class AmazonEbookLinkTest(TestCase):
         # assertions above are about this link and not about an empty page.
         self.assertContains(response, "Buy on Amazon (print)")
 
-    def test_no_self_published_sku_offers_the_amazon_ebook_link(self):
-        # DC4K is the owner's own book: the print SKUs are not on Amazon as
-        # e-books and the digital SKU is sold here directly, pay-what-you-want.
-        # None of them carry an ebook_asin, so none of them get the button.
-        for pk in self.SELF_PUBLISHED_PKS:
+    def test_no_self_published_print_sku_offers_the_amazon_ebook_link(self):
+        # DC4K's print SKUs are not on Amazon as e-books -- the paperback
+        # listing is a print claim, carried in pk 104's amazon_link, and the
+        # Kindle ASIN belongs to pk 106 alone. An e-book button on a print
+        # row's page would offer a download from a page describing paper.
+        for pk in self.SELF_PUBLISHED_PRINT_PKS:
             with self.subTest(pk=pk):
                 response = self.client.get(f"/product/{pk}")
 
                 self.assertIsNone(self.ebook_url(pk))
                 self.assertNotContains(response, self.LABEL)
 
+    def test_the_dc4k_ebook_offers_the_amazon_ebook_link_since_launch(self):
+        # The digital SKU's Kindle ASIN is fixture-owned and was verified
+        # against the live listing (see initial_products.yaml pk 106). The
+        # button is the secondary channel; the page's primary CTA stays the
+        # direct pay-what-you-want add-to-cart.
+        response = self.client.get(f"/product/{EBOOK_PK}")
+
+        self.assertEqual(
+            self.ebook_url(EBOOK_PK), "https://www.amazon.com/dp/B0HC5Y42R2")
+        self.assertContains(response, self.LABEL)
+        self.assertContains(response, "https://www.amazon.com/dp/B0HC5Y42R2")
+
     def test_the_ebook_isbn_alone_never_conjures_the_link(self):
         # pk 106 has a real ebook_isbn. An ISBN is not an ASIN and there is no
         # public mapping between them, so deriving an Amazon URL from one would
         # be a fabricated link pointing at whatever product happens to sit at
-        # that address. Presence of the ISBN must change nothing.
+        # that address. The row has carried a verified ASIN since the Amazon
+        # launch, so strip it first: with the ASIN gone the ISBN is all that
+        # remains, and it must conjure nothing.
+        self.set_ebook_asin(EBOOK_PK, None)
         ebook = Product.objects.get(pk=EBOOK_PK)
 
         self.assertTrue(ebook.ebook_isbn)
