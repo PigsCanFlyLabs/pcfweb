@@ -339,7 +339,7 @@ class ProductsPageReleaseDateOrderingTest(TestCase):
         response = self.client.get("/products")
         pks = self._product_pks_from_html(response.content.decode())
 
-        # 104/105/106 (2026-06-28, pk tiebreak), 108 (2026-06-05),
+        # 104/105/106 (2026-07-28, pk tiebreak), 108 (2026-06-05),
         # 103 (2022-11-29), 102 (2020-10-13), 101 (2017-06-16), 100 (2015-02-27)
         expected = [104, 105, 106, 108, 103, 102, 101, 100]
         self.assertEqual(
@@ -418,7 +418,7 @@ class HomepageOurBooksCarouselOrderingTest(TestCase):
     def test_our_books_carousel_contains_the_three_newest_books(self):
         """After switching from '-price' to order_by_release_date(), the [:3]
         slice on the homepage carousel selects the three DC4K SKUs (all dated
-        2026-06-28, pk-ascending tiebreak at 104/105/106).  This drops High
+        2026-07-28, pk-ascending tiebreak at 104/105/106).  This drops High
         Performance Spark 2e, Ray and Kubeflow off the homepage entirely.
         """
         response = self.client.get('/')

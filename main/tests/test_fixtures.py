@@ -23,7 +23,7 @@ AMAZON_IN_LABEL = "Buy on Amazon.in (print)"
 FLIPKART_LABEL = "Buy on Flipkart (print)"
 BOOKSHOP_LABEL = "Buy on Bookshop.org (support local bookstores)"
 BOOKSHOP_EBOOK_LABEL = "Buy the e-book on Bookshop.org (DRM-free)"
-# Only these two of the eight catalogue rows have a Bookshop e-book listing;
+# Only these two of the nine catalogue rows have a Bookshop e-book listing;
 # coverage is publisher-gated, not something derivable from an ISBN.
 BOOKSHOP_EBOOK_URLS = {
     102: (
