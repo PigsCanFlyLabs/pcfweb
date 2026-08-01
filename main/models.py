@@ -1870,8 +1870,13 @@ class Order(models.Model):
             f"{absolute_site_url(reverse('subscribe'))}",
         ]
         for target in follow_targets():
+            # The name only. The blurb under each name on the checkout page is
+            # copy for a page somebody chose to be on; a receipt earns its
+            # place in an inbox by being a receipt, and the grouping alone
+            # does the job the name is here for -- saying whose account the
+            # URL under it is, which a flat list of links cannot.
             lines.append("")
-            lines.append(f"{target.name}: {target.blurb}")
+            lines.append(f"{target.name}")
             if target.site:
                 lines.append(f"  Website: {target.site}")
             if target.discord:

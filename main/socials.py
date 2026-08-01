@@ -43,9 +43,10 @@ class SocialLink:
     label: str
     url: str
     # A Font Awesome 4 class, which is the icon set the vendored theme ships
-    # (see main/static/assets/css/font-awesome.css). It has no Discord or
-    # Mastodon glyph, hence the generic ones below: a missing icon renders as
-    # a blank square, which looks like a broken page rather than a link.
+    # (see main/static/assets/css/font-awesome.css). It has no Mastodon glyph
+    # -- nor a Discord one, for the link follow-us.html adds -- hence the
+    # generic fa-globe and fa-comments: a missing icon renders as a blank
+    # square, which looks like a broken page rather than a link.
     icon: str
 
 
@@ -56,8 +57,10 @@ class FollowTarget:
     key: str
     name: str
     blurb: str
-    # Its own site, where it has one that is not this one. None for Pigs Can
-    # Fly Labs: a link from this page back to this page is not a follow.
+    # Its own site, where it has one that is not this one. Normally None for
+    # Pigs Can Fly Labs, whose site is the one this renders on -- but that is
+    # settings.SOCIAL_PCFL_SITE_URL being empty rather than anything here
+    # enforcing it, and a row will happily render a site if one is set.
     site: Optional[str] = None
     # Whether the Discord door belongs on this row. One server, run by the
     # company, so exactly one target carries it.
@@ -120,8 +123,13 @@ TARGETS: List[TargetSpec] = [
     TargetSpec(
         key="liberated-bread",
         name="Liberated Bread",
-        blurb=("The same company as Pigs Can Fly Labs, with its own site "
-               "and its own list. Coming soon."),
+        # No mention of its mailing list here, though there is one (the
+        # "liberatedbread" list seeded by migration 0014). The signup on the
+        # checkout page can reach it, but the /subscribe link in the receipt
+        # forces the everything list, so half the places this blurb renders
+        # could not act on the claim.
+        blurb=("The same company as Pigs Can Fly Labs, with a site of its "
+               "own. Coming soon."),
         prefix="SOCIAL_BREAD_",
         site=LIBERATED_BREAD_URL,
     ),
@@ -150,6 +158,25 @@ def usable_url(raw: str) -> Optional[str]:
     if any(ord(char) < 33 or ord(char) == 127 for char in candidate):
         return None
     return candidate
+
+
+def setting_names() -> List[str]:
+    """Every settings name the rows read, in the order they are read.
+
+    The lookups below build their names by concatenation, which means a typo
+    in a prefix -- or a network added here and not to settings.Base -- is a
+    getattr that finds nothing, an empty string, and a link or a whole row
+    that silently stops rendering on the page and in every receipt. Nothing
+    raises and nothing logs, because a missing account is also what "we do
+    not have one" looks like.
+
+    So the names are enumerable, and a test walks them against settings.Base
+    to turn that silence into a failure. This is also what a test fixture
+    should blank to isolate itself from the shipped values.
+    """
+    return [f"{spec.prefix}{suffix}_URL"
+            for spec in TARGETS
+            for suffix in ["SITE"] + [network[0] for network in NETWORKS]]
 
 
 def target_links(spec: TargetSpec) -> List[SocialLink]:

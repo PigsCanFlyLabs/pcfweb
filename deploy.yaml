@@ -24,6 +24,47 @@ data:
   # both halves and /discord becomes the "e-mail us for an invite" page.
   DISCORD_INVITE_PART_ONE: "https://discord.gg/aVU2"
   DISCORD_INVITE_PART_TWO: "2HAmb"
+  # THE "FOLLOW ALONG" ACCOUNTS on the post-checkout page and in the buyer's
+  # receipt. Three account holders, because "follow us" is three different
+  # asks: Holden writes the books, PCFL publishes them and runs the Discord,
+  # BREAD is Liberated Bread. Every name is listed here because none of them
+  # is set: an account nobody has configured renders as nothing at all, and a
+  # holder with nothing set renders no row -- so this commented block is the
+  # only place the available names are visible. Uncomment and fill in the ones
+  # that exist; adding one is an edit here plus a pod restart, not a rebuild.
+  #
+  # Only https URLs with a host in them render (main/socials.py), so a
+  # half-finished edit costs a link rather than handing a visitor's browser
+  # something unintended. SOCIAL_HOLDEN_YOUTUBE_URL already defaults to the
+  # channel the about page links, so leaving it unset here keeps that.
+  #
+  # These replaced six unprefixed SOCIAL_<NETWORK>_URL names in July 2026 and
+  # do not fall back to them: the old flat list said nothing about whose
+  # account it held, so a fallback would have had to guess, and guessing wrong
+  # publishes the company's account under Holden's name. An unrenamed variable
+  # is simply not read.
+  #
+  # SOCIAL_HOLDEN_SITE_URL: ""
+  # SOCIAL_HOLDEN_MASTODON_URL: ""
+  # SOCIAL_HOLDEN_BLUESKY_URL: ""
+  # SOCIAL_HOLDEN_YOUTUBE_URL: ""
+  # SOCIAL_HOLDEN_TWITCH_URL: ""
+  # SOCIAL_HOLDEN_INSTAGRAM_URL: ""
+  # SOCIAL_HOLDEN_LINKEDIN_URL: ""
+  # SOCIAL_PCFL_SITE_URL: ""        # normally empty: this site is the site
+  # SOCIAL_PCFL_MASTODON_URL: ""
+  # SOCIAL_PCFL_BLUESKY_URL: ""
+  # SOCIAL_PCFL_YOUTUBE_URL: ""
+  # SOCIAL_PCFL_TWITCH_URL: ""
+  # SOCIAL_PCFL_INSTAGRAM_URL: ""
+  # SOCIAL_PCFL_LINKEDIN_URL: ""
+  # SOCIAL_BREAD_SITE_URL: ""       # defaults to www.liberatedbread.com
+  # SOCIAL_BREAD_MASTODON_URL: ""
+  # SOCIAL_BREAD_BLUESKY_URL: ""
+  # SOCIAL_BREAD_YOUTUBE_URL: ""
+  # SOCIAL_BREAD_TWITCH_URL: ""
+  # SOCIAL_BREAD_INSTAGRAM_URL: ""
+  # SOCIAL_BREAD_LINKEDIN_URL: ""
   # OUTBOUND MAIL -- the relay for order notifications, download links, the
   # book-asset audit and Django's 500 reports to ADMINS. These mirror the
   # Prod defaults in pigscanfly/settings.py, and a test pins the two files

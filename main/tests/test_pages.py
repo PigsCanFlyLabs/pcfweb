@@ -10,6 +10,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from main.models import Product
+from main.socials import LIBERATED_BREAD_URL
 from main.tests.base import REPO_ROOT
 
 # An edition ordinal as it appears either in a credential label ("1st and 2nd
@@ -989,7 +990,6 @@ class FamilyPageTest(TestCase):
     """
 
     COMING_SOON_BADGE = ">Coming Soon</span>"
-    LIBERATED_BREAD_URL = "https://www.liberatedbread.com/"
     PROJECT_NAMES = [
         "Pigs Can Fly Labs", "Fight Health Insurance", "Liberated Bread"]
 
@@ -1080,12 +1080,12 @@ class FamilyPageTest(TestCase):
         card = self.get_project_cards()["Liberated Bread"]
         self.assertEqual(
             re.findall(r'<a href="([^"]+)"', card),
-            [self.LIBERATED_BREAD_URL])
+            [LIBERATED_BREAD_URL])
 
     def test_liberated_bread_can_link_while_still_coming_soon(self):
         # URL and coming_soon are independent fields: both can be true at once.
         card = self.get_project_cards()["Liberated Bread"]
-        self.assertIn(f'href="{self.LIBERATED_BREAD_URL}"', card)
+        self.assertIn(f'href="{LIBERATED_BREAD_URL}"', card)
         self.assertIn(self.COMING_SOON_BADGE, card)
 
     def test_family_page_renders_the_family_template(self):

@@ -82,11 +82,6 @@ def over_cache_limit(key: str, limit: int) -> bool:
 # check and the cookie-consent middleware's database query.
 
 
-# Liberated Bread's site is imported above rather than spelled out here: the
-# family page, the homepage card and the post-checkout "follow along" block
-# are the same destination, and a visitor who sees two of them should land in
-# the same place. See main.socials.LIBERATED_BREAD_URL.
-
 # The homepage features this book by title rather than by primary key.
 # Fixture pks are seeded data: stable today, but a reseed or an admin edit can
 # move them, and a hardcoded pk fails *silently* -- it keeps resolving, just to

@@ -2,14 +2,21 @@
 
 Three things happen on the page Stripe sends a buyer back to, and none of
 them may happen *to* the buyer: the mailing list signup is the same double
-opt-in form as everywhere else, the social links are the accounts settings
+opt-in form as everywhere else, the follow block offers the accounts settings
 say we have and no others, and the "what made you buy this?" form writes a
 row only for somebody holding the Stripe session id for a real order.
 
 Most of what is asserted here is therefore an absence -- nothing subscribed,
 no invented link, no note written onto an order the submitter cannot name.
+
+The follow block is offered per account holder, so a second kind of absence
+matters as much: a link must be under the name whose account it is and under
+no other. That is asserted against a slice of the row rather than against
+the whole page, because two of the three names appear elsewhere in the
+markup anyway -- in the footer copyright and in the signup dropdown.
 """
 
+import re
 from unittest import mock
 
 from django.core import mail
@@ -20,23 +27,25 @@ from newsletter.models import Newsletter, Subscription
 
 from main import mailing
 from main.models import Order, Product, PurchaseFeedback
-from main.socials import LIBERATED_BREAD_URL, follow_targets, usable_url
-from main.tests.base import ORDER_TEST_SETTINGS, OrderTestBase, OWNER_EMAIL
+from main.socials import (
+    LIBERATED_BREAD_URL, NETWORKS, TARGETS, follow_targets, setting_names,
+    usable_url)
+from main.tests.base import (
+    ORDER_TEST_SETTINGS, OrderTestBase, OWNER_EMAIL, REPO_ROOT)
 
 
 FEEDBACK_URL = "/checkout/feedback"
 
 YOUTUBE = "https://www.youtube.com/user/holdenkarau"
+PCFL_MASTODON = "https://example.social/@pigscanfly"
 
-# Every account setting the three rows read, all empty. Tests switch on the
-# one or two they are about, so what they assert is the code's behaviour and
-# not today's contents of settings.py.
-NO_SOCIALS = {
-    f"SOCIAL_{who}_{network}_URL": ""
-    for who in ("HOLDEN", "PCFL", "BREAD")
-    for network in ("SITE", "MASTODON", "BLUESKY", "YOUTUBE", "TWITCH",
-                    "INSTAGRAM", "LINKEDIN")
-}
+# Every account setting the rows read, all empty. Tests switch on the one or
+# two they are about, so what they assert is the code's behaviour and not
+# today's contents of settings.py. Derived from the specs rather than typed
+# out: a hand-written list stops blanking a network the day one is added to
+# NETWORKS, and every test here would quietly start reading the real
+# settings.py value for it again -- which is the coupling this exists to cut.
+NO_SOCIALS = {name: "" for name in setting_names()}
 
 # The state the site actually ships in: Holden's YouTube channel, the Discord
 # under the company, Liberated Bread's site, and nothing else configured.
@@ -44,6 +53,12 @@ ONE_SOCIAL = {**NO_SOCIALS, "SOCIAL_HOLDEN_YOUTUBE_URL": YOUTUBE}
 
 
 def targets_by_key(**overrides):
+    """The rows that render under `overrides`, keyed by target key.
+
+    Only the named settings are set; everything else is blanked. A row that
+    was dropped is a missing key here, so a test that expected one fails as a
+    KeyError naming it.
+    """
     with override_settings(**{**NO_SOCIALS, **overrides}):
         return {target.key: target for target in follow_targets()}
 
@@ -131,7 +146,7 @@ class FollowTargetsTest(SimpleTestCase):
         # broken page.
         self.assertNotIn("holden", targets_by_key())
 
-    def test_the_company_always_has_the_discord_and_no_site_of_its_own(self):
+    def test_only_the_company_row_carries_the_discord(self):
         # The server is the company's, so exactly one row carries the door to
         # it -- and it survives having no socials configured, which is the
         # state the site ships in.
@@ -139,12 +154,14 @@ class FollowTargetsTest(SimpleTestCase):
 
         company = targets["pigs-can-fly-labs"]
         self.assertTrue(company.discord)
-        # This site is the company's site; a link from this page back to this
-        # page is not a follow.
-        self.assertIsNone(company.site)
         self.assertFalse(
             any(other.discord for other in targets.values()
                 if other.key != "pigs-can-fly-labs"))
+        # And it is the row that cannot vanish: the company row survives every
+        # account being unset, which is the state the site ships in, because
+        # the Discord flag alone keeps it from being empty.
+        self.assertIsNone(company.site)
+        self.assertEqual(company.links, [])
 
     def test_liberated_bread_points_at_the_same_site_as_everywhere_else(self):
         # The homepage card and the family page link the same constant. Two
@@ -152,7 +169,7 @@ class FollowTargetsTest(SimpleTestCase):
         self.assertEqual(
             targets_by_key()["liberated-bread"].site, LIBERATED_BREAD_URL)
 
-    def test_a_settings_override_can_move_a_site_without_a_rebuild(self):
+    def test_a_settings_value_moves_a_site_link(self):
         targets = targets_by_key(
             SOCIAL_BREAD_SITE_URL="https://bread.example.com/",
             SOCIAL_HOLDEN_SITE_URL="https://holden.example.com/")
@@ -177,6 +194,69 @@ class FollowTargetsTest(SimpleTestCase):
 
         self.assertEqual(
             keys, ["holden", "pigs-can-fly-labs", "liberated-bread"])
+
+    def test_the_links_in_a_row_follow_the_declared_network_order(self):
+        # Not the order settings happen to be read in, and not alphabetical:
+        # NETWORKS is the running order, and a row with several accounts is
+        # where that stops being invisible.
+        targets = targets_by_key(
+            SOCIAL_HOLDEN_LINKEDIN_URL="https://example.com/in",
+            SOCIAL_HOLDEN_MASTODON_URL="https://example.social/@h",
+            SOCIAL_HOLDEN_YOUTUBE_URL=YOUTUBE)
+
+        self.assertEqual([link.label for link in targets["holden"].links],
+                         ["Mastodon", "YouTube", "LinkedIn"])
+
+    def test_every_settings_name_the_rows_read_is_defined(self):
+        """A name built by concatenation that nothing defines is silent.
+
+        follow_targets() reads settings.SOCIAL_<WHO>_<NETWORK>_URL with a
+        getattr default, so a typo in a prefix, a network added to NETWORKS
+        without one in settings.Base, or a settings name misspelt on its own
+        line costs a link -- or, if it is the only one a target has, the
+        whole row -- on the page and in every receipt, with nothing raised
+        and nothing logged. This is the failure.
+        """
+        from pigscanfly.settings import Base
+
+        missing = [name for name in setting_names()
+                   if not hasattr(Base, name)]
+
+        self.assertEqual(missing, [])
+        # And the count is what the two tables say it should be: a target or
+        # a network dropped from the specs would leave settings defining
+        # names nothing reads, which is the same drift the other way.
+        self.assertEqual(len(setting_names()),
+                         len(TARGETS) * (len(NETWORKS) + 1))
+        self.assertEqual(
+            len([name for name in dir(Base) if name.startswith("SOCIAL_")]),
+            len(setting_names()))
+
+    def test_the_manifest_lists_every_name_an_operator_can_set(self):
+        """deploy.yaml is where settings.py sends the reader to set one.
+
+        None of these is set, so there is no key in the ConfigMap to find by
+        grepping for a value -- the commented block is the only place the
+        available names exist for somebody with a Mastodon handle to add. A
+        name added to the code and not to that block is a name nobody knows
+        to set, which is how a configurable account stays unconfigured.
+        """
+        manifest = (REPO_ROOT / "deploy.yaml").read_text()
+
+        missing = [name for name in setting_names() if name not in manifest]
+
+        self.assertEqual(missing, [])
+
+    def test_the_shipped_default_is_the_channel_the_about_page_links(self):
+        # Every other test here overrides it, so the one value that actually
+        # renders in production is otherwise asserted nowhere -- and it is a
+        # link on a page about who wrote the book somebody just bought.
+        from pigscanfly.settings import Base
+
+        self.assertEqual(Base.SOCIAL_HOLDEN_YOUTUBE_URL, YOUTUBE)
+        self.assertIn(
+            YOUTUBE, (REPO_ROOT / "main" / "templates" / "about.html")
+            .read_text())
 
 
 class InterestForProductsTest(OrderTestBase):
@@ -278,6 +358,20 @@ class PostPurchaseBlockTest(OrderTestBase):
         self.assertIn(
             f'name="session_id" value="{order.stripe_session_id}"', html)
 
+    def follow_rows(self, html):
+        """{name: row HTML} for each row of the follow block.
+
+        The rows have to be sliced apart before anything is asserted about
+        them. "Pigs Can Fly Labs" appears in the footer copyright and
+        "Liberated Bread" in the signup dropdown, so asserting either string
+        against the whole page passes with the entire block deleted.
+        """
+        return {
+            match.group(2): match.group(0)
+            for match in re.finditer(
+                r'<div class="follow-target" id="follow-([^"]+)">'
+                r'.*?<h5>(.*?)</h5>.*?</div>', html, re.DOTALL)}
+
     @override_settings(**ONE_SOCIAL)
     def test_the_page_names_who_it_is_offering_to_follow(self):
         # Not one strip of icons: whose account each link is is the whole
@@ -285,12 +379,54 @@ class PostPurchaseBlockTest(OrderTestBase):
         # the bakery, or the other way round.
         html = self.success_page(self.paid_order()).content.decode()
 
-        self.assertIn("Holden", html)
-        self.assertIn("Pigs Can Fly Labs", html)
-        self.assertIn("Liberated Bread", html)
-        self.assertIn(LIBERATED_BREAD_URL, html)
+        self.assertEqual(list(self.follow_rows(html)),
+                         ["Holden", "Pigs Can Fly Labs", "Liberated Bread"])
         # And the list is still the ask underneath all three.
         self.assertIn('action="/mailing-list/subscribe"', html)
+
+    @override_settings(**{**ONE_SOCIAL,
+                          "SOCIAL_PCFL_MASTODON_URL": PCFL_MASTODON})
+    def test_a_link_renders_inside_the_row_whose_account_it_is(self):
+        # The grouping happens in the template, so asserting a URL is
+        # somewhere in the document asserts nothing about it: every link
+        # hoisted into one list would pass that. Each one has to be inside
+        # its own row.
+        rows = self.follow_rows(
+            self.success_page(self.paid_order()).content.decode())
+
+        self.assertIn(YOUTUBE, rows["Holden"])
+        self.assertNotIn(YOUTUBE, rows["Pigs Can Fly Labs"])
+        self.assertIn(PCFL_MASTODON, rows["Pigs Can Fly Labs"])
+        self.assertIn('href="/discord"', rows["Pigs Can Fly Labs"])
+        self.assertNotIn('href="/discord"', rows["Holden"])
+        self.assertIn(LIBERATED_BREAD_URL, rows["Liberated Bread"])
+        self.assertNotIn(LIBERATED_BREAD_URL, rows["Holden"])
+
+    @override_settings(**ONE_SOCIAL)
+    def test_an_outbound_follow_link_carries_the_usual_rel(self):
+        # rel="me" is what Mastodon reads to verify a link back; the other two
+        # are the precautions every target="_blank" link needs.
+        rows = self.follow_rows(
+            self.success_page(self.paid_order()).content.decode())
+
+        self.assertIn(
+            f'<a href="{YOUTUBE}" target="_blank" '
+            f'rel="me noopener noreferrer">',
+            rows["Holden"])
+        # The Discord link is ours and same-origin: no target, no rel.
+        self.assertIn('<a href="/discord">', rows["Pigs Can Fly Labs"])
+
+    @override_settings(**{**ONE_SOCIAL,
+                          "SOCIAL_BREAD_BLUESKY_URL": "https://example.com/b"})
+    def test_a_row_lists_its_site_before_its_accounts(self):
+        # Home first, then everywhere else -- the order the template and the
+        # receipt both use, worth pinning in one of them.
+        rows = self.follow_rows(
+            self.success_page(self.paid_order()).content.decode())
+
+        row = rows["Liberated Bread"]
+        self.assertLess(row.index(LIBERATED_BREAD_URL),
+                        row.index("https://example.com/b"))
 
     @override_settings(**NO_SOCIALS)
     def test_a_name_with_no_accounts_is_absent_rather_than_empty(self):
@@ -298,9 +434,8 @@ class PostPurchaseBlockTest(OrderTestBase):
         # rows that have somewhere to go stay.
         html = self.success_page(self.paid_order()).content.decode()
 
-        self.assertNotIn("<h5>Holden</h5>", html)
-        self.assertIn("<h5>Pigs Can Fly Labs</h5>", html)
-        self.assertIn("<h5>Liberated Bread</h5>", html)
+        self.assertEqual(list(self.follow_rows(html)),
+                         ["Pigs Can Fly Labs", "Liberated Bread"])
         self.assertIn('href="/discord"', html)
 
     def test_the_signup_box_starts_on_the_address_the_receipt_went_to(self):
@@ -617,29 +752,56 @@ class ReceiptStayInTouchTest(OrderTestBase):
         self.assertIn(YOUTUBE, body)
         self.assertIn("what made you buy this?", body)
 
-    @override_settings(**ONE_SOCIAL)
+    def receipt_rows(self, body):
+        """{name: [lines under it]} for the follow block of a receipt.
+
+        Sliced apart for the same reason the page's rows are: "heading X
+        appears before link Y" is satisfied by every link in the mail so long
+        as the first heading is first, so it cannot tell a correctly grouped
+        receipt from one that filed Holden's channel under the bakery. The
+        indent is the structure -- a heading is flush left, its links are
+        indented under it.
+        """
+        rows, current = {}, None
+        for line in body.splitlines():
+            if line.startswith("  ") and current is not None:
+                rows[current].append(line.strip())
+            elif line.strip() in [target.name for target in TARGETS]:
+                current = line.strip()
+                rows[current] = []
+        return rows
+
+    @override_settings(**{**ONE_SOCIAL,
+                          "SOCIAL_BREAD_BLUESKY_URL": "https://example.com/b"})
     def test_the_receipt_says_whose_account_each_link_is(self):
         # The same grouping as the page, for the buyer who closed the tab:
         # a bare list of URLs in a receipt does not say who is at the end of
         # each one.
+        rows = self.receipt_rows(self.paid_order().receipt_body())
+
+        self.assertEqual(
+            rows,
+            {"Holden": [f"YouTube: {YOUTUBE}"],
+             "Pigs Can Fly Labs": [
+                 "Discord: https://www.pigscanfly.ca/discord"],
+             "Liberated Bread": [f"Website: {LIBERATED_BREAD_URL}",
+                                 "Bluesky: https://example.com/b"]})
+
+    @override_settings(**ONE_SOCIAL)
+    def test_the_receipt_carries_the_names_without_the_sales_copy(self):
+        # The blurbs are copy for a page somebody chose to be on. A receipt
+        # earns its place in an inbox by being a receipt.
         body = self.paid_order().receipt_body()
 
-        self.assertIn(f"  YouTube: {YOUTUBE}", body)
-        self.assertIn("  Discord: https://www.pigscanfly.ca/discord", body)
-        self.assertIn(f"  Website: {LIBERATED_BREAD_URL}", body)
-        self.assertLess(body.index("Holden:"), body.index("YouTube:"))
-        self.assertLess(body.index("Pigs Can Fly Labs:"),
-                        body.index("Discord:"))
-        self.assertLess(body.index("Liberated Bread:"),
-                        body.index("Website:"))
+        self.assertIn("\nHolden\n", body)
+        for target in TARGETS:
+            self.assertNotIn(target.blurb, body)
 
     @override_settings(**NO_SOCIALS)
     def test_a_receipt_carries_no_heading_for_a_name_with_no_links(self):
-        body = self.paid_order().receipt_body()
+        rows = self.receipt_rows(self.paid_order().receipt_body())
 
-        self.assertNotIn("Holden:", body)
-        self.assertIn("Pigs Can Fly Labs:", body)
-        self.assertIn("Liberated Bread:", body)
+        self.assertEqual(list(rows), ["Pigs Can Fly Labs", "Liberated Bread"])
 
     def test_the_receipt_still_says_what_went_wrong_first(self):
         # The asks go last. A receipt is a receipt.

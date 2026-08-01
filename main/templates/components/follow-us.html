@@ -17,15 +17,20 @@ Pigs Can Fly Labs because that is whose server it is.
     <h4>Follow along</h4>
     <p>Where the next book, the next edition and the occasional half-finished
         idea show up first. Pick whichever of us you actually want to hear
-        from &mdash; and the mailing list below is the one that comes to you.</p>
+        from &mdash; or the mailing list, which comes to you instead.</p>
     {% for target in follow_targets %}
-    <div class="follow-target">
+    {# The id is the target's key: an anchor somewhere else on the site can #}
+    {# point at one of these rows, and it is the hook to style one          #}
+    {# differently without matching on its position.                        #}
+    <div class="follow-target" id="follow-{{ target.key }}">
         <h5>{{ target.name }}</h5>
         <p class="follow-target-blurb">{{ target.blurb }}</p>
         <ul class="follow-us-list">
             {% if target.site %}
             <li>
-                <a href="{{ target.site }}" target="_blank" rel="noopener noreferrer">
+                {# rel="me" here too: these are our own sites, and it is the #}
+                {# link back that verifies the Mastodon account below it.    #}
+                <a href="{{ target.site }}" target="_blank" rel="me noopener noreferrer">
                     <i class="fa fa-link" aria-hidden="true"></i> Website
                 </a>
             </li>
