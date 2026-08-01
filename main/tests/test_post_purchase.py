@@ -125,7 +125,7 @@ class FollowTargetsTest(SimpleTestCase):
     def test_each_row_only_carries_its_own_accounts(self):
         targets = targets_by_key(
             SOCIAL_HOLDEN_YOUTUBE_URL=YOUTUBE,
-            SOCIAL_PCFL_MASTODON_URL="https://example.social/@pigscanfly",
+            SOCIAL_PCFL_MASTODON_URL=PCFL_MASTODON,
             SOCIAL_BREAD_INSTAGRAM_URL="https://example.com/liberatedbread")
 
         self.assertEqual(
@@ -134,7 +134,7 @@ class FollowTargetsTest(SimpleTestCase):
         self.assertEqual(
             [(link.label, link.url)
              for link in targets["pigs-can-fly-labs"].links],
-            [("Mastodon", "https://example.social/@pigscanfly")])
+            [("Mastodon", PCFL_MASTODON)])
         self.assertEqual(
             [(link.label, link.url)
              for link in targets["liberated-bread"].links],

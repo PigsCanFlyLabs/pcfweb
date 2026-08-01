@@ -1876,7 +1876,7 @@ class Order(models.Model):
             # does the job the name is here for -- saying whose account the
             # URL under it is, which a flat list of links cannot.
             lines.append("")
-            lines.append(f"{target.name}")
+            lines.append(target.name)
             if target.site:
                 lines.append(f"  Website: {target.site}")
             if target.discord:

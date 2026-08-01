@@ -28,8 +28,9 @@ Pigs Can Fly Labs because that is whose server it is.
         <ul class="follow-us-list">
             {% if target.site %}
             <li>
-                {# rel="me" here too: these are our own sites, and it is the #}
-                {# link back that verifies the Mastodon account below it.    #}
+                {# rel="me" here too: it claims the site is ours, which it  #}
+                {# is -- the same claim the account links below make -- and #}
+                {# the other two are the usual target="_blank" precautions. #}
                 <a href="{{ target.site }}" target="_blank" rel="me noopener noreferrer">
                     <i class="fa fa-link" aria-hidden="true"></i> Website
                 </a>
