@@ -1,11 +1,16 @@
 {% comment %}
-The "now what?" block under a finished order: join the list, follow us
-somewhere, tell us why you bought this.
+The "now what?" block under a finished order: follow whichever of us you
+came for, tell us why you bought this, join the list. Those three and no
+more.
 
-Three asks and no more, in the order of what they cost the person reading.
-Every one of them is opt-in on this page and nowhere else: the signup is the
-same double opt-in form as the rest of the site, because having bought
-something is not consent to be mailed about the next thing.
+"Follow us" is itself three offers, not one -- Holden, Pigs Can Fly Labs
+and Liberated Bread are three different things to want -- so follow-us.html
+gives each of them its own row rather than pouring them into one strip of
+icons. The mailing list signup sits under all three.
+
+Every ask is opt-in on this page and nowhere else: the signup is the same
+double opt-in form as the rest of the site, because having bought something
+is not consent to be mailed about the next thing.
 
 Context comes from main.views.post_purchase_context, which both the success
 page and the feedback thank-you page fill in -- somebody who answered one

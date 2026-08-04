@@ -1,9 +1,19 @@
-"""The "follow us" links, as data rather than as markup.
+"""Who to follow, as data rather than as markup.
 
-One list, read from settings, so the checkout success page and the buyer's
-receipt advertise the same accounts. A network we do not have an account on
-is simply unset -- there is no placeholder URL to be found and clicked, and
-nothing here invents a handle from the site's name.
+There are three names on the receipt for what is really one and a half
+companies, and "follow us" is ambiguous across them: Holden writes the books,
+Pigs Can Fly Labs publishes them and runs the Discord, and Liberated Bread is
+the same company as Pigs Can Fly Labs under its own name and its own site.
+Somebody who just bought a book may want any one of those and not the other
+two, so each gets its own row rather than everything being poured into one
+list of icons.
+
+Every account is read from settings -- one variable per follower target per
+network -- so the checkout success page and the buyer's receipt advertise the
+same accounts. A network we do not have an account on is simply unset: there
+is no placeholder URL to be found and clicked, and nothing here invents a
+handle from a name. A target with nothing configured at all does not render
+as an empty box; it is dropped.
 
 Every URL is checked before it renders: an https URL to a real host or
 nothing at all. That is not paranoia about our own ConfigMap so much as the
@@ -11,11 +21,19 @@ same rule /discord already follows -- a half-edited or typo'd value must
 drop the link rather than hand `javascript:...` to a visitor's browser.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
 from django.conf import settings
+
+
+# Liberated Bread's site. It lives here rather than next to the homepage view
+# because the checkout page needs it too, and views.py already imports this
+# module -- one constant, so the homepage card, the family page and the
+# "follow along" block cannot drift into pointing at different places.
+# Note this currently serves a domain-parking page; the owner knows.
+LIBERATED_BREAD_URL = "https://www.liberatedbread.com/"
 
 
 @dataclass(frozen=True)
@@ -25,22 +43,96 @@ class SocialLink:
     label: str
     url: str
     # A Font Awesome 4 class, which is the icon set the vendored theme ships
-    # (see main/static/assets/css/font-awesome.css). It has no Discord or
-    # Mastodon glyph, hence the generic ones below: a missing icon renders as
-    # a blank square, which looks like a broken page rather than a link.
+    # (see main/static/assets/css/font-awesome.css). It has no Mastodon glyph
+    # -- nor a Discord one, for the link follow-us.html adds -- hence the
+    # generic fa-globe and fa-comments: a missing icon renders as a blank
+    # square, which looks like a broken page rather than a link.
     icon: str
 
 
-# (settings name, label, icon), in the order they render. Adding a network is
-# a line here plus a default in settings.Base; the setting being empty is the
-# normal state for most of them.
+@dataclass(frozen=True)
+class FollowTarget:
+    """One of us, and everywhere that one of us can be followed."""
+
+    key: str
+    name: str
+    blurb: str
+    # Its own site, where it has one that is not this one. Normally None for
+    # Pigs Can Fly Labs, whose site is the one this renders on -- but that is
+    # settings.SOCIAL_PCFL_SITE_URL being empty rather than anything here
+    # enforcing it, and a row will happily render a site if one is set.
+    site: Optional[str] = None
+    # Whether the Discord door belongs on this row. One server, run by the
+    # company, so exactly one target carries it.
+    discord: bool = False
+    links: List[SocialLink] = field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        """Nothing configured, so nothing to render but a heading."""
+        return not self.links and not self.site and not self.discord
+
+
+@dataclass(frozen=True)
+class TargetSpec:
+    """The definition of a follow target: who, and which settings say where."""
+
+    key: str
+    name: str
+    blurb: str
+    # Settings prefix. The account on network X is `<prefix><X>_URL`, and this
+    # target's own site is `<prefix>SITE_URL`.
+    prefix: str
+    site: Optional[str] = None
+    discord: bool = False
+
+
+# (settings suffix, label, icon), in the order they render within a target.
+# Adding a network is a line here plus one default per target in
+# settings.Base; the setting being empty is the normal state for most of them.
 NETWORKS: List[Tuple[str, str, str]] = [
-    ("SOCIAL_MASTODON_URL", "Mastodon", "fa-globe"),
-    ("SOCIAL_BLUESKY_URL", "Bluesky", "fa-cloud"),
-    ("SOCIAL_YOUTUBE_URL", "YouTube", "fa-youtube-play"),
-    ("SOCIAL_TWITCH_URL", "Twitch", "fa-twitch"),
-    ("SOCIAL_INSTAGRAM_URL", "Instagram", "fa-instagram"),
-    ("SOCIAL_LINKEDIN_URL", "LinkedIn", "fa-linkedin"),
+    ("MASTODON", "Mastodon", "fa-globe"),
+    ("BLUESKY", "Bluesky", "fa-cloud"),
+    ("YOUTUBE", "YouTube", "fa-youtube-play"),
+    ("TWITCH", "Twitch", "fa-twitch"),
+    ("INSTAGRAM", "Instagram", "fa-instagram"),
+    ("LINKEDIN", "LinkedIn", "fa-linkedin"),
+]
+
+
+# In the order they render. Holden first: somebody who just bought a book
+# bought something Holden wrote, and the publisher is the more abstract of
+# the two. Liberated Bread last because it is the one a book buyer is least
+# likely to have come for.
+TARGETS: List[TargetSpec] = [
+    TargetSpec(
+        key="holden",
+        name="Holden",
+        blurb=("Writes the books, and shows some of the writing while it "
+               "is still being done."),
+        prefix="SOCIAL_HOLDEN_",
+    ),
+    TargetSpec(
+        key="pigs-can-fly-labs",
+        name="Pigs Can Fly Labs",
+        blurb=("New books, new editions, and the Discord where they get "
+               "argued about first."),
+        prefix="SOCIAL_PCFL_",
+        discord=True,
+    ),
+    TargetSpec(
+        key="liberated-bread",
+        name="Liberated Bread",
+        # No mention of its mailing list here, though there is one (the
+        # "liberatedbread" list seeded by migration 0014). The signup on the
+        # checkout page can reach it, but the /subscribe link in the receipt
+        # forces the everything list, so half the places this blurb renders
+        # could not act on the claim.
+        blurb=("The same company as Pigs Can Fly Labs, with a site of its "
+               "own. Coming soon."),
+        prefix="SOCIAL_BREAD_",
+        site=LIBERATED_BREAD_URL,
+    ),
 ]
 
 
@@ -68,11 +160,59 @@ def usable_url(raw: str) -> Optional[str]:
     return candidate
 
 
-def social_links() -> List[SocialLink]:
-    """The accounts to advertise, skipping the ones that are not configured."""
+def setting_names() -> List[str]:
+    """Every settings name the rows read, in the order they are read.
+
+    The lookups below build their names by concatenation, which means a typo
+    in a prefix -- or a network added here and not to settings.Base -- is a
+    getattr that finds nothing, an empty string, and a link or a whole row
+    that silently stops rendering on the page and in every receipt. Nothing
+    raises and nothing logs, because a missing account is also what "we do
+    not have one" looks like.
+
+    So the names are enumerable, and a test walks them against settings.Base
+    to turn that silence into a failure. This is also what a test fixture
+    should blank to isolate itself from the shipped values.
+    """
+    return [f"{spec.prefix}{suffix}_URL"
+            for spec in TARGETS
+            for suffix in ["SITE"] + [network[0] for network in NETWORKS]]
+
+
+def target_links(spec: TargetSpec) -> List[SocialLink]:
+    """The accounts configured for one target, skipping the unset ones."""
     links = []
-    for setting_name, label, icon in NETWORKS:
-        url = usable_url(getattr(settings, setting_name, ""))
+    for suffix, label, icon in NETWORKS:
+        url = usable_url(getattr(settings, f"{spec.prefix}{suffix}_URL", ""))
         if url is not None:
             links.append(SocialLink(label=label, url=url, icon=icon))
     return links
+
+
+def follow_targets() -> List[FollowTarget]:
+    """Everyone worth following, skipping anyone with nowhere to be followed.
+
+    The empty case is real and is not an error: a target whose accounts are
+    all unset renders as nothing rather than as a name with a blank space
+    under it.
+    """
+    targets = []
+    for spec in TARGETS:
+        # A settings override wins over the built-in site so the URL can be
+        # corrected without a rebuild, exactly like the accounts. It goes
+        # through usable_url too: a typo'd override drops back to nothing,
+        # not to a link into the unknown.
+        site = usable_url(getattr(settings, f"{spec.prefix}SITE_URL", ""))
+        if site is None and spec.site is not None:
+            site = usable_url(spec.site)
+        target = FollowTarget(
+            key=spec.key,
+            name=spec.name,
+            blurb=spec.blurb,
+            site=site,
+            discord=spec.discord,
+            links=target_links(spec),
+        )
+        if not target.is_empty:
+            targets.append(target)
+    return targets

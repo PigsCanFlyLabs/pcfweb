@@ -45,7 +45,7 @@ from main.models import (
     SuppressedAddress, normalize_email_identity, parse_pwyw_amount,
     send_batch_size)
 from main.payments import Payments
-from main.socials import social_links
+from main.socials import LIBERATED_BREAD_URL, follow_targets
 from main.utils import (
     generate_username, get_country_code, get_storable_client_ip)
 from pigscanfly.hostnames import ascii_lowercase
@@ -81,12 +81,6 @@ def over_cache_limit(key: str, limit: int) -> bool:
 # view here, so it can answer ahead of the HTTPS redirect, the ALLOWED_HOSTS
 # check and the cookie-consent middleware's database query.
 
-
-# Liberated Bread's site, linked from both the family page and the homepage
-# card. One constant so the two cannot drift apart -- they are the same
-# destination and a visitor who sees both should land in the same place.
-# Note this currently serves a domain-parking page; the owner knows.
-LIBERATED_BREAD_URL = "https://www.liberatedbread.com/"
 
 # The homepage features this book by title rather than by primary key.
 # Fixture pks are seeded data: stable today, but a reseed or an admin edit can
@@ -1261,7 +1255,10 @@ def post_purchase_context(request, order: Optional[Order]) -> Dict[str, Any]:
         # form field: it is not submitted, and not subscribed, unless they
         # press the button.
         'signup_email': order.customer_email if order is not None else '',
-        'social_links': social_links(),
+        # Three rows, not one list of icons: Holden, the company, and
+        # Liberated Bread are three different things to follow and a book
+        # buyer may want any one of them without the others.
+        'follow_targets': follow_targets(),
         # The feedback form needs an order to attach an answer to, and the
         # session id is how it names one (see PurchaseFeedbackView). No order
         # -- somebody who reached this page without one -- means no form.
