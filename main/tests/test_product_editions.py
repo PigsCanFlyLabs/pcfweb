@@ -561,10 +561,19 @@ class EbookCrossLinkSafetyTest(ProductFactoryMixin, TestCase):
             response, escape(Product.EBOOK_CROSS_LINK_PREFIX))
 
     def test_ebook_cross_links_stay_out_of_get_alt_links(self):
-        """get_alt_links() is the retailer list, and test_dc4k asserts it is
-        empty for these three rows because no retailer stocks them. An
-        on-site cross-link is not a retailer claim and must not leak in."""
-        self.assertEqual(self.print_product.get_alt_links(), [])
+        """get_alt_links() is the retailer list -- since the Amazon launch it
+        genuinely has an entry for this row, pinned exactly in test_dc4k. An
+        on-site cross-link is not a retailer claim and must not leak in: no
+        alt link may carry the cross-link label or point back on-site."""
+        links = self.print_product.get_alt_links()
+
+        # Anti-vacuity: the row does have a retailer link now, so the checks
+        # below are about real entries rather than an empty list.
+        self.assertNotEqual(links, [])
+        for label, url in links:
+            with self.subTest(label=label):
+                self.assertNotIn(Product.EBOOK_CROSS_LINK_PREFIX, label)
+                self.assertFalse(url.startswith("/product/"), url)
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,8 @@ because these values are easy to confuse, expensive to get wrong, and impossible
 re-derive from memory later. If you are about to fill in a blank field, read this
 first — several blanks are deliberate.
 
-Verified 2026-07-26.
+Verified 2026-07-26. DC4K launch state (pks 104-106) re-verified 2026-08-01,
+when the book went live on Amazon.
 
 ## The four identifier namespaces are not interchangeable
 
@@ -41,37 +42,33 @@ them. If you have an O'Reilly author account, one look at a catalogue page settl
 runs under `set -euo pipefail`, that stops the primary pod booting. `stock` in particular
 must stay protected — a deployment resetting inventory is a production incident.
 
-`ebook_asin` **was** in that protected set and is being moved out by PR #44, so the
-verified Kindle ASINs ship in the fixture rather than being typed into the admin. Until
-#44 merges the old rule still holds and a fixture carrying `ebook_asin` will stop the
-pod booting. After it merges the ownership rule is asymmetric, and the asymmetry is the
-whole point:
+`ebook_asin` **was** in that protected set until PR #44 moved it out, so the verified
+Kindle ASINs ship in the fixture rather than being typed into the admin. The ownership
+rule is asymmetric, and the asymmetry is the whole point:
 
-- On a row where the fixture **sets** `ebook_asin` (pks 100, 102, 103), the fixture wins:
-  an ASIN edited in the Django admin is **overwritten on every primary deployment**.
-  Change those values by PR, not by admin.
-- On a row where the fixture **omits** `ebook_asin` (pks 101, 104–107), the admin wins:
-  `seed_products` calls `.update(**fixture_fields)` with only the keys present in the
-  YAML, so an omitted key never reaches SQL and an admin-entered value survives
+- On a row where the fixture **sets** `ebook_asin` (pks 100, 102, 103, 106, 108), the
+  fixture wins: an ASIN edited in the Django admin is **overwritten on every primary
+  deployment**. Change those values by PR, not by admin.
+- On a row where the fixture **omits** `ebook_asin` (pks 101, 104, 105, 107), the admin
+  wins: `seed_products` calls `.update(**fixture_fields)` with only the keys present in
+  the YAML, so an omitted key never reaches SQL and an admin-entered value survives
   redeployment. This is why pk 101's blank is a deliberate choice rather than a value
   waiting to be wiped.
 
 ## Current state
 
-**Not all of this is live on `main` today, and the table would be a lie if it did not
-say so.** As of this writing `main` carries **no** `ebook_isbn` for pks 100-103 and
-**no** `ebook_asin` for any row at all.
+Both columns are shipped fixture state now: PR #40 landed the retail EPUB ISBNs and
+PR #44 landed the fixture-owned ASINs, so `seed_products` writes everything in the
+table below onto a clean database, `/book/<ebook-isbn>` resolves for every row with an
+`ebook_isbn`, and the "Buy on Amazon (ebook)" button renders wherever an `ebook_asin`
+is set. The table is both *what each identifier is* and *what a freshly seeded
+database contains*.
 
-- The `ebook_isbn` column becomes shipped state when PR #40 (`feat/ebook-isbns`) merges.
-  Until then `/book/<ebook-isbn>` returns **404** for pks 100-103, because the value is
-  simply not in the fixture that `seed_products` reads on a clean database.
-- The `ebook_asin` column is **verified data, not shipped state**. No `ebook_asin` has
-  ever been set on any row; the values below are the outcome of sourcing work and take
-  effect only once they are actually stored (see "Where values may be stored" above).
-  Until then no "Buy on Amazon (ebook)" button renders for any product.
-
-Treat the table as *what each identifier is*, not as *what the database currently
-contains*.
+Rows added since the original sourcing pass: pk 108 (High Performance Spark 2nd ed.)
+arrived with its Kindle ASIN, and pk 106 gained its ASIN when DC4K launched on Amazon
+in late July 2026 (verified 2026-08-01 from the Kindle listing's own page, with the
+paperback listing's format swatch confirming edition linkage — see the fixture
+comments on pks 104-106).
 
 | pk | Title | `ebook_isbn` | `ebook_asin` | Bookshop e-book |
 |---|---|---|---|---|
@@ -81,8 +78,9 @@ contains*.
 | 103 | Scaling Python with Ray | `9781098118761` | `B0BNM6PQ9Q` | yes, DRM-free |
 | 104 | DC4K, print | **blank by design** | none | not listed |
 | 105 | DC4K, Executive Edition | **blank by design** | none | not listed |
-| 106 | DC4K, e-book | `9781960595980` | none | not listed |
+| 106 | DC4K, e-book | `9781960595980` | `B0HC5Y42R2` | not listed |
 | 107 | Fast Data Processing with Spark | **blank — not found** | none | not listed |
+| 108 | High Performance Spark, 2nd ed. | **blank — not found** | `B0H3CMNN3Q` | unverifiable (bot wall) |
 
 ## The deliberate blanks — do not "fix" these
 
@@ -112,7 +110,17 @@ linking it from a 1st-edition listing would misrepresent the product.
 
 **pks 104 and 105 are print-only by owner decision**, not by omission. There is no
 separate Executive Edition e-book; buyers who want more are expected to pay what they
-want. Do not borrow pk 106's ISBN for them.
+want. Do not borrow pk 106's ISBN for them — and do not give either of them pk 106's
+Kindle ASIN, which belongs to the e-book row alone.
+
+Two DC4K launch facts sit adjacent to this doc's scope and are recorded here so
+nobody "completes" them wrongly: pk 104's `amazon_link` points at Amazon's paperback
+listing, whose print run carries **Amazon's own ISBN-13, 9781960595010** — that number
+must never enter `print_isbn`, `ebook_isbn`, or any other identifier field here (it
+would become the row's GTIN and misidentify the direct-sold edition). And pk 105 has
+**no Amazon listing at all, checked on 2026-08-01**: the Executive Edition is the
+direct-store exclusive, so its absence from Amazon is the product working, not a link
+waiting to be sourced.
 
 **pk 107 has no e-book ISBN that anyone can vouch for.** The only value in circulation,
 `9781782167075`, appears solely on Goodreads and is the print ISBN `9781782167068` with

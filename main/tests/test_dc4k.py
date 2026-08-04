@@ -490,15 +490,32 @@ class DistributedComputing4KidsCatalogTest(TestCase):
         self.assertContains(response, "Pay what you want")
         self.assertContains(response, "12.99")
 
-    def test_no_retailer_links_are_claimed_yet(self):
-        # Every alt link is driven by a field the fixture leaves unset:
-        # amazon_link, bookshop_link and the rest are stored URLs, not
-        # anything derived from the ISBN, so giving 104 an ISBN must not
-        # conjure a retailer that does not stock the book.
-        for pk in (104, 105, EBOOK_PK):
-            with self.subTest(pk=pk):
-                self.assertEqual(
-                    Product.objects.get(pk=pk).get_alt_links(), [])
+    def test_the_retailer_links_claim_exactly_the_live_amazon_listings(self):
+        # Every alt link is a stored URL, never derived from an ISBN, so each
+        # SKU claims exactly what was verified against Amazon on 2026-08-01
+        # (the fixture comments carry the verification detail). Pinned as
+        # whole lists, not membership checks, so an unverified retailer
+        # sneaking onto any of the three rows fails here.
+        #
+        # The standard paperback links its Amazon print listing. Amazon's
+        # print run has its own ISBN, so the /dp/ id is not this row's
+        # ISBN-10 -- see the fixture before "fixing" it.
+        self.assertEqual(
+            Product.objects.get(pk=104).get_alt_links(),
+            [("Buy on Amazon (print)",
+              "https://www.amazon.com/dp/1960595016")])
+
+        # The Executive Edition is the direct-sales exclusive and is not on
+        # Amazon. The empty list is the exclusivity holding, not a link
+        # someone forgot -- there is nowhere else to buy this SKU, which is
+        # what the extra $14.42 buys into.
+        self.assertEqual(Product.objects.get(pk=105).get_alt_links(), [])
+
+        # The e-book links its Kindle listing under the storefront label.
+        self.assertEqual(
+            Product.objects.get(pk=EBOOK_PK).get_alt_links(),
+            [(Product.AMAZON_EBOOK_LABEL,
+              "https://www.amazon.com/dp/B0HC5Y42R2")])
 
 
 class OReillySafariLinkTest(TestCase):
