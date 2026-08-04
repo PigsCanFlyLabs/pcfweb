@@ -34,7 +34,10 @@
 		  {# Ticked by default: "everything" has to be something they can #}
 		  {# see and untick, not something we add on their behalf.        #}
 		  {% if forced_interest != 'all' %}
-		  <label for="id_all_updates">
+		  {# The all-updates class returns the checkbox to its natural size #}
+		  {# and lines it up with its words -- the generic .subscribe form  #}
+		  {# input rule otherwise stretches it into a full-width text box.  #}
+		  <label for="id_all_updates" class="all-updates">
 		    <input type="checkbox" name="all_updates" value="1" id="id_all_updates" checked>
 		    Send me all updates, not just this one
 		  </label>

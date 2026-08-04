@@ -1471,6 +1471,30 @@ Subscribe
     border-radius: 0px;
 }
 
+/* The input rule above is shaped for the text boxes. On the all-updates
+   checkbox it meant a tick box stretched across the whole row, 44 pixels
+   tall, with the label text wrapped around it. Put the box back at its
+   natural size and lay the label out as the one inline row the checkbox
+   and its words belong to. */
+.subscribe form input[type="checkbox"] {
+    width: auto;
+    height: auto;
+    line-height: normal;
+    margin: 0;
+    accent-color: #2a2a2a;
+}
+
+.subscribe form label.all-updates {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0;
+    font-size: 14px;
+    font-weight: 500;
+    color: #2a2a2a;
+    cursor: pointer;
+}
+
 .main-dark-button {
     height: 44px;
     display: inline-block;

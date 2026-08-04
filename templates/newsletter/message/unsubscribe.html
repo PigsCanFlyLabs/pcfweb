@@ -1,0 +1,23 @@
+{% comment %}
+Overrides django-newsletter's newsletter/message/unsubscribe.html for the
+same reason as subscribe.html beside this file: the packaged version is
+plain text in a bare <body>, so it rendered as one run-on line with the
+activation URL fused into the sign-off, and the URL was never an <a>.
+Same wording as the package's text part, in actual markup.
+{% endcomment %}<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Unsubscription from {{ newsletter.title }}</title>
+</head>
+<body>
+    <p>Dear {{ subscription.name|default:"Sir/Madam" }},</p>
+    <p>you, or someone in your name requested unsubscription from
+        {{ newsletter.title }}.</p>
+    <p>If you would like to confirm your unsubscription, please follow this
+        activation link:<br>
+        <a href="{{ site_url }}{{ subscription.unsubscribe_activate_url }}">{{ site_url }}{{ subscription.unsubscribe_activate_url }}</a></p>
+    <p>Kind regards,<br>
+        {{ newsletter.sender }}</p>
+</body>
+</html>

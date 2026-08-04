@@ -13,10 +13,14 @@ somebody off the list.
 import io
 import json
 import re
+from importlib import import_module
 from unittest import mock
 from urllib.parse import urlparse
 
+from django.apps import apps as django_apps
+from django.conf import settings
 from django.contrib.auth.models import User
+from django.contrib.sites.models import Site
 from django.core import mail
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
@@ -251,6 +255,117 @@ class SignupTest(MailingListTestBase):
         # Nothing is written either: the check runs before the row is created,
         # so a flood cannot fill the table on the way to being refused.
         self.assertEqual(Subscription.objects.count(), 2)
+
+
+class ActivationEmailTest(MailingListTestBase):
+    """What actually lands in the inbox when somebody signs up.
+
+    The double opt-in flow is django-newsletter's, but the email is built
+    from our sites-framework row and our template overrides, and both have
+    broken in production: the Site row still carried contrib.sites'
+    example.com default, so every activation link pointed off-site (see
+    migration 0024); and the package's HTML alternative is its text template
+    pasted into a bare <body>, which mail clients collapse into one run-on
+    line -- the URL fused straight into the "Kind regards," after it, so
+    what people followed had the sign-off inside it and 404ed.
+    """
+
+    def activation_email(self):
+        self.signup(email="reader@example.com", interest="dc4k")
+        [message] = mail.outbox
+        return message, Subscription.objects.get()
+
+    def emailed_link(self, message):
+        """The activation link, exactly as the text part carries it."""
+        links = [line for line in message.body.splitlines()
+                 if line.startswith("http")]
+        # One link, on a line of its own. A link with prose on the same line
+        # is how "Kind regards" ended up inside the URL people followed.
+        self.assertEqual(len(links), 1)
+        return links[0]
+
+    def test_the_link_is_ours_and_stands_alone(self):
+        message, subscription = self.activation_email()
+
+        self.assertEqual(
+            self.emailed_link(message),
+            "https://www.pigscanfly.ca"
+            + subscription.subscribe_activate_url())
+
+    def test_the_emailed_link_is_a_page_that_loads(self):
+        # The path segment of the emailed link, byte for byte -- not a
+        # reconstruction. The subject line of this test is the 404.
+        message, _subscription = self.activation_email()
+        path = urlparse(self.emailed_link(message)).path
+
+        self.assertEqual(resolve(path).url_name, "newsletter_update_activate")
+        self.assertEqual(self.client.get(path).status_code, 200)
+
+    def test_the_html_part_wraps_the_link_in_a_real_anchor(self):
+        message, subscription = self.activation_email()
+        link = ("https://www.pigscanfly.ca"
+                + subscription.subscribe_activate_url())
+
+        [(html, mimetype)] = message.alternatives
+        self.assertEqual(mimetype, "text/html")
+        # An <a> has explicit edges; bare text in HTML leaves the link's
+        # boundaries to whatever the mail client guesses.
+        self.assertIn('<a href="{0}">{0}</a>'.format(link), html)
+
+
+class SiteDomainMigrationTest(TestCase):
+    """Migration 0024: repairing the example.com the database was born with.
+
+    contrib.sites seeded example.com on any database that migrated before
+    0014 existed -- production -- and django-newsletter builds activation
+    links off that row. The migration flips the untouched default to
+    SITE_BASE_URL's host and touches nothing anybody chose on purpose.
+    """
+
+    def setUp(self):
+        # get_current() caches the row per process; a test that rewrites it
+        # must not leave its version behind for whoever runs next.
+        self.addCleanup(Site.objects.clear_cache)
+
+    def forward(self):
+        migration = import_module(
+            "main.migrations.0024_fix_default_site_domain")
+        migration.point_site_at_our_domain(django_apps, None)
+
+    def test_the_untouched_default_is_pointed_at_us(self):
+        Site.objects.filter(pk=settings.SITE_ID).update(
+            domain="example.com", name="example.com")
+        Site.objects.clear_cache()
+
+        self.forward()
+
+        site = Site.objects.get(pk=settings.SITE_ID)
+        self.assertEqual(site.domain, "www.pigscanfly.ca")
+        self.assertEqual(site.name, "Pigs Can Fly Labs")
+
+    def test_a_hand_fixed_domain_is_left_alone(self):
+        Site.objects.filter(pk=settings.SITE_ID).update(
+            domain="pigs.example.org", name="Somebody's choice")
+        Site.objects.clear_cache()
+
+        self.forward()
+
+        site = Site.objects.get(pk=settings.SITE_ID)
+        self.assertEqual(site.domain, "pigs.example.org")
+        self.assertEqual(site.name, "Somebody's choice")
+
+    def test_a_hand_picked_name_survives_the_domain_repair(self):
+        # The name guard is separate from the domain guard: fixing the
+        # domain must not cost somebody the name they typed into the admin.
+        Site.objects.filter(pk=settings.SITE_ID).update(
+            domain="example.com", name="Kept name")
+        Site.objects.clear_cache()
+
+        self.forward()
+
+        site = Site.objects.get(pk=settings.SITE_ID)
+        self.assertEqual(site.domain, "www.pigscanfly.ca")
+        self.assertEqual(site.name, "Kept name")
 
 
 class EverythingCheckboxTest(MailingListTestBase):
