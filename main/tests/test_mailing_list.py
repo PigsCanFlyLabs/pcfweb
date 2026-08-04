@@ -367,6 +367,30 @@ class SiteDomainMigrationTest(TestCase):
         self.assertEqual(site.domain, "www.pigscanfly.ca")
         self.assertEqual(site.name, "Kept name")
 
+    def test_a_hand_made_duplicate_of_our_domain_is_folded_in(self):
+        # Somebody repairing this by hand may have added a second row with
+        # the right domain next to the default instead of editing it.
+        # Site.domain is unique, so left alone that row would make the
+        # rename abort the whole migrate; the migration folds it into the
+        # canonical row and keeps its newsletter attachments reachable.
+        Site.objects.filter(pk=settings.SITE_ID).update(
+            domain="example.com", name="example.com")
+        duplicate = Site.objects.create(
+            domain="www.pigscanfly.ca", name="Added by hand")
+        moved = Newsletter.objects.get(slug="dc4k")
+        moved.site.set([duplicate])
+        Site.objects.clear_cache()
+
+        self.forward()
+
+        site = Site.objects.get(pk=settings.SITE_ID)
+        self.assertEqual(site.domain, "www.pigscanfly.ca")
+        self.assertEqual(site.name, "Pigs Can Fly Labs")
+        self.assertFalse(Site.objects.filter(pk=duplicate.pk).exists())
+        # The list that hung off the duplicate still has a live site, so
+        # its activation and unsubscribe pages keep resolving.
+        self.assertIn(site, moved.site.all())
+
 
 class EverythingCheckboxTest(MailingListTestBase):
     """The "send me all updates" tick on the signup form.

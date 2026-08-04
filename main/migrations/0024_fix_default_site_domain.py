@@ -11,7 +11,12 @@ one exactly as it is; this migration repairs it in place.
 
 Guarded so it only ever touches the untouched default: a domain somebody has
 already corrected by hand in the admin is their call, not this migration's to
-overwrite.
+overwrite. One hand-made shape does need active repair rather than a skip: a
+second Site row already carrying our domain, created next to the default
+instead of by editing it. Site.domain is unique, so renaming the canonical
+row would abort the whole migrate against that database -- the duplicate is
+folded into the canonical row instead, keeping whatever newsletters it was
+attached to reachable.
 """
 
 from urllib.parse import urlparse
@@ -39,6 +44,7 @@ def our_domain():
 
 def point_site_at_our_domain(apps, schema_editor):
     Site = apps.get_model("sites", "Site")
+    Newsletter = apps.get_model("newsletter", "Newsletter")
     domain = our_domain()
     if not domain or domain == DEFAULT_DOMAIN:
         # A malformed SITE_BASE_URL must not blank the domain: a link that
@@ -50,6 +56,17 @@ def point_site_at_our_domain(apps, schema_editor):
         # Nothing to repair: 0014 already created the row correctly, or a
         # human already fixed it.
         return
+    # Site.domain is unique (sites.0002), so a row somebody added by hand
+    # with the right domain -- next to the default rather than editing it --
+    # would make the rename below abort the whole migrate. get_current()
+    # only ever answers with the SITE_ID row, so that duplicate cannot be
+    # the fix; fold it into the canonical row and carry its newsletter
+    # attachments over so their activation pages keep resolving.
+    duplicate = Site.objects.filter(domain=domain).exclude(pk=site.pk).first()
+    if duplicate is not None:
+        for newsletter in Newsletter.objects.filter(site=duplicate):
+            newsletter.site.add(site)
+        duplicate.delete()
     site.domain = domain
     if site.name == DEFAULT_DOMAIN:
         # The name renders anywhere a template says {{ site.name }}. It is
@@ -63,6 +80,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("main", "0023_purchasefeedback"),
+        ("newsletter", "0001_initial"),
         ("sites", "0002_alter_domain_unique"),
     ]
 
