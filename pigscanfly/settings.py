@@ -613,6 +613,22 @@ class Prod(Base):
     # planned pigscanfly.ca subdomain serves HTTPS; preload is effectively
     # irreversible.
     SECURE_HSTS_SECONDS = 3600
+    # www.pigscanfly.ca is the canonical host: it is what SITE_BASE_URL says,
+    # what the sites-framework row says (migration 0024), and therefore what
+    # every emailed link carries. The bare apex currently resolves to the old
+    # colo Apache, which redirects only "/" and 404s every deep path -- so an
+    # apex deep link dies before this app ever sees it. That box's redirect
+    # is being fixed separately; this is the app's half, for any apex request
+    # that does reach Django (and for the day the apex points at the cluster):
+    # CommonMiddleware answers it with a 301 to the same path and query on
+    # www, so a deep link survives instead of depending on edge config.
+    #
+    # Safe alongside the probes for the same reason SECURE_SSL_REDIRECT is:
+    # HealthCheckMiddleware answers /healthz before CommonMiddleware runs.
+    # The prefix is applied to whatever host was asked for, so hitting a Prod
+    # process as localhost redirects to www.localhost -- use /healthz (or a
+    # real Host header) when poking a pod directly.
+    PREPEND_WWW = True
     CSRF_TRUSTED_ORIGINS = [
         "https://www.pigscanfly.ca",
         "https://pigscanfly.ca",
