@@ -1,0 +1,26 @@
+{% comment %}
+Overrides django-newsletter's newsletter/message/subscribe.html, the HTML
+half of the confirmation email. The packaged version is the text template
+pasted into a bare <body>: no <p>, no <br>, and the activation URL as bare
+text rather than an <a>. HTML rendering collapses all of its newlines, so
+the email arrived as one run-on line with the URL fused into the
+"Kind regards," after it -- and where the link ended was the mail client's
+guess. Same wording as the text part (which is fine and stays the
+package's), in actual markup.
+{% endcomment %}<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Subscription to {{ newsletter.title }}</title>
+</head>
+<body>
+    <p>Dear {{ subscription.name|default:"Sir/Madam" }},</p>
+    <p>you, or someone in your name requested a subscription to
+        {{ newsletter.title }}.</p>
+    <p>If you would like to confirm your subscription, please follow this
+        activation link:<br>
+        <a href="{{ site_url }}{{ subscription.subscribe_activate_url }}">{{ site_url }}{{ subscription.subscribe_activate_url }}</a></p>
+    <p>Kind regards,<br>
+        {{ newsletter.sender }}</p>
+</body>
+</html>

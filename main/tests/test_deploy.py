@@ -63,6 +63,43 @@ class HealthzTest(TestCase):
         clean.assert_not_called()
 
 
+class CanonicalHostTest(TestCase):
+    """www.pigscanfly.ca is the host; the apex redirects into it.
+
+    Every emailed link carries www (SITE_BASE_URL, and the sites-framework
+    row after migration 0024), and the bare apex is a legacy Apache that
+    404s deep paths. The app's half of that story is PREPEND_WWW: any apex
+    request that reaches Django leaves with the same path on www rather
+    than depending on edge configuration.
+    """
+
+    def test_prod_serves_canonically_from_www(self):
+        self.assertIs(Prod.PREPEND_WWW, True)
+
+    @mock.patch.object(settings, "PREPEND_WWW", True)
+    def test_an_apex_deep_link_keeps_its_path_and_query(self):
+        response = self.client.get("/newsletter/all/?from=email",
+                                   headers={"host": "pigscanfly.ca"})
+
+        # Permanent on purpose: this is the canonical name, not a hop that
+        # might come back. The scheme is the test client's; in production
+        # SecurityMiddleware has already upgraded to https by the time
+        # CommonMiddleware builds this.
+        self.assertEqual(response.status_code, 301)
+        self.assertEqual(response["Location"],
+                         "http://www.pigscanfly.ca/newsletter/all/?from=email")
+
+    @mock.patch.object(settings, "PREPEND_WWW", True)
+    def test_the_health_probe_is_not_redirected(self):
+        # The kubelet dials the pod by IP; a 301 would count as a passing
+        # probe on a broken app. HealthCheckMiddleware answering first is
+        # what keeps PREPEND_WWW (like SECURE_SSL_REDIRECT) out of its way.
+        response = self.client.get("/healthz",
+                                   headers={"host": "10.42.0.17"})
+
+        self.assertEqual(response.status_code, 200)
+
+
 class ProdConfigurationGuardTest(TestCase):
     """Prod refuses to boot on a misconfiguration rather than failing on a
     customer."""
