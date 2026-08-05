@@ -3,6 +3,16 @@
 # Prerequisites (out of band, never committed here):
 #   * The CloudNativePG operator is installed cluster-wide
 #     (https://cloudnative-pg.io/).
+#   * The barman-cloud CNPG plugin (plugin-barman-cloud) is installed in
+#     cnpg-system as the SINGLE pinned helm release managed by colo-scripts
+#     playbooks/cluster-setup.yaml. It provides the barmancloud.cnpg.io CRDs
+#     (the ObjectStore below) and the per-instance backup/WAL-archive
+#     sidecars. Never install it a second way (e.g. by applying the upstream
+#     release manifest.yaml): two installs deadlock on the plugin's leader
+#     lease and block cluster reconciliation -- that is what broke backups
+#     cluster-wide in July 2026. See docs/pg-backup-migration-2026-08.md.
+#   * The kube-prometheus-stack from colo-scripts playbooks/monitoring.yaml,
+#     which scrapes the PodMonitor and evaluates pg-alerts.yaml.
 #   * The `encrypted-local-path` StorageClass exists.
 #   * These Secrets exist in the `pcfweb` namespace:
 #       - pcfweb-superuser-pg-secret  (kubernetes.io/basic-auth:
@@ -14,6 +24,58 @@
 #
 # The app connects through the operator-created `pcfweb-pg-rw` Service
 # (see deploy.yaml env wiring).
+#
+# The ObjectStore comes FIRST so the Cluster's plugin reference resolves on a
+# fresh bootstrap -- and so that a missing plugin install (no CRD) fails this
+# apply loudly instead of leaving a cluster that silently cannot back up.
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: pcfweb-backup-store
+  namespace: pcfweb
+spec:
+  configuration:
+    # Same bucket the old in-tree config always pointed at. serverName is
+    # deliberately NOT set here -- the plugin forbids it in the ObjectStore;
+    # it lives on the Cluster (plugins[].parameters.serverName: pcfweb-pg),
+    # which keeps the same s3://pcfweb-pg-backup/pcfweb-pg/ prefix the
+    # in-tree default (= cluster name) used.
+    destinationPath: "s3://pcfweb-pg-backup/"
+    endpointURL: "https://s3.us-west-004.backblazeb2.com"
+    s3Credentials:
+      accessKeyId:
+        name: pg-backup
+        key: PG_ACCESS_KEY_ID
+      secretAccessKey:
+        name: pg-backup
+        key: PG_ACCESS_SECRET_KEY
+
+    # gzip, not the old in-tree bzip2: matches fhi-pg-main-9's store, and
+    # there is no existing archive to stay consistent with -- the in-tree
+    # path never archived a single WAL segment.
+    wal:
+      compression: gzip
+      maxParallel: 4
+    data:
+      compression: gzip
+
+  # Was spec.backup.retentionPolicy on the Cluster; the plugin keeps it here
+  # (top-level under spec, NOT under configuration). Retention only prunes
+  # what actually gets archived -- it is no substitute for the archiver
+  # working, which pg-alerts.yaml and scripts/check-pg-backup-health.sh watch.
+  retentionPolicy: "30d"
+
+  # Backblaze B2 rejects the AWS SDK's newer default request/response
+  # checksums; without these two env vars every WAL/backup upload fails.
+  # Same values as fhi's stores. Sidecar env is baked at pod creation, so
+  # changing them only takes effect after an instance rollout.
+  instanceSidecarConfiguration:
+    env:
+      - name: AWS_REQUEST_CHECKSUM_CALCULATION
+        value: when_required
+      - name: AWS_RESPONSE_CHECKSUM_VALIDATION
+        value: when_required
+---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -46,9 +108,11 @@ spec:
 
   #############################################################
   # Monitoring
+  # (pg-alerts.yaml consumes these metrics; the cluster's
+  # kube-prometheus-stack selects PodMonitors in every namespace)
   #############################################################
   monitoring:
-    enablePodMonitor: false
+    enablePodMonitor: true
 
   #############################################################
   # Superuser
@@ -86,34 +150,37 @@ spec:
         passwordSecret:
           name: pcfweb-internal-pg-secret
 
-  backup:
-    barmanObjectStore:
-      destinationPath: "s3://pcfweb-pg-backup/"
-      endpointURL: "https://s3.us-west-004.backblazeb2.com"
-      s3Credentials:
-        accessKeyId:
-          name: pg-backup
-          key: PG_ACCESS_KEY_ID
-        secretAccessKey:
-          name: pg-backup
-          key: PG_ACCESS_SECRET_KEY
+  #############################################################
+  # PostgreSQL configuration
+  #############################################################
+  postgresql:
+    parameters:
+      # Cap how much WAL a stuck/inactive replication slot may retain, so a
+      # dead replica cannot fill the 10Gi volume (the failure that killed
+      # fhi-pg-main-8-1). CNPG creates HA slots for the replicas by default.
+      # NOTE this does NOT bound UNARCHIVED WAL -- that is exempt -- which
+      # is exactly why the archiver alerts in pg-alerts.yaml exist.
+      max_slot_wal_keep_size: "4GB"
 
-      wal:
-        compression: bzip2
-        maxParallel: 4
-
-      data:
-        compression: bzip2
-    retentionPolicy: "30d"
----
-apiVersion: postgresql.cnpg.io/v1
-kind: Backup
-metadata:
-  name: pcfweb-pg-backup-manual
-  namespace: pcfweb
-spec:
-  cluster:
-    name: pcfweb-pg
+  #############################################################
+  # Backups: barman-cloud PLUGIN.
+  #
+  # This cluster was born with the in-tree spec.backup.barmanObjectStore,
+  # which CNPG deprecated in 1.26 and REMOVED in 1.28+ -- on the 1.30
+  # operator with PG18 operand images (which no longer ship the barman-cloud
+  # binaries) WAL archiving failed from creation and every Backup sat
+  # pending: zero restorable backups. The plugin is the supported path.
+  #
+  # isWALArchiver makes the plugin the WAL archiver; serverName keeps the
+  # same bucket prefix the in-tree default used. The migration steps for the
+  # live cluster are in docs/pg-backup-migration-2026-08.md.
+  #############################################################
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: pcfweb-backup-store
+        serverName: pcfweb-pg
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: ScheduledBackup
@@ -121,7 +188,31 @@ metadata:
   name: pcfweb-pg-nightly
   namespace: pcfweb
 spec:
-  schedule: "0 0 0 * * *"
-  backupOwnerReference: self
+  # SIX-field cron WITH SECONDS (robfig/cron), not the 5-field CronJob
+  # format: daily at 09:00:00 UTC. Deliberately NOT midnight UTC (where this
+  # used to fire) and not 08:00 (fhi-pg-main-9's nightly) -- spreads load on
+  # the shared B2 target and keeps the schedules distinguishable.
+  schedule: "0 0 9 * * *"
   cluster:
     name: pcfweb-pg
+  # The cluster no longer has a spec.backup section, so the default method
+  # (barmanObjectStore) fails outright; the plugin must be named explicitly.
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+  # Take one backup as soon as this object is CREATED, so applying it is
+  # self-proving. immediate only fires on creation, not on updates -- the
+  # live migration deletes the old broken nightly rather than patching it
+  # (which also lets the ownerReference GC sweep its stuck Backup CRs).
+  immediate: true
+  # Backups this schedule creates are owned by it, so deleting the schedule
+  # garbage-collects its Backup CRs instead of stranding them. A graveyard
+  # of pending Backups aimed at a dead cluster is what starved backup
+  # scheduling cluster-wide in July 2026 (CR deletion never touches bucket
+  # data; on-disk retention is the ObjectStore's retentionPolicy).
+  backupOwnerReference: self
+  # Explicit false is load-bearing: build.sh re-applies this file on every
+  # deploy, but a field ABSENT from the manifest survives kubectl apply's
+  # three-way merge -- a manual `kubectl patch ... suspend: true` would
+  # stick forever. Declared here, the next deploy reverts it.
+  suspend: false
