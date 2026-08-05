@@ -7,6 +7,19 @@ export DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE:-"pigscanfly.settings"}
 # Run migrations + load the bootstrap fixtures on the primary only
 if [ -n "${PRIMARY:-}" ]; then
   ./manage.py migrate
+  # The admin account, from DJANGO_SUPERUSER_* in pcfweb-secret: created on a
+  # fresh database, converged (rotated password, drifted flags) after that,
+  # skipped with a log line when the variables are absent. Right after
+  # migrate because it needs the auth tables, and before
+  # backfill_email_identities so the backfill claims the admin's
+  # EmailIdentity row in this boot rather than the next one.
+  #
+  # Non-fatal on purpose: the command fails loudly on a half-set pair or a
+  # username collision, and an admin nobody can log into is still a lesser
+  # incident than a store that stopped selling books over it. The `||` is
+  # what keeps `set -e` from turning that exit code into a boot failure.
+  ./manage.py ensure_admin_account \
+    || echo "start-server.sh: ensure_admin_account failed; starting anyway." >&2
   ./manage.py seed_products
   # Close any old-replica signup window without making startup depend on
   # legacy data being perfectly clean. Row-level residue is already tolerated

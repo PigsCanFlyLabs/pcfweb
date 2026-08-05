@@ -46,6 +46,7 @@ Checks — one script shared by local dev, `build.sh`, and GitHub Actions
 | `ORDER_NOTIFICATION_EMAIL` | all | Where the "new paid order" mail goes; becomes `ADMINS`. Defaults to `support@pigscanfly.ca`. |
 | `DBHOST` / `DBNAME` / `DBUSER` / `DBPASSWORD` | Prod | Postgres connection; wired in `deploy.yaml` to the in-cluster DB. |
 | `EMAIL_HOST` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | Prod | SMTP. |
+| `DJANGO_SUPERUSER_USERNAME` / `DJANGO_SUPERUSER_PASSWORD` / `DJANGO_SUPERUSER_EMAIL` | primary pod (optional) | The admin account: `ensure_admin_account` creates it on a fresh database and converges it (rotated password, drifted flags) on every primary boot. Both core variables unset = clean skip; one without the other = loud failure. The names are the ones Django's own `createsuperuser --noinput` reads. See [Admin](#admin). |
 | `MAXMIND_LICENSE_KEY` | build.sh (image build) | Bundles the GeoLite2 country DB for region-specific buy links; optional. |
 | `GEOIP_PATH` | all | Directory holding `GeoLite2-Country.mmdb`; defaults to `<repo>/geoip` (set to `/opt/app/geoip` in the image). |
 | `BOOK_ASSET_ROOT` | all | Directory holding the purchased book ZIPs; defaults to `<repo>/book-assets` (`/opt/app/book-assets` in the image). Must **not** be under `STATIC_ROOT` or `MEDIA_ROOT` — see [Digital products](#digital-products). |
@@ -123,6 +124,20 @@ bookmarks keep working.
 `/timbit/admin/home` is the landing page: it lists every admin path,
 including the ones the Django admin's own index cannot show because they are
 not model changelists (the CSV import, the send page, the embeddable form).
+
+The account that logs in there is provisioned at deploy time, not by hand:
+`manage.py ensure_admin_account` runs on every primary boot (see
+`scripts/start-server.sh`) against the `DJANGO_SUPERUSER_USERNAME` /
+`DJANGO_SUPERUSER_PASSWORD` / `DJANGO_SUPERUSER_EMAIL` variables — in the
+cluster these live in `pcfweb-secret`, provisioned out of the colo-scripts
+vault (`playbooks/cluster-setup.yaml`, vault keys `PCF_ADMIN_USER` /
+`PCF_ADMIN_PASSWORD` / `PCF_ADMIN_EMAIL`). On a fresh database it creates the
+superuser; after that it converges, so rotating the password is an edit to
+the vault plus a re-run of that playbook and a rollout of `web-primary`.
+Unset variables mean a clean skip (local dev never needs them). Two edges are
+deliberate: an existing **non**-superuser with the configured username is
+never promoted (`auth.User` is also the customer table), and a deactivated
+superuser stays deactivated — a lockout in the admin survives deploys.
 
 ## Mailing list
 
@@ -554,8 +569,8 @@ The Kubernetes objects:
   `Cluster` (3 instances, 10Gi `encrypted-local-path` storage, nightly
   backups to B2), plus manual `Backup` and nightly `ScheduledBackup`.
 - `deploy.yaml` — the app: `web-primary` (1 replica; runs `migrate` +
-  `seed_products` + `check_book_assets` on start), `web` (3 replicas),
-  `web-svc`, and the ingress for `www.pigscanfly.ca`.
+  `ensure_admin_account` + `seed_products` + `check_book_assets` on start),
+  `web` (3 replicas), `web-svc`, and the ingress for `www.pigscanfly.ca`.
 
 The app reaches Postgres through the operator-created `pcfweb-pg-rw`
 Service; `DBHOST`/`DBNAME`/`DBUSER` are set directly in `deploy.yaml` and
@@ -653,7 +668,10 @@ above — it just moves the thumbnail alongside it.
      username `pigscanfly` + password (the app role).
    - `pg-backup` — `PG_ACCESS_KEY_ID` / `PG_ACCESS_SECRET_KEY` for the
      `pcfweb-pg-backup` B2 bucket (use a bucket dedicated to pcfweb).
-   - `pcfweb-secret` — the app env (SECRET_KEY, Stripe, email, …).
+   - `pcfweb-secret` — the app env (SECRET_KEY, Stripe, email, …), plus the
+     optional `DJANGO_SUPERUSER_*` trio for the admin account (see
+     [Admin](#admin)). Provisioned by colo-scripts
+     `playbooks/cluster-setup.yaml`.
 
 ### One-time MySQL → Postgres data migration
 
