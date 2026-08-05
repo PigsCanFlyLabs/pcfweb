@@ -1,0 +1,132 @@
+# PrometheusRule for pcfweb-pg -- backup + WAL-growth alerting.
+#
+# pcfweb-pg ran for weeks with WAL archiving failing and every backup stuck
+# pending, and nothing said a word (the in-tree barmanObjectStore era -- see
+# docs/pg-backup-migration-2026-08.md). The sibling fhi clusters had the same
+# silent-failure lesson twice. These rules make the failure modes page
+# instead of hide: archiver broken, backups stale, WAL growing, replicas
+# gone. Metrics come from the PodMonitor that pg-bootstrap.yaml enables;
+# the kube-prometheus-stack (colo-scripts playbooks/monitoring.yaml) selects
+# PrometheusRules and PodMonitors in every namespace, and Alertmanager
+# emails its default receiver.
+#
+# ==> VERIFY-LIVE (metric names): confirm the exact CNPG metric names your
+#     operator/plugin version exports before relying on these:
+#       kubectl -n pcfweb exec pcfweb-pg-1 -c postgres -- \
+#         curl -s localhost:9187/metrics | grep -E 'wal|archiver|backup'
+#     CNPG's default metric set has historically used the names below;
+#     adjust the expr if your build differs. The THRESHOLDS are the intent
+#     -- keep them even if you must rename a metric.
+#
+# WAL threshold math: pg_wal size is not exported as bytes, so we alert on
+# WAL FILE COUNT. Default segment = 16MB. The volume is only 10Gi (shared
+# with the actual data), so the ceilings are far lower than fhi's 50Gi
+# cluster: 256 segments = 4GiB (matches max_slot_wal_keep_size) is critical,
+# 128 segments = 2GiB is the early warning.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: pcfweb-pg-backup-wal
+  namespace: pcfweb
+  labels:
+    app: pcfweb
+    cnpg.io/cluster: pcfweb-pg
+    role: alert-rules
+spec:
+  groups:
+    - name: pcfweb-pg.backup-and-wal
+      rules:
+        # ---- WAL GROWTH (unarchived WAL is exempt from the slot cap) -----
+        - alert: PcfwebPgWalBeyond4GB
+          # 256 * 16MB = 4GiB on a 10Gi volume that also holds the data.
+          # max_slot_wal_keep_size (4GB) caps slot retention, but WAL the
+          # archiver has not shipped is EXEMPT from it -- if this fires the
+          # archiver is almost certainly wedged and the disk is on a timer.
+          expr: cnpg_pg_wal_files{namespace="pcfweb", pod=~"pcfweb-pg-.*"} > 256
+          for: 10m
+          labels:
+            severity: critical
+            cluster: pcfweb-pg
+          annotations:
+            summary: "pcfweb-pg WAL exceeds 4GB ({{ $value }} segments on {{ $labels.pod }})"
+            description: >-
+              pg_wal on {{ $labels.pod }} holds {{ $value }} WAL segments
+              (>4GiB of the 10Gi volume). Check PcfwebPgArchiverFailing and
+              stuck replication slots. This is the disk-full failure that
+              killed fhi-pg-main-8-1. Runbook:
+              docs/pg-backup-migration-2026-08.md.
+
+        - alert: PcfwebPgWalWarning2GB
+          expr: cnpg_pg_wal_files{namespace="pcfweb", pod=~"pcfweb-pg-.*"} > 128
+          for: 15m
+          labels:
+            severity: warning
+            cluster: pcfweb-pg
+          annotations:
+            summary: "pcfweb-pg WAL above 2GB on {{ $labels.pod }} (early warning)"
+            description: >-
+              Early warning at half the 4GB ceiling. Investigate slot
+              retention and archiver health before it reaches critical.
+
+        # ---- ARCHIVER (dead archiving = no PITR, growing pg_wal) ---------
+        - alert: PcfwebPgArchiverFailing
+          expr: increase(cnpg_pg_stat_archiver_failed_count{namespace="pcfweb", pod=~"pcfweb-pg-.*"}[15m]) > 0
+          for: 15m
+          labels:
+            severity: critical
+            cluster: pcfweb-pg
+          annotations:
+            summary: "pcfweb-pg WAL archiver is FAILING on {{ $labels.pod }}"
+            description: >-
+              pg_stat_archiver.failed_count is rising -- WAL is not reaching
+              B2, so point-in-time recovery is silently broken and pg_wal
+              will grow. Check the plugin sidecar log
+              (kubectl -n pcfweb logs {{ $labels.pod }} -c plugin-barman-cloud),
+              B2 credentials, and the barman-cloud plugin install.
+
+        - alert: PcfwebPgArchiverStalled
+          expr: cnpg_pg_stat_archiver_seconds_since_last_archival{namespace="pcfweb", pod=~"pcfweb-pg-.*"} > 3600
+          for: 15m
+          labels:
+            severity: critical
+            cluster: pcfweb-pg
+          annotations:
+            summary: "pcfweb-pg has not archived WAL in over 1h ({{ $labels.pod }})"
+            description: >-
+              No successful WAL archival in >1h. Even without rising
+              failures, a stalled archiver means no new PITR coverage and
+              growing pg_wal.
+
+        # ---- BACKUP AGE (the silent-failure catch-all) -------------------
+        - alert: PcfwebPgBackupTooOld
+          # nightly schedule -> anything older than 26h is a missed/failed
+          # backup. Before August 2026 this cluster had NO completed backup
+          # at all and nothing alerted; do not let that repeat.
+          expr: (time() - cnpg_collector_last_available_backup_timestamp{namespace="pcfweb", pod=~"pcfweb-pg-.*"}) > 93600
+          for: 30m
+          labels:
+            severity: critical
+            cluster: pcfweb-pg
+          annotations:
+            summary: "pcfweb-pg last successful backup is >26h old"
+            description: >-
+              No completed backup in over 26h (nightly schedule). A restore
+              would lose >1 day. Check the pcfweb-pg-nightly ScheduledBackup
+              (suspended? failing?) and run
+              scripts/check-pg-backup-health.sh.
+
+        # ---- CLUSTER DEGRADED --------------------------------------------
+        - alert: PcfwebPgClusterDegraded
+          expr: cnpg_pg_replication_streaming_replicas{namespace="pcfweb", cluster="pcfweb-pg"} < 2
+          for: 10m
+          labels:
+            severity: warning
+            cluster: pcfweb-pg
+          annotations:
+            summary: "pcfweb-pg has fewer than 2 streaming replicas"
+            description: >-
+              Ready replica count dropped below the 3-instance cluster's
+              expected 2 standbys. If this coincides with a plugin or
+              operator upgrade, check that the barman-cloud Service has
+              ready endpoints (the selector break that took fhi-pg-main-8
+              down).

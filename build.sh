@@ -131,6 +131,16 @@ docker buildx build --platform=linux/amd64,linux/arm64 "${MAXMIND_SECRET_ARGS[@]
 # just crashloop against an absent database -- so this failure is fatal
 # rather than swallowed.
 kubectl apply -f pg-bootstrap.yaml
+# Backup + WAL alerting for the database, re-asserted on every deploy so a
+# deleted or hand-edited rule set self-heals (pg-bootstrap.yaml above plays
+# the same role for the nightly ScheduledBackup and its suspend: false).
+# Applied before the readiness wait on purpose: if the cluster never comes
+# Ready, these are the alerts that say so. Fatal if it fails: the
+# PrometheusRule CRD comes from the monitoring stack (colo-scripts
+# playbooks/monitoring.yaml), a cluster invariant -- if it is gone, the
+# pages that would catch a dead WAL archiver are gone too, and that is
+# worth stopping a deploy over.
+kubectl apply -f pg-alerts.yaml
 kubectl wait --for=condition=Ready cluster/pcfweb-pg -n pcfweb --timeout=600s
 kubectl apply -f deploy.yaml
 kubectl rollout status deploy/web-primary -n pcfweb --timeout=300s

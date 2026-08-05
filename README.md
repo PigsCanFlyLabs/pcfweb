@@ -566,8 +566,16 @@ an e-book download 404s.
 The Kubernetes objects:
 
 - `pg-bootstrap.yaml` — the database: a [CloudNativePG](https://cloudnative-pg.io/)
-  `Cluster` (3 instances, 10Gi `encrypted-local-path` storage, nightly
-  backups to B2), plus manual `Backup` and nightly `ScheduledBackup`.
+  `Cluster` (3 instances, 10Gi `encrypted-local-path` storage), the
+  barman-cloud plugin `ObjectStore` it backs up through (base backups +
+  continuous WAL archiving to B2, 30d retention), and the nightly
+  `ScheduledBackup` (09:00 UTC, `method: plugin`). The in-tree
+  `barmanObjectStore` config this cluster started on was removed from CNPG
+  1.28+ and never archived a byte — `docs/pg-backup-migration-2026-08.md`
+  has the incident story and the live-migration runbook.
+- `pg-alerts.yaml` — `PrometheusRule` paging on the failure modes that were
+  silent last time: WAL archiver failing or stalled, newest backup >26h
+  old, pg_wal growth on the 10Gi volume, replica loss.
 - `deploy.yaml` — the app: `web-primary` (1 replica; runs `migrate` +
   `ensure_admin_account` + `seed_products` + `check_book_assets` on start),
   `web` (3 replicas), `web-svc`, and the ingress for `www.pigscanfly.ca`.
@@ -590,6 +598,22 @@ for exactly this reason.
 `manage.py migrate --check`. `web-primary` applies the migrations but both
 Deployments roll at the same time, so without the gate the serving pods
 would run new code against the old schema until the primary caught up.
+
+### Database backups
+
+Nightly base backup at 09:00 UTC plus continuous WAL archiving to the
+`pcfweb-pg-backup` B2 bucket via the barman-cloud CNPG plugin, 30-day
+retention — so point-in-time recovery, not just a daily snapshot.
+`build.sh` re-applies `pg-bootstrap.yaml` and `pg-alerts.yaml` on every
+deploy, so the schedule (and its `suspend: false`) and the alert rules
+self-heal.
+
+`./scripts/check-pg-backup-health.sh` is the one-shot verifier: plugin
+install healthy, archiver advancing, WAL bounded, newest backup <26h,
+schedule present and matching the manifest. Run it after any
+operator/plugin change and whenever backups feel doubtful; the always-on
+version is `pg-alerts.yaml` through the cluster's Alertmanager. History and
+the migration runbook: `docs/pg-backup-migration-2026-08.md`.
 
 ### Known limitation: uploaded media is ephemeral
 
@@ -660,8 +684,16 @@ above — it just moves the thumbnail alongside it.
 ### One-time cluster prerequisites (not in this repo)
 
 1. CloudNativePG operator installed cluster-wide.
-2. The `encrypted-local-path` StorageClass.
-3. Secrets in the `pcfweb` namespace:
+2. The barman-cloud CNPG plugin (`plugin-barman-cloud`), installed in
+   `cnpg-system` as the **single** pinned helm release that colo-scripts
+   `playbooks/cluster-setup.yaml` manages — it provides the
+   `barmancloud.cnpg.io` CRDs and the backup/WAL sidecars. Never install
+   it a second way; duplicate installs deadlock on the plugin's leader
+   lease (see `docs/pg-backup-migration-2026-08.md`).
+3. The kube-prometheus-stack (colo-scripts `playbooks/monitoring.yaml`),
+   which scrapes the cluster's PodMonitor and evaluates `pg-alerts.yaml`.
+4. The `encrypted-local-path` StorageClass.
+5. Secrets in the `pcfweb` namespace:
    - `pcfweb-superuser-pg-secret` — `kubernetes.io/basic-auth`,
      username `postgres` + password.
    - `pcfweb-internal-pg-secret` — `kubernetes.io/basic-auth`,
