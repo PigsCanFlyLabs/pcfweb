@@ -311,6 +311,31 @@
     tax_code: "txcd_35010000"
     delivery_type: "PHYSICAL"
     sells_ebook: false
+    # The book shipped -- it is out, not on its way -- so it is not a
+    # pre-order, and the deploy asserts that rather than leaving it to
+    # whatever the admin last held. This key is stated on all three DC4K rows
+    # for one reason: the flag was set here while the book was forthcoming,
+    # and an out-of-date pre-order flag is a claim to a customer that the
+    # thing they are buying has not been printed yet. It also prefixes the
+    # price with "Pre-order: " everywhere a price is rendered and reports
+    # `preorder` availability to Google Merchant.
+    #
+    # Stating it here makes preorder_only fixture-owned FOR THESE ROWS: a
+    # future pre-order is a YAML edit, not an admin tick. That is the trade
+    # deliberately taken for a title that is already published, and it is not
+    # done to the rest of the catalogue -- a row that omits the key keeps
+    # whatever the admin set, as with every other omitted field.
+    #
+    # ONE CONSEQUENCE TO KNOW BEFORE DEPLOYING: is_out_of_stock() ignores a
+    # pre-order row, so the stock gate only starts applying to the two print
+    # SKUs once this is false. If 104 and 105 are sitting at stock 0 in the
+    # admin they go from "Pre-Order" to "Out of Stock" -- both unbuyable
+    # here, but the second is the honest one. seed_products deliberately
+    # never writes stock on an existing row (see SEED_PROTECTED_FIELDS and
+    # the overselling note beside it), so the fix is a stock figure in the
+    # admin, not a fixture key. The e-book is exempt: a download has no unit
+    # count to run out of.
+    preorder_only: false
     # The three DC4K SKUs are one book in three formats, so all three name
     # the other two. Symmetrical, so 105 and 106 each list 104 in turn.
     x_links: [105, 106]
@@ -378,6 +403,11 @@
     tax_code: "txcd_35010000"
     delivery_type: "PHYSICAL"
     sells_ebook: false
+    # Out, not forthcoming -- see the note on pk 104. Stated on this row too
+    # rather than inferred from its sibling: the flag is per-SKU, and a
+    # chooser listing one format as a pre-order beside two that are not is
+    # exactly the kind of thing that has to be true row by row.
+    preorder_only: false
     x_links: [104, 106]
     # There is no separate Executive e-book, so the executive edition points
     # at the same pk 106 the standard paperback does. That is a real answer
@@ -446,6 +476,10 @@
     delivery_type: "DIGITAL"
     # This one is ours to distribute, so fulfilment is allowed to send it.
     sells_ebook: true
+    # Out, not forthcoming -- see the note on pk 104. A download has nothing
+    # to ship, so a pre-order flag on this row would have been claiming a
+    # wait that does not exist: fulfilment emails the file on payment.
+    preorder_only: false
     # <stem>.zip under settings.BOOK_ASSET_ROOT; must match the archive
     # committed to the pcfweb-book-assets repo.
     digital_asset_name: "distributed_computing_4_kids"

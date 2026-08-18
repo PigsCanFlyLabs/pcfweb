@@ -10,8 +10,11 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
+from django.core.management import call_command
 from django.test import TestCase
 from django.utils.html import escape
 
@@ -516,6 +519,76 @@ class DistributedComputing4KidsCatalogTest(TestCase):
             Product.objects.get(pk=EBOOK_PK).get_alt_links(),
             [(Product.AMAZON_EBOOK_LABEL,
               "https://www.amazon.com/dp/B0HC5Y42R2")])
+
+
+class Dc4kIsPublishedNotForthcomingTest(TestCase):
+    """The book is out, so no DC4K SKU may claim to be a pre-order.
+
+    A stale pre-order flag is not a cosmetic problem. It prefixes the price
+    with "Pre-order: " everywhere a price is rendered, changes the buy button
+    to "Pre-Order", and reports `preorder` availability to Google Merchant --
+    three statements to a customer that the thing they are buying has not
+    been printed yet, about a book that shipped in July 2026.
+
+    Pinned in the fixture rather than left to the admin, so the deploy
+    asserts it on every run; see the note on pk 104 in the fixture for the
+    trade that makes and for the stock consequence on the two print rows.
+    """
+
+    fixtures = ["initial_products"]
+
+    PKS = (104, 105, EBOOK_PK)
+
+    def test_no_dc4k_sku_is_a_preorder(self):
+        for pk in self.PKS:
+            with self.subTest(pk=pk):
+                self.assertFalse(Product.objects.get(pk=pk).preorder_only)
+
+    def test_no_dc4k_price_carries_the_preorder_prefix(self):
+        for pk in self.PKS:
+            with self.subTest(pk=pk):
+                product = Product.objects.get(pk=pk)
+
+                self.assertNotIn("Pre-order", product.get_display_price())
+                self.assertNotEqual(product.buy_text(), "Pre-Order")
+
+    def test_the_merchant_feed_does_not_call_the_book_forthcoming(self):
+        for pk in self.PKS:
+            with self.subTest(pk=pk):
+                self.assertNotEqual(
+                    Product.objects.get(pk=pk).get_availability(), "preorder")
+
+    def test_the_listing_card_quotes_a_plain_price_range(self):
+        """The card's range is built from get_display_price()'s numbers, so a
+        pre-order row would have put the words into the middle of it."""
+        self.assertEqual(
+            Product.objects.get(pk=104).listing_price_display(),
+            f"12.99{Product.PRICE_RANGE_SEPARATOR}34.42")
+
+    def test_a_deploy_clears_a_flag_left_set_in_the_admin(self):
+        """The reason the key is in the fixture at all: the flag was set
+        while the book was forthcoming, and seeding is what takes it back
+        off. .update() rather than .save(), which would mint a Stripe id."""
+        Product.objects.filter(pk__in=self.PKS).update(preorder_only=True)
+
+        with mock.patch("main.models.Payments"):
+            call_command("seed_products", stdout=StringIO())
+
+        self.assertEqual(
+            list(Product.objects.filter(pk__in=self.PKS)
+                 .values_list("preorder_only", flat=True)),
+            [False, False, False])
+
+    def test_seeding_leaves_other_rows_flags_alone(self):
+        """The key is on three rows, not on the catalogue: a row that omits
+        it keeps whatever the admin set, as with every other omitted field.
+        """
+        Product.objects.filter(pk=101).update(preorder_only=True)
+
+        with mock.patch("main.models.Payments"):
+            call_command("seed_products", stdout=StringIO())
+
+        self.assertTrue(Product.objects.get(pk=101).preorder_only)
 
 
 class OReillySafariLinkTest(TestCase):
