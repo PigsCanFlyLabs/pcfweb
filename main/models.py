@@ -99,16 +99,25 @@ class ProductGroup(models.Model):
         ),
     )
 
-    def members(self) -> "models.QuerySet":
+    def members(self) -> List["Product"]:
         """Every SKU in this group, in the owner's chosen format order.
 
-        ``format_order`` then pk, which is the one ordering used everywhere a
-        group is rendered -- the format list on a product page, the format
-        summary on a listing card, and the choice of which member represents
-        the group. Reading it from one method means those three can never
-        disagree about which format comes first.
+        ``format_order`` then pk -- ``Product.format_rank()``, the one
+        ordering used everywhere a group is rendered: the format chooser on a
+        product page, the format summary on a listing card, and the choice of
+        which member represents the group in a collapsed listing. Reading it
+        from one method means those three can never disagree about which
+        format comes first.
+
+        Sorted in Python off ``.all()`` rather than by the database, and that
+        is the whole reason this returns a list. A listing prefetches
+        ``group__products`` so that N cards cost one extra query between them;
+        ``.order_by()`` on a related manager builds a NEW queryset, which
+        cannot use that prefetched cache and silently issues a query per card
+        instead -- the prefetch still runs, and its results are simply thrown
+        away. The sort is over a handful of rows either way.
         """
-        return self.products.order_by("format_order", "pk")
+        return sorted(self.products.all(), key=lambda p: p.format_rank())
 
     def __str__(self) -> str:
         return f'{self.name}'
@@ -482,9 +491,16 @@ class Product(models.Model):
     # exists to draw. Blank falls back to the product's own name -- see
     # get_format_label() -- so a member added without one loses a tidy label
     # rather than rendering an empty button.
+    # `default` as well as `db_default`, and not redundantly: db_default
+    # alone leaves an UNSAVED instance's attribute holding Django's
+    # DatabaseDefault sentinel rather than "". The sentinel is truthy, so
+    # `self.format_label or self.name` in get_format_label() would return the
+    # sentinel object itself and render it into the page. format_order below
+    # declares both for the same reason.
     format_label = models.CharField(
         max_length=80,
         blank=True,
+        default="",
         db_default="",
         help_text=(
             "How this format is named on the chooser: \"Paperback\", "
@@ -818,7 +834,7 @@ class Product(models.Model):
         group = self.group
         if group is None:
             return []
-        return list(group.members())
+        return group.members()
 
     def get_format_options(self) -> List[Dict[str, Any]]:
         """The format chooser for this product's page.
@@ -907,27 +923,36 @@ class Product(models.Model):
         decoration. Before grouping, the e-book had a card of its own and
         that card carried the "pay what you want" label beside its price;
         collapsing the three DC4K cards into one removes it, and the card
-        that remains shows the paperback's fixed price -- so without this the
-        catalogue would stop mentioning pay-what-you-want at all. The
-        annotation goes on the FORMAT rather than on the card's price for the
-        same reason: the price on the card is the paperback's and really is
-        fixed, and labelling it a suggestion would be the exact false claim
-        the label exists to prevent.
+        that remains prices the work as a range. That range opens at the
+        e-book's suggested 12.99 and runs to a fixed 34.42, so the label
+        cannot simply move onto it: calling the whole span a suggestion is
+        the exact false claim the label exists to prevent. The annotation
+        goes on the format the suggestion belongs to instead.
 
         The chooser on the product page needs no such annotation -- its price
         column says "Pay what you want" outright -- which is why this is not
         folded into get_format_label().
 
-        Empty for anything that is not in a group with a sibling, so an
-        ungrouped card renders exactly as it did before groups existed.
+        A ``noorder`` format is left out, the same rows
+        listing_price_bounds() leaves out of the range and for the same
+        reason: the card renders this as "Available in N formats", and a
+        format that is not sold here is not one of them. The chooser on the
+        product page does list it, which is not a contradiction -- the card
+        advertises what can be bought, and the chooser answers what exists,
+        saying "Not sold here" beside the one that cannot.
+
+        Empty for anything that is not a group with two or more formats for
+        sale, so an ungrouped card renders exactly as it did before groups
+        existed.
         """
-        members = self.group_members()
-        if len(members) < 2:
+        listed = [member for member in self.group_members()
+                  if not member.noorder]
+        if len(listed) < 2:
             return []
         return [
             (f"{member.get_format_label()} ({self.PWYW_FORMAT_SUFFIX})"
              if member.is_pwyw else member.get_format_label())
-            for member in members
+            for member in listed
         ]
 
     # What sits between the two ends of a listing price range. Named rather
@@ -935,6 +960,34 @@ class Product(models.Model):
     # the source of truth -- and an en dash rather than a hyphen because a
     # hyphen between two numbers reads as a minus sign.
     PRICE_RANGE_SEPARATOR = " – "
+
+    def listing_release_year(self) -> Optional[int]:
+        """The year on this product's card.
+
+        For a grouped card, the work's FIRST publication -- the earliest
+        release date among the formats sold here -- rather than the date of
+        whichever member the collapse happens to be showing. The member is
+        picked by format_order, so without this a group could be titled with
+        the work, priced across the work, and then dated by an e-book that
+        came out five years after the book did.
+
+        Deliberately not the same date that decides where the card SITS. A
+        listing is newest-first and a group takes the position of its newest
+        surviving member, because a format released this year is news and
+        belongs near the top. What the card SAYS is a different question:
+        "Published" is a claim about the book, and a paperback from 2019 does
+        not become a 2024 book because its e-book appeared then.
+
+        None when nothing in the group carries a release date, which is what
+        the template already renders nothing for.
+        """
+        years = [member.release_date.year
+                 for member in self.group_members()
+                 if not member.noorder and member.release_date is not None]
+        if not years:
+            return (self.release_date.year
+                    if self.release_date is not None else None)
+        return min(years)
 
     def listing_price_bounds(self) -> Optional[Tuple[int, int]]:
         """The cheapest and dearest a grouped card stands for, in cents.

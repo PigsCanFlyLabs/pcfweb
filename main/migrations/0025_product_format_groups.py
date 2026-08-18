@@ -55,6 +55,7 @@ class Migration(migrations.Migration):
             field=models.CharField(
                 blank=True,
                 db_default="",
+                default="",
                 help_text='How this format is named on the chooser: "Paperback", "E-book". Only meaningful when the product is in a group; falls back to the product name.',
                 max_length=80,
             ),

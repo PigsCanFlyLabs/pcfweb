@@ -97,7 +97,7 @@ class Dc4kGroupFixtureTest(TestCase):
         have produced it."""
         group = ProductGroup.objects.get(pk=DC4K_GROUP_PK)
 
-        self.assertEqual(group.members().first().pk, PRINT_PK)
+        self.assertEqual(group.members()[0].pk, PRINT_PK)
         prices = [member.price for member in group.members()]
         self.assertEqual(sorted(prices)[1], Product.objects.get(
             pk=PRINT_PK).price)
@@ -110,6 +110,17 @@ class Dc4kGroupFixtureTest(TestCase):
         self.assertEqual(product.get_format_options(), [])
         self.assertEqual(product.listing_format_labels(), [])
         self.assertEqual(product.listing_name(), "Brand new")
+
+    def test_an_unsaved_products_format_label_is_a_string(self):
+        """db_default alone leaves the attribute holding Django's
+        DatabaseDefault sentinel until the row is saved and reloaded. The
+        sentinel is truthy, so `format_label or name` returned the sentinel
+        object itself -- and a template renders that."""
+        product = Product(name="Brand new")
+
+        self.assertEqual(product.format_label, "")
+        self.assertEqual(product.get_format_label(), "Brand new")
+        self.assertEqual(product.format_order, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +216,36 @@ class CollapseFormatGroupsTest(ProductFactoryMixin, TestCase):
 
         self.assertTrue(all(isinstance(p, Product) for p in collapsed))
 
+    def test_the_group_members_are_prefetched_not_queried_per_card(self):
+        """The prefetch has to be USED, not merely issued.
+
+        Every grouped card asks its group for the members twice over (the
+        format summary and the price range), and a page is a loop over cards.
+        ``ProductGroup.members()`` sorts in Python off ``.all()`` for exactly
+        this reason: an ``.order_by()`` there builds a new queryset, cannot
+        read the prefetched cache, and turns the prefetch into a wasted query
+        plus one per card.
+        """
+        collapsed = (Product.objects.exclude(noorder=True)
+                     .order_by_release_date().collapse_format_groups())
+
+        with self.assertNumQueries(0):
+            for product in collapsed:
+                product.listing_name()
+                product.listing_format_labels()
+                product.listing_price_display()
+                product.listing_release_year()
+
+    def test_the_whole_listing_costs_a_fixed_number_of_queries(self):
+        """...and the count does not grow with the catalogue: one for the
+        rows with their groups joined in, one for the prefetched members."""
+        with self.assertNumQueries(2):
+            collapsed = (Product.objects.exclude(noorder=True)
+                         .order_by_release_date().collapse_format_groups())
+            for product in collapsed:
+                product.listing_format_labels()
+                product.listing_price_display()
+
 
 # ---------------------------------------------------------------------------
 # 3. Listings
@@ -292,6 +333,17 @@ class GroupedListingRenderingTest(TestCase):
         html = self.client.get("/products").content.decode()
 
         self.assertEqual(html.count("Available in"), 1)
+
+    def test_the_cover_link_announces_the_same_title_as_the_heading(self):
+        """The cover's aria-label is what a screen reader reads out for that
+        link; announcing a format-suffixed SKU name for a card headed with
+        the work would name two different things on one card."""
+        card = self.client.get("/products").content.decode()
+
+        self.assertIn(f'aria-label="{escape(WORK_NAME)}"', card)
+        self.assertNotIn(
+            f'aria-label="{escape(Product.objects.get(pk=EBOOK_PK).name)}"',
+            card)
 
     def test_the_homepage_carousel_shows_the_group_once(self):
         html = self.client.get("/").content.decode()
@@ -405,6 +457,102 @@ class ListingPriceRangeTest(ProductFactoryMixin, TestCase):
     def test_the_separator_is_not_a_hyphen(self):
         """A hyphen between two numbers reads as a minus sign."""
         self.assertNotIn("-", Product.PRICE_RANGE_SEPARATOR)
+
+
+class FormatSummaryExcludesDelistedFormatsTest(TestCase):
+    """"Available in N formats" has to mean available.
+
+    The same rows listing_price_bounds() leaves out of the range: a format
+    that is not sold here is not one a card may offer. The chooser on the
+    product page still lists it, with "Not sold here" beside it -- the card
+    advertises what can be bought, the chooser says what exists.
+    """
+
+    fixtures = ["initial_products"]
+
+    def group_with_a_delisted_format(self):
+        group = ProductGroup.objects.create(name="A work with a dead format")
+        Product.objects.filter(
+            pk__in=(PRINT_PK, EBOOK_PK, NOT_SOLD_HERE_PK)).update(group=group)
+        return Product.objects.get(pk=PRINT_PK)
+
+    def test_a_delisted_format_is_not_advertised_on_the_card(self):
+        product = self.group_with_a_delisted_format()
+        not_sold = Product.objects.get(pk=NOT_SOLD_HERE_PK)
+
+        labels = product.listing_format_labels()
+
+        self.assertEqual(len(labels), 2)
+        self.assertNotIn(not_sold.get_format_label(), labels)
+
+    def test_a_group_whose_only_sibling_is_delisted_shows_no_summary(self):
+        """One format for sale is not a choice of formats."""
+        group = ProductGroup.objects.create(name="A work with a dead format")
+        Product.objects.filter(pk__in=(PRINT_PK, NOT_SOLD_HERE_PK)).update(
+            group=group)
+
+        self.assertEqual(
+            Product.objects.get(pk=PRINT_PK).listing_format_labels(), [])
+
+    def test_the_summary_and_the_range_agree_on_which_rows_count(self):
+        """Anti-drift: the card's two group-level statements are about the
+        same set of formats, so a reader can match one to the other."""
+        product = self.group_with_a_delisted_format()
+
+        self.assertEqual(len(product.listing_format_labels()), 2)
+        self.assertEqual(product.listing_price_bounds(), (1299, 2000))
+
+
+class ListingReleaseYearTest(ProductFactoryMixin, TestCase):
+    """A card for a work is dated by the work, not by one of its formats."""
+
+    fixtures = ["initial_products"]
+
+    def test_the_dc4k_card_shows_the_shared_year(self):
+        self.assertEqual(
+            Product.objects.get(pk=PRINT_PK).listing_release_year(), 2026)
+
+    def test_a_later_format_does_not_redate_the_book(self):
+        """The paperback came out in 2019; an e-book in 2024 does not make it
+        a 2024 book. (Where the card SITS is the other question, and the
+        collapse deliberately leaves that to the newest member.)"""
+        group = ProductGroup.objects.create(name="A long-lived work")
+        paperback = self.make_product(
+            pk=430, name="Paperback", price=2000, group=group,
+            format_order=0, release_date=date(2019, 5, 1))
+        self.make_product(
+            pk=431, name="E-book", price=1000, group=group,
+            format_order=1, release_date=date(2024, 5, 1))
+
+        self.assertEqual(paperback.listing_release_year(), 2019)
+        self.assertEqual(
+            Product.objects.get(pk=431).listing_release_year(), 2019)
+
+    def test_an_ungrouped_product_shows_its_own_year(self):
+        self.assertEqual(
+            Product.objects.get(pk=101).listing_release_year(), 2017)
+
+    def test_a_product_with_no_date_anywhere_shows_nothing(self):
+        product = self.make_product(pk=432, name="Undated", price=100)
+
+        self.assertIsNone(product.listing_release_year())
+
+    def test_a_dateless_member_does_not_win_the_earliest(self):
+        """NULL is "unknown", not "the beginning of time"."""
+        group = ProductGroup.objects.create(name="A partly dated work")
+        dated = self.make_product(
+            pk=433, name="Dated", price=2000, group=group, format_order=0,
+            release_date=date(2019, 5, 1))
+        self.make_product(
+            pk=434, name="Undated", price=1000, group=group, format_order=1)
+
+        self.assertEqual(dated.listing_release_year(), 2019)
+
+    @override_settings(THUMBNAIL_DEBUG=False)
+    def test_the_card_renders_the_works_year(self):
+        html = self.client.get("/products").content.decode()
+
+        self.assertIn('<span class="pub-year">2026</span>', html)
 
 
 class ListingPwywNoticeTest(ProductFactoryMixin, TestCase):
@@ -528,6 +676,18 @@ class FormatChooserTest(ProductFactoryMixin, TestCase):
 
     def test_an_ungrouped_product_has_no_chooser(self):
         self.assertEqual(self.options(101), [])
+
+    def test_a_delisted_format_is_offered_by_the_chooser(self):
+        """The chooser answers "what formats exist", so it lists one that is
+        not sold here -- and says so. The listing card is the other way
+        round; see FormatSummaryExcludesDelistedFormatsTest."""
+        group = ProductGroup.objects.create(name="A work with a dead format")
+        Product.objects.filter(pk__in=(PRINT_PK, NOT_SOLD_HERE_PK)).update(
+            group=group)
+
+        self.assertEqual(
+            [option["url"] for option in self.options(PRINT_PK)],
+            [f"/product/{PRINT_PK}", f"/product/{NOT_SOLD_HERE_PK}"])
 
     def test_a_group_of_one_has_no_chooser(self):
         """One format is not a choice; a chooser offering only the page you

@@ -44,8 +44,12 @@
                                         <li><a href="{% url 'product' product.pk %}"><i class="fa fa-shopping-cart"></i></a></li>
                                     </ul>
                                 </div>
+				{# The same name as the heading below: an assistive #}
+				{# technology reading this link out must not #}
+				{# announce a different title from the one on the #}
+				{# card it belongs to. #}
 				<a href="{% url 'product' product.pk %}"
-                                   aria-label="{{ product.name }}">
+                                   aria-label="{{ product.listing_name }}">
                                   <img src="{{ product.get_thumb }}" alt="">
 				</a>
                             </div>
@@ -87,20 +91,29 @@
 				   The formats this one card stands for. Without
 				   it, collapsing the duplicates would also take
 				   away the only sign in the catalogue that the
-				   other formats exist. The price above stays the
-				   linked member's own -- a "from" figure would
-				   be a claim about a row this card does not
-				   link to, and one of DC4K's three formats is
-				   pay-what-you-want and has no floor to quote.
+				   other formats exist -- and it is what names
+				   the format the price range above opens at,
+				   including flagging that format when its end
+				   of the range is a pay-what-you-want
+				   suggestion rather than a price.
 				{% endcomment %}
 				{% with format_labels=product.listing_format_labels %}
 				{% if format_labels %}
 				<span class="format-summary"><small>Available in {{ format_labels|length }} formats: {{ format_labels|join:", " }}</small></span>
 				{% endif %}
 				{% endwith %}
-				{% if product.release_date %}
-				<span class="pub-year">{{ product.release_date.year }}</span>
+				{% comment %}
+				   listing_release_year, not release_date.year:
+				   on a grouped card that is the work's first
+				   publication rather than the release date of
+				   whichever format the card happens to link to.
+				   Ungrouped cards get their own year back.
+				{% endcomment %}
+				{% with release_year=product.listing_release_year %}
+				{% if release_year %}
+				<span class="pub-year">{{ release_year }}</span>
 				{% endif %}
+				{% endwith %}
                             </div>
                         </div>
                     </div>
