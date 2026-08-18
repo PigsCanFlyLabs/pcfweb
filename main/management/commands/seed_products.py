@@ -36,6 +36,20 @@ The same fixture-owned/admin-owned split applies as for ordinary fields. A row
 whose fixture entry declares an M2M key has that relation reset from the
 fixture on every deploy, so an admin-added link on those rows is dropped; a
 row that omits the key is never touched and keeps whatever the admin set.
+
+Format groups take a first pass
+-------------------------------
+``main.productgroup`` entries in the same fixture file are upserted BEFORE any
+product, because ``group`` is a plain foreign key: its value is a column on
+the product row and goes into the same INSERT, so there is nothing to defer
+the way the M2M pass defers cross-links. A product may therefore name a group
+declared anywhere in the file, above or below it.
+
+The fixture spells the key the way Django fixtures do -- ``group: 200`` -- so
+that ``loaddata`` can still read this file in the tests. Neither write path
+here accepts that spelling (``Product(group=200)`` raises, and so does
+``.update(group=200)``), so FK keys are rewritten to ``group_id`` on the way
+in; see ``_product_fk_field_names``.
 """
 
 from __future__ import annotations
@@ -47,7 +61,37 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from main.launch_stock import apply_launch_stock
-from main.models import Product
+from main.models import Product, ProductGroup
+
+
+def _product_fk_field_names() -> Set[str]:
+    """The names of Product's own forward foreign keys.
+
+    Needed because neither write path takes a raw pk under the field's own
+    name. ``Product(pk=pk, group=200)`` raises ``ValueError: Cannot assign
+    "200": "Product.group" must be a "ProductGroup" instance``, and
+    ``.update(group=200)`` is no better. Both take ``group_id=200`` happily,
+    so the fixture keeps the Django-fixture spelling (``group: 200``, which
+    is also what ``loaddata`` reads in the tests) and this command rewrites
+    the key to the attname before either write.
+
+    Read off the model for the same reason ``_product_m2m_field_names`` is:
+    a second FK added to Product later is handled automatically instead of
+    taking the deploy down the first time somebody puts it in the fixture.
+    """
+    return {
+        field.name
+        for field in Product._meta.get_fields()
+        if field.many_to_one and field.concrete
+    }
+
+
+def _to_attnames(fields: Dict[str, Any], fk_names: Set[str]) -> Dict[str, Any]:
+    """``{"group": 200}`` -> ``{"group_id": 200}``, other keys untouched."""
+    return {
+        (f"{name}_id" if name in fk_names else name): value
+        for name, value in fields.items()
+    }
 
 
 def _product_m2m_field_names() -> Set[str]:
@@ -162,6 +206,27 @@ def _validate_m2m_links(
                     )
 
 
+def _validate_group_links(
+    declared: Dict[int, int],
+    known_group_pks: Set[int],
+) -> None:
+    """Reject a product pointing at a group that does not exist.
+
+    Same argument as ``_validate_m2m_links``: checked up front, for the whole
+    fixture at once, so the deploy fails with a sentence naming the offending
+    row instead of an IntegrityError from inside a bulk insert. A missing
+    group is the one way this key can be wrong -- there is no symmetry
+    requirement, since the relation is a plain FK with the group at the one
+    end.
+    """
+    for pk, group_pk in sorted(declared.items()):
+        if group_pk not in known_group_pks:
+            raise CommandError(
+                f"Product fixture pk={pk} names group pk={group_pk}, which "
+                "is neither in the fixture nor in the database."
+            )
+
+
 def _load_fixture(path: str) -> list[dict[str, Any]]:
     """Parse *path* as a Django fixture (JSON or YAML)."""
     with open(path, "rb") as fh:
@@ -178,12 +243,46 @@ class Command(BaseCommand):
         "stock, print_asin and default_asin."
     )
 
+    def seed_groups(self, entries: list[dict[str, Any]]) -> int:
+        """Upsert the ``main.productgroup`` rows. Returns how many exist.
+
+        Runs before the products, because a product's ``group`` key names one
+        of these by pk and the FK has to resolve. Groups are wholly
+        fixture-owned -- a group is one editable field, the name a listing
+        card shows -- so unlike Product there is no protected-field split
+        here and nothing an admin can set that this would overwrite.
+
+        Absence is not an error: a catalogue with no grouped SKUs declares no
+        groups, and that is the state every deployment was in before format
+        groups existed.
+        """
+        for entry in entries:
+            pk: int = entry["pk"]
+            fields: dict = entry["fields"]
+            # Same two write paths as products, and for the same reason:
+            # .update() on an existing row so nothing else about it moves,
+            # a plain create otherwise. ProductGroup.save() reaches nothing
+            # external, so neither path has a Stripe hazard to avoid.
+            if ProductGroup.objects.filter(pk=pk).exists():
+                ProductGroup.objects.filter(pk=pk).update(**fields)
+                self.stdout.write(f"Updated product group pk={pk}")
+            else:
+                ProductGroup.objects.create(pk=pk, **fields)
+                self.stdout.write(f"Created product group pk={pk}")
+        return len(entries)
+
     def handle(self, **options: Any) -> None:
         fixture_path = "main/fixtures/initial_products.yaml"
+        loaded = _load_fixture(fixture_path)
         entries = [
             entry
-            for entry in _load_fixture(fixture_path)
+            for entry in loaded
             if entry.get("model") == "main.product"
+        ]
+        group_entries = [
+            entry
+            for entry in loaded
+            if entry.get("model") == "main.productgroup"
         ]
 
         # A truncated or empty fixture must not look like a successful seed:
@@ -201,15 +300,40 @@ class Command(BaseCommand):
         linked = 0
 
         m2m_field_names = _product_m2m_field_names()
+        fk_field_names = _product_fk_field_names()
         # pk -> {field name: [target pk, ...]}, for the second pass below.
         # Only rows whose fixture entry actually declares an M2M key appear
         # here; an omitted key means "leave this relation alone", exactly as
         # for an omitted ordinary field.
         declared_m2m: Dict[int, Dict[str, List[int]]] = {}
+        # pk -> group pk. Collected before anything is written, so a fixture
+        # naming a group that does not exist fails with a sentence rather
+        # than with a foreign-key violation from inside bulk_create. An
+        # omitted key means what it means everywhere else in this command:
+        # leave the row's group alone.
+        declared_groups: Dict[int, int] = {
+            entry["pk"]: entry["fields"]["group"]
+            for entry in entries
+            if entry["fields"].get("group") is not None
+        }
 
         # All-or-nothing: a failure partway through must not leave the
         # database half-seeded for the deploy that follows.
         with transaction.atomic():
+            # Groups first: a product's `group` key is an FK, and unlike the
+            # M2M pass below there is no deferring it -- the value goes into
+            # the same INSERT as the rest of the row.
+            groups = self.seed_groups(group_entries)
+            if declared_groups:
+                # As with the cross-links, a fixture row may legitimately
+                # name a group created in the admin, so the database counts
+                # as well as the fixture.
+                _validate_group_links(
+                    declared_groups,
+                    {entry["pk"] for entry in group_entries}
+                    | set(ProductGroup.objects.values_list("pk", flat=True)),
+                )
+
             to_create = []
 
             for entry in entries:
@@ -233,10 +357,16 @@ class Command(BaseCommand):
                 if m2m_keys:
                     declared_m2m[pk] = {
                         key: list(raw_fields[key] or []) for key in m2m_keys}
-                fixture_fields = {
-                    name: value for name, value in raw_fields.items()
-                    if name not in m2m_field_names
-                }
+                # FK keys stay in the field dict -- unlike an M2M they are a
+                # column on this row -- but are rewritten to their attname so
+                # that both write paths accept the bare pk the fixture gives.
+                fixture_fields = _to_attnames(
+                    {
+                        name: value for name, value in raw_fields.items()
+                        if name not in m2m_field_names
+                    },
+                    fk_field_names,
+                )
 
                 if Product.objects.filter(pk=pk).exists():
                     # Existing row — update ONLY fixture-owned fields via a
@@ -309,7 +439,8 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 f"Seed complete: {created} created, {updated} updated, "
-                f"{unchanged} unchanged, {linked} cross-linked"
+                f"{unchanged} unchanged, {linked} cross-linked, "
+                f"{groups} format group(s)"
             )
         )
 

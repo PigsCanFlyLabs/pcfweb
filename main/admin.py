@@ -12,6 +12,41 @@ admin.site.register(Product)
 admin.site.register(CartProduct)
 
 
+@admin.register(ProductGroup)
+class ProductGroupAdmin(admin.ModelAdmin):
+    """One work, several format SKUs.
+
+    The inline is the point of this page: a group's members and their order
+    are what the group *is*, and editing them one product page at a time is
+    how two SKUs end up both claiming to be the first format.
+    """
+
+    class MemberInline(admin.TabularInline):
+        model = Product
+        extra = 0
+        fields = ("name", "format_label", "format_order", "price")
+        # Everything else about a product is edited on the product itself;
+        # this page is only about how the formats present as a set.
+        readonly_fields = ("name", "price")
+        can_delete = False
+        ordering = ("format_order", "pk")
+
+        def has_add_permission(self, request, obj=None):
+            # Adding a member here would mean creating a Product from a
+            # blank row, and a Product needs far more than these four
+            # fields. Set `group` on the product instead.
+            return False
+
+    inlines = [MemberInline]
+    list_display = ("pk", "name", "member_count")
+    search_fields = ("name", "products__name")
+
+    def member_count(self, obj):
+        return obj.products.count()
+
+    member_count.short_description = "formats"
+
+
 class OrderItemInline(admin.TabularInline):
     """The snapshotted lines, shown with the order so the owner can pick and
     pack from one page. Read-only: these are a record of what was charged,

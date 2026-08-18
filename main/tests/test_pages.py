@@ -891,8 +891,12 @@ class ProductListingTitleLinksTest(TestCase):
                 html_module.unescape(match.group("title")).strip(),
             ))
 
+        # listing_name(), not name: a card standing for a format group is
+        # titled with the work rather than with the member SKU it links to.
+        # For every ungrouped row -- the rest of the catalogue -- the two are
+        # the same string.
         expected = {
-            (f"/product/{product.pk}", product.name)
+            (f"/product/{product.pk}", product.listing_name())
             for product in expected_products
         }
         self.assertEqual(actual, expected)
@@ -900,25 +904,54 @@ class ProductListingTitleLinksTest(TestCase):
     def test_all_products_listing_links_each_title_to_its_cover_destination(
             self):
         response = self.client.get("/products")
-        products = Product.objects.exclude(noorder=True)
+        products = (Product.objects.exclude(noorder=True)
+                    .order_by_release_date().collapse_format_groups())
 
         self.assert_title_links_match_cover_links(response, products)
 
     def test_books_category_listing_links_each_title_to_its_cover_destination(
             self):
         response = self.client.get("/products/B")
-        products = Product.objects.filter(
-            cat=Product.Categories.BOOKS).exclude(noorder=True)
+        products = (Product.objects.filter(cat=Product.Categories.BOOKS)
+                    .exclude(noorder=True)
+                    .order_by_release_date().collapse_format_groups())
 
         self.assert_title_links_match_cover_links(response, products)
 
     def test_books_category_query_links_each_title_to_its_cover_destination(
             self):
         response = self.client.get("/products", {"category": "B"})
-        products = Product.objects.filter(
-            cat=Product.Categories.BOOKS).exclude(noorder=True)
+        products = (Product.objects.filter(cat=Product.Categories.BOOKS)
+                    .exclude(noorder=True)
+                    .order_by_release_date().collapse_format_groups())
 
         self.assert_title_links_match_cover_links(response, products)
+
+    def test_a_grouped_work_gets_one_card_and_the_works_title(self):
+        """The listing's half of format grouping, asserted directly.
+
+        The three helpers above take the collapsed list as their premise, so
+        on their own they would still pass if the view stopped collapsing and
+        the expectation followed it. This one states the rule.
+        """
+        response = self.client.get("/products")
+        html = response.content.decode()
+        matches = list(self.CARD_LINK_PATTERN.finditer(html))
+        dc4k = Product.objects.get(pk=104)
+
+        cards = [
+            match for match in matches
+            if match.group("title_href") in {
+                f"/product/{member.pk}" for member in dc4k.group_members()}
+        ]
+
+        self.assertEqual(
+            len(cards), 1,
+            "the three DC4K formats should share one catalogue card")
+        self.assertEqual(cards[0].group("title_href"), "/product/104")
+        self.assertEqual(
+            html_module.unescape(cards[0].group("title")).strip(),
+            dc4k.group.name)
 
 
 @override_settings(THUMBNAIL_DEBUG=False)

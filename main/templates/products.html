@@ -50,14 +50,38 @@
 				</a>
                             </div>
                             <div class="down-content">
+				{% comment %}
+				   listing_name, not name: a card for a grouped
+				   work stands for every format of it, and the
+				   member representing the group carries a
+				   format-specific title ("... — E-book") that
+				   would misname the card. Ungrouped products --
+				   most of the catalogue -- get their own name
+				   back from it unchanged.
+				{% endcomment %}
                                 <h4><a href="{% url 'product' product.pk %}"
-                                       style="color: inherit; text-decoration: none;">{{product.name}}</a></h4>
+                                       style="color: inherit; text-decoration: none;">{{product.listing_name}}</a></h4>
                                 <span>
 				  {{product.get_display_price}}
 				  {% if product.is_pwyw %}
 				  <br><small class="pwyw-label">Pay what you want &mdash; suggested amount, or nothing at all</small>
 				  {% endif %}
 				</span>
+				{% comment %}
+				   The formats this one card stands for. Without
+				   it, collapsing the duplicates would also take
+				   away the only sign in the catalogue that the
+				   other formats exist. The price above stays the
+				   linked member's own -- a "from" figure would
+				   be a claim about a row this card does not
+				   link to, and one of DC4K's three formats is
+				   pay-what-you-want and has no floor to quote.
+				{% endcomment %}
+				{% with format_labels=product.listing_format_labels %}
+				{% if format_labels %}
+				<span class="format-summary"><small>Available in {{ format_labels|length }} formats: {{ format_labels|join:", " }}</small></span>
+				{% endif %}
+				{% endwith %}
 				{% if product.release_date %}
 				<span class="pub-year">{{ product.release_date.year }}</span>
 				{% endif %}

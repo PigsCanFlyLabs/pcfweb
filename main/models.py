@@ -62,6 +62,61 @@ class EmailIdentity(models.Model):
         super().save(*args, **kwargs)
 
 
+class ProductGroup(models.Model):
+    """One work, sold here as several SKUs.
+
+    "Distributed Computing 4 Kids (and Executives)" is one book with three
+    product rows: a paperback, the Executive Edition and an e-book. Each of
+    those is a genuinely separate SKU -- its own ISBN, its own price, its own
+    tax code, its own Stripe product -- and none of that changes here. What a
+    group changes is only how they are *presented*: the catalogue shows the
+    work once instead of three near-identical cards, and each product page
+    offers the other formats, the way a retailer's page offers hardcover
+    beside paperback beside e-book.
+
+    Deliberately a model of its own rather than a shared slug column on
+    Product. The group has one piece of state -- the name the listing shows --
+    and a column repeated on every member is a column that can disagree with
+    itself; the row that names the work is then whichever one you happen to
+    read. A foreign key also makes "these three are the same book" a fact the
+    database enforces rather than a string convention.
+
+    Distinct from ``Product.x_links``, which stays what it was: a free-form
+    "see also" between rows that need not be the same work at all (a first
+    edition and a second, say). A group is the stronger statement -- one
+    work, several formats -- and it is the only one of the two that collapses
+    a listing. Nothing here supersedes x_links, and a grouped product's
+    x_links to rows OUTSIDE its group are still rendered; see
+    ``Product.get_other_edition_links``.
+    """
+
+    name = models.CharField(
+        max_length=250,
+        help_text=(
+            "The work's title, shown on the single card that stands for the "
+            "whole group in listings. Not a format name -- those live on "
+            "each member's format_label."
+        ),
+    )
+
+    def members(self) -> "models.QuerySet":
+        """Every SKU in this group, in the owner's chosen format order.
+
+        ``format_order`` then pk, which is the one ordering used everywhere a
+        group is rendered -- the format list on a product page, the format
+        summary on a listing card, and the choice of which member represents
+        the group. Reading it from one method means those three can never
+        disagree about which format comes first.
+        """
+        return self.products.order_by("format_order", "pk")
+
+    def __str__(self) -> str:
+        return f'{self.name}'
+
+    def __repr__(self) -> str:
+        return f'<ProductGroup: {self.name}>'
+
+
 # Create your models here.
 class ProductQuerySet(models.QuerySet):
     """Custom QuerySet for Product."""
@@ -75,6 +130,53 @@ class ProductQuerySet(models.QuerySet):
         """
         return self.order_by(
             models.F('release_date').desc(nulls_last=True), 'pk')
+
+    def collapse_format_groups(self) -> List["Product"]:
+        """One entry per work: grouped SKUs collapse to a single member.
+
+        Returns a list rather than a QuerySet, and that is not laziness about
+        SQL. "Keep one row per group, preferring the member the owner ordered
+        first, but fall back to whichever members are actually in *this*
+        queryset" is a rule about the rows that survived filtering, and the
+        fallback half is the reason: a category page, or the
+        ``exclude(noorder=True)`` every listing applies, can perfectly well
+        remove the preferred member. A DISTINCT ON would then drop the whole
+        work off the page rather than showing the format that is still there.
+
+        Ungrouped products -- which is most of the catalogue -- pass through
+        untouched and one-for-one.
+
+        Ordering is inherited, never imposed: each group takes the position of
+        its first surviving member in whatever order the caller established
+        (``order_by_release_date`` at every current call site), so collapsing
+        can move a work up the page only by removing its duplicates, never by
+        reordering what is left. The member DISPLAYED is a separate question
+        from the position, and is decided by ``format_order`` -- so the
+        paperback can represent the work while the e-book, seeded first by
+        release date, decides where the card sits.
+        """
+        # select_related keeps the group name a join rather than a query per
+        # card; prefetch_related does the same for the format summary each
+        # card renders, which otherwise walks back to the group's members.
+        queryset = self.select_related("group").prefetch_related(
+            "group__products")
+
+        collapsed: List["Product"] = []
+        # group id -> index into `collapsed`, so a later member can replace
+        # the row standing for its group without moving the group's position.
+        positions: Dict[int, int] = {}
+
+        for product in queryset:
+            if product.group_id is None:
+                collapsed.append(product)
+                continue
+            position = positions.get(product.group_id)
+            if position is None:
+                positions[product.group_id] = len(collapsed)
+                collapsed.append(product)
+            elif product.format_rank() < collapsed[position].format_rank():
+                collapsed[position] = product
+        return collapsed
 
 
 class Product(models.Model):
@@ -339,6 +441,78 @@ class Product(models.Model):
             "self", symmetrical=False, blank=True,
             related_name="print_x_links"))
 
+    # The work this SKU is a format of. See ProductGroup for what a group is
+    # and what it deliberately is not.
+    #
+    # NULL means "this product stands alone", which is most of the catalogue
+    # and is the correct default for anything added later without a thought
+    # about grouping: an ungrouped row lists and renders exactly as it did
+    # before groups existed. Nullable also makes the column safe for a rolling
+    # deploy, the same argument spelled out on `msrp` -- an INSERT from a pod
+    # that has never heard of this column omits it and lands NULL.
+    #
+    # SET_NULL rather than CASCADE, and the difference is a real one: deleting
+    # a group is a statement about presentation ("stop showing these as one
+    # work"), and CASCADE would turn it into a statement about the catalogue
+    # ("delete the three books"). PROTECT would be defensible; SET_NULL is
+    # kinder to the admin and loses nothing that cannot be re-entered.
+    group = models.ForeignKey(
+        ProductGroup,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="products",
+        help_text=(
+            "Optional. Other formats of the same work; grouped products "
+            "share one card in listings and offer each other as format "
+            "choices."
+        ),
+    )
+
+    # What this SKU is, as a format: "Paperback", "Executive Edition",
+    # "E-book". Shown on the format chooser, where the row is one of several
+    # for the same book and the thing the reader is choosing between is
+    # exactly this.
+    #
+    # Its own field rather than anything derived from `name` or
+    # `delivery_type`. Deriving it from the name would mean parsing an em-dash
+    # suffix out of admin-entered copy; deriving it from delivery_type can
+    # tell PHYSICAL from DIGITAL and therefore cannot tell the paperback from
+    # the Executive Edition, which is the one distinction the DC4K chooser
+    # exists to draw. Blank falls back to the product's own name -- see
+    # get_format_label() -- so a member added without one loses a tidy label
+    # rather than rendering an empty button.
+    format_label = models.CharField(
+        max_length=80,
+        blank=True,
+        db_default="",
+        help_text=(
+            "How this format is named on the chooser: \"Paperback\", "
+            "\"E-book\". Only meaningful when the product is in a group; "
+            "falls back to the product name."
+        ),
+    )
+
+    # Where this SKU sits among its group's formats, low first. Also decides
+    # which member represents the group in a collapsed listing -- see
+    # ProductQuerySet.collapse_format_groups -- so the first format is
+    # deliberately "the one to show somebody who has not chosen yet" rather
+    # than merely the top of a list.
+    #
+    # An explicit small integer with a db_default, not an ordering inferred
+    # from price or from pk. Price ordering would reshuffle the chooser every
+    # time a price changed, and pk ordering would make it an accident of which
+    # SKU was entered first. Ties fall back to pk, so leaving every member at
+    # 0 is a legitimate choice and simply means "creation order".
+    format_order = models.IntegerField(
+        default=0,
+        db_default=0,
+        help_text=(
+            "Order within the group, lowest first. The lowest-ordered "
+            "member is the one a collapsed listing shows."
+        ),
+    )
+
     def get_display_price(self) -> str:
         formatted_price = "{0:.2f}".format(self.price / 100)
         if self.preorder_only:
@@ -589,6 +763,193 @@ class Product(models.Model):
                 (f"{self.EBOOK_CROSS_LINK_PREFIX}: {ebook.name}",
                  ebook.get_absolute_url()))
         return links
+
+    # ------------------------------------------------------------------
+    # Format groups. See ProductGroup, and collapse_format_groups() above.
+    # ------------------------------------------------------------------
+
+    # The chooser's heading and the marker on the row you are already on.
+    # Named here rather than written into the template for the same reason
+    # AMAZON_EBOOK_LABEL and OUT_OF_DATE_NOTICE are: the tests assert against
+    # the source of truth instead of against a second copy of the words.
+    FORMAT_CHOOSER_HEADING = "Choose your format"
+    FORMAT_CURRENT_MARKER = "You are viewing this format"
+    # What the price column says instead of a number, for the two rows where
+    # a bare figure would be a false claim: a product we do not sell has no
+    # price here, and a pay-what-you-want price is a suggestion.
+    FORMAT_NOT_SOLD_HERE = "Not sold here"
+    FORMAT_PWYW_PRICE = "Pay what you want"
+    # How a pay-what-you-want format is flagged in a listing card's format
+    # summary. See listing_format_labels() for why that flag has to be there.
+    PWYW_FORMAT_SUFFIX = "pay what you want"
+
+    def format_rank(self) -> Tuple[int, int]:
+        """This SKU's position among its group's formats.
+
+        ``(format_order, pk)`` -- the same key ``ProductGroup.members()``
+        sorts by, as a value the collapse in ProductQuerySet can compare
+        without a second query. pk breaks ties so the answer is total and
+        stable rather than dependent on row order.
+        """
+        return (self.format_order, self.pk)
+
+    def get_format_label(self) -> str:
+        """How this SKU is named on the format chooser.
+
+        Falls back to the product's own name, which is never empty, so a
+        group member somebody forgot to label renders a long button rather
+        than a blank one. A blank button is unclickable-looking and says
+        nothing about where it goes; a long one is merely untidy.
+        """
+        return self.format_label or self.name
+
+    def group_members(self) -> List["Product"]:
+        """Every SKU of this work, this one included, in format order.
+
+        Empty -- not ``[self]`` -- for an ungrouped product. Callers use the
+        emptiness to mean "there is no choice of format to offer here", and a
+        one-element list would make every ungrouped page render a chooser
+        offering the page you are already on.
+        """
+        # `self.group`, not `self.group_id`: on a nullable FK the descriptor
+        # returns None without a query when the column is NULL, so this costs
+        # no more than the id check and it narrows the type for the caller
+        # below.
+        group = self.group
+        if group is None:
+            return []
+        return list(group.members())
+
+    def get_format_options(self) -> List[Dict[str, Any]]:
+        """The format chooser for this product's page.
+
+        One entry per SKU in the group, including this one -- Amazon's
+        format strip works the same way, and a chooser that hid the current
+        format would leave the reader unable to see what they are looking at
+        beside what they are not.
+
+        Navigation, like get_cross_links() and unlike get_ebook_cross_links():
+        every URL is another row's own product page, so nothing here is
+        purchase-gated. A format we no longer sell is still a true answer to
+        "what formats exist", and the entry says so in its own price column
+        (FORMAT_NOT_SOLD_HERE) rather than by quietly disappearing.
+
+        What the price column must never do is state a figure that is not
+        what the reader would pay:
+
+        * a ``noorder`` row's price is meaningless here (it is 0 on pk 107),
+          so it is replaced outright;
+        * a pay-what-you-want row's price is a suggestion, and printing
+          "12.99" beside two fixed prices would read as a third fixed price.
+          It says so, and carries the suggestion as a note.
+
+        Returns dicts rather than Products so the template cannot reach past
+        the vetted fields into, say, an add-to-cart on a sibling row -- the
+        thing get_ebook_cross_links()' docstring is entirely about.
+
+        An empty list for anything that is not in a group with a sibling: one
+        format is not a choice.
+        """
+        members = self.group_members()
+        if len(members) < 2:
+            return []
+
+        options = []
+        for member in members:
+            if member.noorder:
+                price = self.FORMAT_NOT_SOLD_HERE
+                note = ""
+            elif member.is_pwyw:
+                price = self.FORMAT_PWYW_PRICE
+                note = f"suggested {member.pwyw_suggested_amount()}"
+            else:
+                # get_display_price() already prefixes "Pre-order: " on a
+                # preorder row, which is the honest thing to say in a column
+                # of prices for formats that ship at different times.
+                price = member.get_display_price()
+                note = "Out of stock" if member.is_out_of_stock() else ""
+            options.append({
+                "label": member.get_format_label(),
+                # The SKU's own name as well as its format label. The label
+                # is what the reader is choosing between; the name is which
+                # row they land on, and "the label names the target" is the
+                # rule get_ebook_cross_links() exists to keep.
+                "name": member.name,
+                "url": member.get_absolute_url(),
+                "price": price,
+                "note": note,
+                "is_current": member.pk == self.pk,
+            })
+        return options
+
+    def listing_name(self) -> str:
+        """The title on this product's card in a listing.
+
+        The work's name for a grouped product, its own name otherwise. A
+        collapsed card stands for the whole group, so titling it with the
+        member that happens to represent the group would put "— E-book" on
+        the catalogue's only card for a book that is mostly sold on paper.
+        """
+        group = self.group
+        if group is None:
+            return self.name
+        return group.name
+
+    def listing_format_labels(self) -> List[str]:
+        """The formats a collapsed card should say it stands for.
+
+        The card links to one member's page, so without this a visitor has no
+        way to tell from the catalogue that the other two formats exist at
+        all -- which is the one thing collapsing the cards could otherwise
+        take away from them.
+
+        A pay-what-you-want format says so here, and that annotation is not
+        decoration. Before grouping, the e-book had a card of its own and
+        that card carried the "pay what you want" label beside its price;
+        collapsing the three DC4K cards into one removes it, and the card
+        that remains shows the paperback's fixed price -- so without this the
+        catalogue would stop mentioning pay-what-you-want at all. The
+        annotation goes on the FORMAT rather than on the card's price for the
+        same reason: the price on the card is the paperback's and really is
+        fixed, and labelling it a suggestion would be the exact false claim
+        the label exists to prevent.
+
+        The chooser on the product page needs no such annotation -- its price
+        column says "Pay what you want" outright -- which is why this is not
+        folded into get_format_label().
+
+        Empty for anything that is not in a group with a sibling, so an
+        ungrouped card renders exactly as it did before groups existed.
+        """
+        members = self.group_members()
+        if len(members) < 2:
+            return []
+        return [
+            (f"{member.get_format_label()} ({self.PWYW_FORMAT_SUFFIX})"
+             if member.is_pwyw else member.get_format_label())
+            for member in members
+        ]
+
+    def get_other_edition_links(self) -> List[Tuple[str, str]]:
+        """get_cross_links(), minus anything the format chooser already shows.
+
+        Both lists are navigation to sibling product pages, so rendering both
+        unfiltered puts every format of a grouped work on its own page twice.
+        Which one wins is not arbitrary: the chooser states each sibling's
+        format and price, and this list states only a name, so the chooser is
+        the better of the two wherever they overlap.
+
+        What survives is the case the two fields do not share: an x_link to a
+        row that is NOT the same work -- a different edition, a sequel, a
+        related title. Those still have nowhere else to render, which is why
+        this filters the list rather than the template dropping it whenever a
+        chooser is present.
+        """
+        if self.group_id is None:
+            return self.get_cross_links()
+        group_urls = {option["url"] for option in self.get_format_options()}
+        return [(name, url) for name, url in self.get_cross_links()
+                if url not in group_urls]
 
     @staticmethod
     def _amazon_url(domain: str, asin: Optional[str]) -> Optional[str]:

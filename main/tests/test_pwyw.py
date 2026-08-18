@@ -14,6 +14,7 @@ recurring. A pay-what-you-want line is an ordinary fixed Price now, so none of
 those bind, and the tests that asserted the refusals assert their absence.
 """
 
+from datetime import date
 from unittest import mock
 
 from django.conf import settings
@@ -688,25 +689,62 @@ class PwywIsLabelledWhereverAPriceIsShownTest(CartTestBase):
     cart both mint Stripe objects on save.
     """
 
-    def test_the_products_listing_labels_the_pwyw_ebook(self):
+    def newest_pwyw_product(self, name: str) -> Product:
+        """An ungrouped pay-what-you-want book, newest in the catalogue.
+
+        Both listings order by release date, so a row with none sinks below
+        every fixture book and never reaches the homepage's [:3] slice. The
+        date is what puts it on the page; the price is incidental.
+        """
+        return Product.objects.create(
+            name=name, description="d", price=999999,
+            is_pwyw=True, cat=Product.Categories.BOOKS,
+            release_date=date(2027, 1, 1),
+            delivery_type=Product.DeliveryTypes.DIGITAL)
+
+    def test_the_products_listing_labels_a_pwyw_card(self):
+        """The rule: a card showing a pay-what-you-want price says so.
+
+        Asserted on an ungrouped row rather than on the DC4K e-book, which no
+        longer has a card of its own -- its format group shows one card for
+        the work, and that card carries the paperback's genuinely fixed
+        price. See the next test for what the catalogue says about the
+        e-book instead.
+        """
+        self.newest_pwyw_product("A Dear E-book")
+
         response = self.client.get("/products")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(CARD_LABEL, squashed(response))
 
+    def test_the_products_listing_still_advertises_the_pwyw_format(self):
+        """Collapsing the DC4K cards must not lose the pay-what-you-want
+        option: the surviving card names the format and flags it.
+
+        On the format summary and not on the price, because the price on that
+        card is the paperback's fixed 20.00 -- labelling THAT a suggestion
+        would be the exact false claim CARD_LABEL exists to prevent.
+        """
+        body = squashed(self.client.get("/products"))
+        ebook = Product.objects.get(pk=EBOOK_PK)
+
+        self.assertIn(
+            f"{ebook.get_format_label()} ({Product.PWYW_FORMAT_SUFFIX})",
+            body)
+        # And the card it sits on is the group's, priced at the paperback.
+        self.assertNotIn(CARD_LABEL, body)
+
     def test_the_products_listing_leaves_fixed_price_rows_alone(self):
         # The label is conditional, not decoration on every card.
+        self.newest_pwyw_product("A Dear E-book")
+
         response = self.client.get("/products")
 
         self.assertEqual(squashed(response).count(CARD_LABEL), 1)
 
     def test_the_homepage_carousel_labels_a_pwyw_product(self):
-        # The carousel shows the three dearest rows per category, and the
-        # e-book is not one of them -- so price this above the fixtures.
-        Product.objects.create(
-            name="A Dear E-book", description="d", price=999999,
-            is_pwyw=True, cat=Product.Categories.BOOKS,
-            delivery_type=Product.DeliveryTypes.DIGITAL)
+        self.newest_pwyw_product("A Dear E-book")
 
         response = self.client.get("/")
 

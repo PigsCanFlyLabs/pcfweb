@@ -346,6 +346,52 @@ Bootstrap products (Holden's books) live in
 - `external_product_id` (Stripe) is generated lazily on first add-to-cart,
   so seeding needs no Stripe access.
 
+### Format groups (one work, several SKUs)
+
+"Distributed Computing 4 Kids (and Executives)" is one book sold three ways —
+paperback (pk 104), Executive Edition (105) and e-book (106) — each with its
+own ISBN, price, tax code and product page. A `ProductGroup` says those rows
+are one work, so:
+
+- `/products` and the homepage carousel show **one card** for the group,
+  titled with the group's name, priced at the shown member's price, and
+  carrying an "Available in N formats: …" line;
+- each product page renders a **format chooser** listing every format with its
+  own price, linking to that format's own page.
+
+To group SKUs, add a `main.productgroup` row to the fixture (pks 200+, a
+separate sequence from products) and give each member `group`, `format_label`
+and `format_order`:
+
+```yaml
+- model: main.productgroup
+  pk: 200
+  fields:
+    name: "Distributed Computing 4 Kids (and Executives)"
+```
+
+```yaml
+    group: 200
+    format_label: "Paperback"
+    format_order: 0
+```
+
+`format_order` is lowest-first and also decides **which member the collapsed
+card links to** — the format to show somebody who has not chosen yet. If that
+member is filtered out of a listing (delisted, or a category page), the group
+still appears, represented by a surviving member.
+
+Grouping is presentation only. It never merges SKUs: identifiers, prices,
+stock, Stripe products, product pages and Google Merchant feed entries all
+stay per-row, and no chooser entry is an add-to-cart — each one links to the
+page that sells that format. Pinned end to end by
+`main/tests/test_product_groups.py`.
+
+Groups are seeded before products (a `group` key is a foreign key and lands in
+the same INSERT as the rest of the row), so a product may name a group
+declared anywhere in the file. A product naming a group that does not exist
+fails the seed with a message rather than a foreign-key error.
+
 ### Stock
 
 `Product.stock` gates whether a physical book can be bought **on this site**.

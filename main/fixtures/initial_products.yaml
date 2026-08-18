@@ -54,6 +54,27 @@
 #
 # `ebook_x_links` is directional and takes no such pairing: a print row points
 # at the e-book row, and the e-book does not point back at the paperback.
+#
+# Format groups (`main.productgroup` rows, and the `group` / `format_label` /
+# `format_order` keys on a product) are a different statement from either
+# cross-link field: "these SKUs are one work in several formats". A group
+# collapses the catalogue's duplicate cards into one and renders the format
+# chooser on each member's page. Groups are seeded before products by
+# seed_products, so a product may name a group defined further down this file.
+#
+# Grouping does NOT merge the SKUs: each keeps its own ISBN, price, tax code,
+# stock, Stripe product and product page, and each is still a separate offer
+# in the Google Merchant feed. It is a presentation rule and nothing else.
+#
+# pks 200+ for groups, which is a separate sequence from the 100+ product pks
+# and cannot collide with them -- they are different tables.
+- model: main.productgroup
+  pk: 200
+  fields:
+    # The work, not the edition: the name a single catalogue card carries for
+    # all three DC4K SKUs. It matches pk 104's own name because the standard
+    # paperback is the unsuffixed one; the other two suffix their format.
+    name: "Distributed Computing 4 Kids (and Executives)"
 - model: main.product
   pk: 100
   fields:
@@ -298,6 +319,17 @@
     # only either sell a paperback as a download or put a product the visitor
     # never named into their cart.
     ebook_x_links: [106]
+    # The three SKUs are one work, so they share a format group and the
+    # catalogue shows one card for them instead of three.
+    #
+    # format_order 0 makes this row the one that card links to, which is the
+    # deliberate choice and not a tiebreak: the standard paperback is what to
+    # show a visitor who has not picked a format. It is the middle price of
+    # the three, so neither the cheapest-first nor the dearest-first reading
+    # of an inferred order would have produced it.
+    group: 200
+    format_label: "Paperback"
+    format_order: 0
 - model: main.product
   pk: 105
   fields:
@@ -353,6 +385,15 @@
     # which product it lands on, so nobody is told they are getting an
     # executive-edition download.
     ebook_x_links: [106]
+    # Second in the chooser, behind the standard paperback: this is the
+    # upgrade, and an upgrade listed first reads as the default.
+    #
+    # The label names the edition rather than the binding. It is a print SKU
+    # like pk 104 -- what a buyer is choosing between here is not paper
+    # versus cloth, it is the standard edition versus this one.
+    group: 200
+    format_label: "Executive Edition"
+    format_order: 1
 - model: main.product
   pk: 106
   fields:
@@ -415,6 +456,15 @@
     # paperbacks would render "Get the e-book: ...(print edition)" buttons on
     # the e-book's own page. The key is omitted rather than set to [], so the
     # relation stays admin-editable if a second e-book edition ever exists.
+    #
+    # Last in the chooser, and last is not a judgement about the format --
+    # it is where a reader looking for "the book" expects the download to be,
+    # under the physical copies. Its price column says "Pay what you want"
+    # rather than 12.99, because 12.99 beside two fixed prices would read as
+    # a third fixed price; the suggestion goes in the note beneath.
+    group: 200
+    format_label: "E-book"
+    format_order: 2
 # "Fast Data Processing with Spark" (Packt, 2013) -- Holden's first book and
 # the first book written about Apache Spark. Listed for the history, not for
 # sale: noorder makes is_purchasable() false, which suppresses the buy button,
