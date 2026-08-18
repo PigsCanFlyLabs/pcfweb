@@ -930,6 +930,102 @@ class Product(models.Model):
             for member in members
         ]
 
+    # What sits between the two ends of a listing price range. Named rather
+    # than written inline for the usual reason -- the tests assert against
+    # the source of truth -- and an en dash rather than a hyphen because a
+    # hyphen between two numbers reads as a minus sign.
+    PRICE_RANGE_SEPARATOR = " – "
+
+    def listing_price_bounds(self) -> Optional[Tuple[int, int]]:
+        """The cheapest and dearest a grouped card stands for, in cents.
+
+        None when there is no range to speak of: an ungrouped product, a
+        group of one, or a group with nothing sellable in it. Those cases
+        fall back to the product's own price -- see listing_price_display().
+
+        A ``noorder`` member is left out, and that exclusion is the one thing
+        here that has to be right. Its price column is meaningless (pk 107's
+        is literally 0), so counting it would put "0.00 – 34.42" on a card
+        and advertise a free book that is not for sale at all.
+
+        A pay-what-you-want member contributes its SUGGESTED amount -- the
+        number in `price`, which for that row is a suggestion rather than a
+        price. That is the owner's call and it is what makes the low end of
+        the DC4K range 12.99 rather than 0.00; a range starting at 0.00 would
+        be true of the e-book alone and read as a claim about the book. What
+        keeps it honest is the format summary rendered beside it, which names
+        that format and flags it -- see listing_format_labels().
+        """
+        members = self.group_members()
+        if len(members) < 2:
+            return None
+        prices = [member.price for member in members if not member.noorder]
+        if not prices:
+            return None
+        return (min(prices), max(prices))
+
+    def listing_price_display(self) -> str:
+        """The price on this product's card in a listing.
+
+        A range over the formats a grouped card stands for -- "12.99 – 34.42"
+        -- because that card no longer belongs to any one of them. Quoting a
+        single member's price under a title naming the work says the book
+        costs 20.00 when one format is cheaper and another dearer, and the
+        member being quoted is an implementation detail of the collapse
+        (format_order) rather than anything the visitor chose.
+
+        Bare numbers, because a range cannot carry get_display_price()'s
+        "Pre-order: " prefix: prefixing the pair would claim both ends ship
+        later when it may be true of only one, and prefixing one end of a
+        range is not a thing a price can say. The card links to a product
+        page that states that format's availability for itself, and the
+        chooser there states the others'.
+
+        Everything else falls through to get_display_price() unchanged --
+        every ungrouped product in the catalogue, plus a group whose formats
+        happen to cost the same, which has a price rather than a range.
+        """
+        bounds = self.listing_price_bounds()
+        if bounds is None:
+            return self.get_display_price()
+        low, high = bounds
+        if low == high:
+            # One price, not a range: the formats agree on what the book
+            # costs. Answered by this row where it can be --
+            # get_display_price() keeps the "Pre-order: " prefix, which is
+            # safe here precisely because there is only one price to qualify
+            # -- and by the shared figure where it cannot, which is when this
+            # row is itself the delisted one left out of the bounds above.
+            if not self.noorder:
+                return self.get_display_price()
+            return _display_amount(low)
+        return (f"{_display_amount(low)}{self.PRICE_RANGE_SEPARATOR}"
+                f"{_display_amount(high)}")
+
+    def listing_price_is_a_range(self) -> bool:
+        """Whether this product's card shows a span rather than a price.
+
+        The single question both listing_price_display() above and
+        listing_shows_pwyw_notice() below turn on, asked once so the notice
+        cannot end up describing a number the card is not showing.
+        """
+        bounds = self.listing_price_bounds()
+        return bounds is not None and bounds[0] != bounds[1]
+
+    def listing_shows_pwyw_notice(self) -> bool:
+        """Whether the card's price is THIS row's pay-what-you-want figure.
+
+        The notice beside a card's price says that number is a suggestion and
+        that nothing at all is a valid amount. That is true of a card showing
+        one pay-what-you-want row's own price -- which is what every such
+        card showed before format groups existed, and still is for an
+        ungrouped one. It is false of a card showing a range across several
+        formats: the number it would sit under is a span, mostly fixed prices
+        belonging to other rows. A range's pay-what-you-want end is flagged
+        in the format summary instead, on the format it is true of.
+        """
+        return self.is_pwyw and not self.listing_price_is_a_range()
+
     def get_other_edition_links(self) -> List[Tuple[str, str]]:
         """get_cross_links(), minus anything the format chooser already shows.
 

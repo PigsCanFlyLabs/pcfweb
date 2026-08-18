@@ -354,8 +354,8 @@ own ISBN, price, tax code and product page. A `ProductGroup` says those rows
 are one work, so:
 
 - `/products` and the homepage carousel show **one card** for the group,
-  titled with the group's name, priced at the shown member's price, and
-  carrying an "Available in N formats: …" line;
+  titled with the group's name, priced as the **range** its formats span
+  ("12.99 – 34.42"), and carrying an "Available in N formats: …" line;
 - each product page renders a **format chooser** listing every format with its
   own price, linking to that format's own page.
 
@@ -375,6 +375,13 @@ and `format_order`:
     format_label: "Paperback"
     format_order: 0
 ```
+
+The range covers every member that is sold here — a `noorder` format is left
+out, since its price is 0 because nobody can buy it. A pay-what-you-want
+format contributes its **suggested** amount, so the DC4K range opens at 12.99
+rather than at the e-book's 0.00 floor; the format summary beside it flags
+which format that is. Formats that all cost the same show one price, not a
+range, and an ungrouped product's card is unchanged.
 
 `format_order` is lowest-first and also decides **which member the collapsed
 card links to** — the format to show somebody who has not chosen yet. If that

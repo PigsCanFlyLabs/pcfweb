@@ -722,9 +722,11 @@ class PwywIsLabelledWhereverAPriceIsShownTest(CartTestBase):
         """Collapsing the DC4K cards must not lose the pay-what-you-want
         option: the surviving card names the format and flags it.
 
-        On the format summary and not on the price, because the price on that
-        card is the paperback's fixed 20.00 -- labelling THAT a suggestion
-        would be the exact false claim CARD_LABEL exists to prevent.
+        This matters more since the card started showing a price range, not
+        less. That range opens at 12.99 -- the e-book's SUGGESTED amount --
+        and the rest of it is two fixed print prices, so CARD_LABEL under it
+        would call the whole span a suggestion. The flag goes on the format
+        the suggestion actually belongs to.
         """
         body = squashed(self.client.get("/products"))
         ebook = Product.objects.get(pk=EBOOK_PK)
@@ -732,7 +734,11 @@ class PwywIsLabelledWhereverAPriceIsShownTest(CartTestBase):
         self.assertIn(
             f"{ebook.get_format_label()} ({Product.PWYW_FORMAT_SUFFIX})",
             body)
-        # And the card it sits on is the group's, priced at the paperback.
+        # Anti-vacuity: the low end of the range really is the suggestion,
+        # so there is something for the flag to be qualifying.
+        self.assertIn(
+            f"{ebook.pwyw_suggested_amount()}"
+            f"{Product.PRICE_RANGE_SEPARATOR}", body)
         self.assertNotIn(CARD_LABEL, body)
 
     def test_the_products_listing_leaves_fixed_price_rows_alone(self):

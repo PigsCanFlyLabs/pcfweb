@@ -217,6 +217,22 @@ class GroupedListingRenderingTest(TestCase):
 
     fixtures = ["initial_products"]
 
+    def dc4k_card(self) -> str:
+        """The DC4K group's card on /products, as rendered markup.
+
+        Split on the card body rather than parsed, which is enough to keep an
+        assertion about one card from being satisfied by another card's
+        contents -- the point of asserting on a card rather than on the page.
+        """
+        html = self.client.get("/products").content.decode()
+        cards = [f'<div class="down-content">{part}'
+                 for part in html.split('<div class="down-content">')[1:]]
+        matching = [card for card in cards
+                    if f'href="/product/{PRINT_PK}"' in card]
+
+        self.assertEqual(len(matching), 1, "expected exactly one DC4K card")
+        return matching[0]
+
     def test_the_catalogue_links_the_group_once(self):
         html = self.client.get("/products").content.decode()
 
@@ -247,6 +263,29 @@ class GroupedListingRenderingTest(TestCase):
 
         self.assertIn(f"E-book ({Product.PWYW_FORMAT_SUFFIX})", html)
 
+    def test_the_card_prices_the_group_as_a_range(self):
+        html = self.client.get("/products").content.decode()
+
+        self.assertIn(
+            f"12.99{Product.PRICE_RANGE_SEPARATOR}34.42", html)
+
+    def test_the_card_does_not_quote_one_members_price_as_the_works(self):
+        """The card is titled with the work, so a single figure on it reads
+        as what the book costs -- and the member it would come from was
+        picked by format_order, not by the visitor."""
+        card = self.dc4k_card()
+
+        self.assertNotIn("20.00", card)
+        self.assertIn(
+            f"12.99{Product.PRICE_RANGE_SEPARATOR}34.42", card)
+
+    def test_an_ungrouped_card_keeps_its_own_price(self):
+        html = self.client.get("/products").content.decode()
+
+        # pk 108, ungrouped, 65.99 -- rendered exactly as before groups.
+        self.assertIn("65.99", html)
+        self.assertNotIn(f"65.99{Product.PRICE_RANGE_SEPARATOR}", html)
+
     def test_an_ungrouped_card_carries_no_format_summary(self):
         """The summary is conditional, not decoration on every card: an
         ungrouped product lists exactly as it did before groups existed."""
@@ -260,6 +299,148 @@ class GroupedListingRenderingTest(TestCase):
         self.assertNotIn('href="/product/105"', html)
         self.assertNotIn('href="/product/106"', html)
         self.assertIn('href="/product/104"', html)
+
+
+class ListingPriceRangeTest(ProductFactoryMixin, TestCase):
+    """listing_price_display(): a span for a group, a price for a row."""
+
+    fixtures = ["initial_products"]
+
+    def make_group(self, *prices, **kwargs):
+        """A group of len(prices) products, cheapest first by format_order."""
+        group = ProductGroup.objects.create(name="A priced work")
+        for index, price in enumerate(prices):
+            self.make_product(
+                pk=400 + index, name=f"Format {index}", price=price,
+                group=group, format_order=index, **kwargs)
+        return Product.objects.get(pk=400)
+
+    def test_the_range_spans_the_cheapest_and_dearest_format(self):
+        self.assertEqual(
+            Product.objects.get(pk=PRINT_PK).listing_price_bounds(),
+            (1299, 3442))
+
+    def test_the_range_renders_low_to_high(self):
+        self.assertEqual(
+            Product.objects.get(pk=PRINT_PK).listing_price_display(),
+            f"12.99{Product.PRICE_RANGE_SEPARATOR}34.42")
+
+    def test_every_member_shows_the_same_range(self):
+        """Which member a listing happens to show is a detail of the
+        collapse; the price it quotes for the work must not depend on it."""
+        self.assertEqual(
+            {Product.objects.get(pk=pk).listing_price_display()
+             for pk in DC4K_PKS},
+            {f"12.99{Product.PRICE_RANGE_SEPARATOR}34.42"})
+
+    def test_a_pay_what_you_want_format_contributes_its_suggestion(self):
+        """The owner's call: the e-book's floor is zero, but a range opening
+        at 0.00 is a claim about the book rather than about that one format.
+        The suggestion is the number it is priced at everywhere else."""
+        ebook = Product.objects.get(pk=EBOOK_PK)
+
+        self.assertTrue(ebook.is_pwyw)
+        self.assertEqual(
+            Product.objects.get(pk=PRINT_PK).listing_price_bounds()[0],
+            ebook.price)
+
+    def test_a_format_that_is_not_sold_here_stays_out_of_the_range(self):
+        """pk 107's price is 0 because it is not sold, not because it is
+        free. Counting it would advertise a free book."""
+        group = ProductGroup.objects.create(name="A work with a dead format")
+        Product.objects.filter(pk__in=(PRINT_PK, NOT_SOLD_HERE_PK)).update(
+            group=group)
+
+        product = Product.objects.get(pk=PRINT_PK)
+
+        self.assertEqual(product.listing_price_bounds(), (2000, 2000))
+        self.assertEqual(product.listing_price_display(), "20.00")
+
+    def test_formats_that_agree_on_a_price_show_that_price(self):
+        product = self.make_group(1500, 1500)
+
+        self.assertFalse(product.listing_price_is_a_range())
+        self.assertEqual(product.listing_price_display(), "15.00")
+
+    def test_an_ungrouped_product_keeps_its_own_price_display(self):
+        for pk in (101, 108):
+            with self.subTest(pk=pk):
+                product = Product.objects.get(pk=pk)
+
+                self.assertIsNone(product.listing_price_bounds())
+                self.assertEqual(product.listing_price_display(),
+                                 product.get_display_price())
+
+    def test_a_group_of_one_keeps_its_own_price_display(self):
+        product = self.make_group(1500)
+
+        self.assertIsNone(product.listing_price_bounds())
+        self.assertEqual(product.listing_price_display(), "15.00")
+
+    def test_a_group_with_nothing_sellable_falls_back_to_its_own_price(self):
+        product = self.make_group(1500, 2500, noorder=True)
+
+        self.assertIsNone(product.listing_price_bounds())
+        self.assertEqual(product.listing_price_display(), "15.00")
+
+    def test_a_single_price_keeps_the_preorder_prefix(self):
+        """The prefix survives where it can be attached to one figure."""
+        product = self.make_group(1500, 1500, preorder_only=True)
+
+        self.assertEqual(product.listing_price_display(), "Pre-order: 15.00")
+
+    def test_a_range_carries_no_preorder_prefix(self):
+        """And not where it cannot: prefixing a span claims both ends ship
+        later, which may be true of only one of them."""
+        group = ProductGroup.objects.create(name="A mixed work")
+        self.make_product(pk=410, name="Out now", price=1500, group=group,
+                          format_order=0)
+        self.make_product(pk=411, name="Coming soon", price=2500,
+                          group=group, format_order=1, preorder_only=True)
+
+        self.assertEqual(
+            Product.objects.get(pk=410).listing_price_display(),
+            f"15.00{Product.PRICE_RANGE_SEPARATOR}25.00")
+
+    def test_the_separator_is_not_a_hyphen(self):
+        """A hyphen between two numbers reads as a minus sign."""
+        self.assertNotIn("-", Product.PRICE_RANGE_SEPARATOR)
+
+
+class ListingPwywNoticeTest(ProductFactoryMixin, TestCase):
+    """The notice follows the number it describes."""
+
+    fixtures = ["initial_products"]
+
+    def test_an_ungrouped_pwyw_row_still_carries_the_notice(self):
+        product = self.make_product(
+            pk=420, name="An ungrouped e-book", price=1299, is_pwyw=True)
+
+        self.assertTrue(product.listing_shows_pwyw_notice())
+
+    def test_a_pwyw_member_of_a_ranged_group_does_not(self):
+        """Its card would show 12.99 – 34.42, and "that is a suggestion, pay
+        nothing if you like" is false of most of that span."""
+        self.assertTrue(Product.objects.get(pk=EBOOK_PK).is_pwyw)
+
+        self.assertFalse(
+            Product.objects.get(pk=EBOOK_PK).listing_shows_pwyw_notice())
+
+    def test_a_pwyw_member_of_a_single_priced_group_does(self):
+        """No range, so the number on the card is this row's suggestion and
+        the notice is exactly as true as it was before grouping."""
+        group = ProductGroup.objects.create(name="Two suggestions")
+        product = self.make_product(
+            pk=421, name="One", price=1299, is_pwyw=True, group=group)
+        self.make_product(
+            pk=422, name="Two", price=1299, is_pwyw=True, group=group)
+
+        self.assertFalse(product.listing_price_is_a_range())
+        self.assertTrue(product.listing_shows_pwyw_notice())
+
+    def test_a_fixed_price_row_never_carries_it(self):
+        self.assertFalse(
+            Product.objects.get(pk=PRINT_PK).listing_shows_pwyw_notice())
 
 
 # ---------------------------------------------------------------------------
