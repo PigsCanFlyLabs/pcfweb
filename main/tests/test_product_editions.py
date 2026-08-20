@@ -470,11 +470,20 @@ class EbookCrossLinkSafetyTest(ProductFactoryMixin, TestCase):
     """The checkout-incident rules, one test each.
 
     Every one of these is about what the button on a PRINT page must not do.
+
+    setUp ungroups the DC4K rows first: since format groups landed, an
+    ebook_x_link INSIDE a group renders no button at all -- the chooser is
+    the affordance there (see EbookCrossLinkYieldsToTheChooserTest below).
+    These rules govern the button wherever it still renders, so the rows are
+    put back in the pre-group state where it does. .update(), not .save(),
+    for the usual Stripe reason.
     """
 
     fixtures = ["initial_products"]
 
     def setUp(self):
+        Product.objects.filter(
+            pk__in=(PRINT_PK, EXECUTIVE_PK, EBOOK_PK)).update(group=None)
         self.print_product = Product.objects.get(pk=PRINT_PK)
         self.ebook = Product.objects.get(pk=EBOOK_PK)
 
@@ -574,6 +583,60 @@ class EbookCrossLinkSafetyTest(ProductFactoryMixin, TestCase):
             with self.subTest(label=label):
                 self.assertNotIn(Product.EBOOK_CROSS_LINK_PREFIX, label)
                 self.assertFalse(url.startswith("/product/"), url)
+
+
+class EbookCrossLinkYieldsToTheChooserTest(ProductFactoryMixin, TestCase):
+    """Inside a format group, the chooser replaces the e-book button.
+
+    Both point at the identical page, and the chooser says more about it --
+    format label, price column, the pay-what-you-want note -- so rendering
+    the button underneath would offer the same destination twice with less
+    information the second time. The button survives exactly where the
+    chooser cannot replace it.
+    """
+
+    fixtures = ["initial_products"]
+
+    def test_a_grouped_sibling_ebook_renders_no_button(self):
+        # The fixture state: 104 and 106 share group 200, and 104's
+        # ebook_x_link points at 106.
+        self.assertEqual(
+            Product.objects.get(pk=PRINT_PK).get_ebook_cross_links(), [])
+
+    def test_the_print_page_offers_the_ebook_exactly_once(self):
+        """The finding this class pins: pk 104's page offered /product/106
+        twice, once from the chooser and once from the button."""
+        body = self.client.get(f"/product/{PRINT_PK}").content.decode()
+
+        self.assertEqual(body.count(f'href="/product/{EBOOK_PK}"'), 1)
+        self.assertNotIn(Product.EBOOK_CROSS_LINK_PREFIX, body)
+
+    def test_an_ebook_link_outside_the_group_keeps_its_button(self):
+        """The case the chooser cannot cover: a purchasable e-book that is
+        not a format of this work has nowhere else to render."""
+        other = self.make_product(
+            pk=360, name="A different e-book", price=500,
+            delivery_type=Product.DeliveryTypes.DIGITAL)
+        Product.objects.get(pk=PRINT_PK).ebook_x_links.add(other)
+
+        links = Product.objects.get(pk=PRINT_PK).get_ebook_cross_links()
+
+        self.assertEqual(
+            links,
+            [(f"{Product.EBOOK_CROSS_LINK_PREFIX}: {other.name}",
+              other.get_absolute_url())])
+
+    def test_an_ungrouped_row_keeps_its_button(self):
+        """Without a group there is no chooser, so the button is still the
+        only way from the print page to the e-book."""
+        Product.objects.filter(
+            pk__in=(PRINT_PK, 105, EBOOK_PK)).update(group=None)
+        ebook = Product.objects.get(pk=EBOOK_PK)
+
+        self.assertEqual(
+            Product.objects.get(pk=PRINT_PK).get_ebook_cross_links(),
+            [(f"{Product.EBOOK_CROSS_LINK_PREFIX}: {ebook.name}",
+              ebook.get_absolute_url())])
 
 
 # ---------------------------------------------------------------------------

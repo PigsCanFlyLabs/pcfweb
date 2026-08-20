@@ -46,10 +46,10 @@ the way the M2M pass defers cross-links. A product may therefore name a group
 declared anywhere in the file, above or below it.
 
 The fixture spells the key the way Django fixtures do -- ``group: 200`` -- so
-that ``loaddata`` can still read this file in the tests. Neither write path
-here accepts that spelling (``Product(group=200)`` raises, and so does
-``.update(group=200)``), so FK keys are rewritten to ``group_id`` on the way
-in; see ``_product_fk_field_names``.
+that ``loaddata`` can still read this file in the tests. The create path does
+not accept that spelling (``Product(group=200)`` raises), so FK keys are
+rewritten to ``group_id`` on the way in for both paths; see
+``_product_fk_field_names``.
 """
 
 from __future__ import annotations
@@ -67,13 +67,15 @@ from main.models import Product, ProductGroup
 def _product_fk_field_names() -> Set[str]:
     """The names of Product's own forward foreign keys.
 
-    Needed because neither write path takes a raw pk under the field's own
-    name. ``Product(pk=pk, group=200)`` raises ``ValueError: Cannot assign
-    "200": "Product.group" must be a "ProductGroup" instance``, and
-    ``.update(group=200)`` is no better. Both take ``group_id=200`` happily,
-    so the fixture keeps the Django-fixture spelling (``group: 200``, which
-    is also what ``loaddata`` reads in the tests) and this command rewrites
-    the key to the attname before either write.
+    Needed because the CREATE path does not take a raw pk under the field's
+    own name: ``Product(pk=pk, group=200)`` raises ``ValueError: Cannot
+    assign "200": "Product.group" must be a "ProductGroup" instance``.
+    (``.update(group=200)`` happens to accept the bare pk, but relying on
+    the two write paths spelling one key differently is how the create path
+    breaks the first time a fixture row is new.) Both paths take
+    ``group_id=200``, so the fixture keeps the Django-fixture spelling
+    (``group: 200``, which is also what ``loaddata`` reads in the tests) and
+    this command rewrites the key to the attname before either write.
 
     Read off the model for the same reason ``_product_m2m_field_names`` is:
     a second FK added to Product later is handled automatically instead of
@@ -263,12 +265,20 @@ class Command(BaseCommand):
             # .update() on an existing row so nothing else about it moves,
             # a plain create otherwise. ProductGroup.save() reaches nothing
             # external, so neither path has a Stripe hazard to avoid.
-            if ProductGroup.objects.filter(pk=pk).exists():
-                ProductGroup.objects.filter(pk=pk).update(**fields)
-                self.stdout.write(f"Updated product group pk={pk}")
-            else:
+            #
+            # "Updated" is only printed for a real change. .update() returns
+            # rows MATCHED, not rows changed, so logging off its return value
+            # would print "Updated" on every deploy for an identical fixture
+            # row -- and an operator reads this log to learn what a seed
+            # actually did.
+            existing = ProductGroup.objects.filter(pk=pk).first()
+            if existing is None:
                 ProductGroup.objects.create(pk=pk, **fields)
                 self.stdout.write(f"Created product group pk={pk}")
+            elif any(getattr(existing, name) != value
+                     for name, value in fields.items()):
+                ProductGroup.objects.filter(pk=pk).update(**fields)
+                self.stdout.write(f"Updated product group pk={pk}")
         return len(entries)
 
     def handle(self, **options: Any) -> None:

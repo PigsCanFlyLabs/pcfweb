@@ -41,10 +41,18 @@ class ProductGroupAdmin(admin.ModelAdmin):
     list_display = ("pk", "name", "member_count")
     search_fields = ("name", "products__name")
 
+    def get_queryset(self, request):
+        # Annotated rather than counted per row: member_count on the
+        # changelist would otherwise issue one COUNT query per group listed.
+        from django.db.models import Count
+        return super().get_queryset(request).annotate(
+            _member_count=Count("products"))
+
     def member_count(self, obj):
-        return obj.products.count()
+        return obj._member_count
 
     member_count.short_description = "formats"
+    member_count.admin_order_field = "_member_count"
 
 
 class OrderItemInline(admin.TabularInline):

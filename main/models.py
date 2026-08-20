@@ -764,6 +764,16 @@ class Product(models.Model):
         That hole predates this method and is not propagated into it: an
         e-book that is not purchasable produces no button at all rather than
         a button onto a page with no way to buy.
+
+        An e-book in this row's own FORMAT GROUP produces no button either,
+        for the same reason get_other_edition_links() filters x_links: the
+        format chooser already offers that page, with more said about it --
+        its format label, its price column, its pay-what-you-want note -- so
+        a second button underneath would offer the identical destination
+        twice with less information the second time. The button survives
+        exactly where the chooser cannot replace it: an ebook_x_link to a
+        row OUTSIDE the group (or on an ungrouped product, where there is no
+        chooser at all).
         """
         links = []
         for ebook in self.ebook_x_links.order_by("pk"):
@@ -772,6 +782,9 @@ class Product(models.Model):
             # "get the e-book" pointing at the page you are already on is
             # a dead end.
             if ebook.pk == self.pk:
+                continue
+            if (self.group_id is not None
+                    and ebook.group_id == self.group_id):
                 continue
             if not ebook.is_purchasable():
                 continue
@@ -1066,18 +1079,36 @@ class Product(models.Model):
         return bounds is not None and bounds[0] != bounds[1]
 
     def listing_shows_pwyw_notice(self) -> bool:
-        """Whether the card's price is THIS row's pay-what-you-want figure.
+        """Whether the notice under the card's price would be true of it.
 
-        The notice beside a card's price says that number is a suggestion and
-        that nothing at all is a valid amount. That is true of a card showing
-        one pay-what-you-want row's own price -- which is what every such
-        card showed before format groups existed, and still is for an
-        ungrouped one. It is false of a card showing a range across several
-        formats: the number it would sit under is a span, mostly fixed prices
-        belonging to other rows. A range's pay-what-you-want end is flagged
-        in the format summary instead, on the format it is true of.
+        The notice says the number above it is a suggestion and that nothing
+        at all is a valid amount. On an ungrouped pay-what-you-want card --
+        what every such card was before format groups existed -- that is
+        simply true, and the notice stays.
+
+        On a grouped card it has to be true of everything the card stands
+        for, and there are two ways it can fail:
+
+        * the price is a RANGE, mostly other rows' fixed prices -- calling
+          the span a suggestion misprices the fixed formats;
+        * the range degenerates to one figure but a sibling charges it as a
+          FIXED price -- "12.99, or nothing at all" on a card that also
+          stands for a 12.99-fixed paperback invites a reader to conclude
+          the paperback can be had for nothing.
+
+        So the notice renders on a grouped card only when every format the
+        card stands for is itself pay-what-you-want at that one figure. In
+        every other grouped case the format summary carries the flag
+        instead, on the format it is true of.
         """
-        return self.is_pwyw and not self.listing_price_is_a_range()
+        if not self.is_pwyw:
+            return False
+        members = [member for member in self.group_members()
+                   if not member.noorder]
+        if len(members) < 2:
+            return True
+        return (not self.listing_price_is_a_range()
+                and all(member.is_pwyw for member in members))
 
     def get_other_edition_links(self) -> List[Tuple[str, str]]:
         """get_cross_links(), minus anything the format chooser already shows.
@@ -1096,7 +1127,15 @@ class Product(models.Model):
         """
         if self.group_id is None:
             return self.get_cross_links()
-        group_urls = {option["url"] for option in self.get_format_options()}
+        # The members' URLs directly, not via get_format_options(): the page
+        # already computes the options once for the chooser, and this only
+        # needs to know which pages the chooser occupies -- not their price
+        # columns and stock notes over again. Members are filtered on pk, so
+        # this stays correct even when a two-member gate elsewhere means no
+        # chooser actually renders: the sibling still is the same work, and
+        # "other editions" is for works that are not this one.
+        group_urls = {member.get_absolute_url()
+                      for member in self.group_members()}
         return [(name, url) for name, url in self.get_cross_links()
                 if url not in group_urls]
 

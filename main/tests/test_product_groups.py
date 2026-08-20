@@ -574,9 +574,9 @@ class ListingPwywNoticeTest(ProductFactoryMixin, TestCase):
         self.assertFalse(
             Product.objects.get(pk=EBOOK_PK).listing_shows_pwyw_notice())
 
-    def test_a_pwyw_member_of_a_single_priced_group_does(self):
-        """No range, so the number on the card is this row's suggestion and
-        the notice is exactly as true as it was before grouping."""
+    def test_an_all_pwyw_single_priced_group_does(self):
+        """No range and every format is a suggestion, so the notice is true
+        of everything the card stands for."""
         group = ProductGroup.objects.create(name="Two suggestions")
         product = self.make_product(
             pk=421, name="One", price=1299, is_pwyw=True, group=group)
@@ -584,6 +584,36 @@ class ListingPwywNoticeTest(ProductFactoryMixin, TestCase):
             pk=422, name="Two", price=1299, is_pwyw=True, group=group)
 
         self.assertFalse(product.listing_price_is_a_range())
+        self.assertTrue(product.listing_shows_pwyw_notice())
+
+    def test_a_fixed_price_sibling_at_the_same_figure_suppresses_it(self):
+        """The degenerate-range trap: a pwyw e-book at a suggested 12.99
+        grouped with a paperback FIXED at 12.99 shows one figure, but "or
+        nothing at all" under it invites the reader to conclude the paperback
+        can be had for nothing. The notice must be true of every format the
+        card stands for, not just the row that happens to represent it."""
+        group = ProductGroup.objects.create(name="A mixed twin")
+        product = self.make_product(
+            pk=423, name="E-book", price=1299, is_pwyw=True, group=group,
+            format_order=0)
+        self.make_product(
+            pk=424, name="Paperback", price=1299, group=group,
+            format_order=1)
+
+        self.assertFalse(product.listing_price_is_a_range())
+        self.assertFalse(product.listing_shows_pwyw_notice())
+
+    def test_a_noorder_sibling_does_not_suppress_it(self):
+        """A format the card does not stand for has no vote: the same rows
+        the bounds and the format summary exclude are excluded here."""
+        group = ProductGroup.objects.create(name="A pwyw with a dead twin")
+        product = self.make_product(
+            pk=425, name="E-book", price=1299, is_pwyw=True, group=group,
+            format_order=0)
+        self.make_product(
+            pk=426, name="Delisted", price=0, noorder=True, group=group,
+            format_order=1)
+
         self.assertTrue(product.listing_shows_pwyw_notice())
 
     def test_a_fixed_price_row_never_carries_it(self):
@@ -894,6 +924,30 @@ class SeedProductsGroupTest(TestCase):
             list(Product.objects.order_by("pk").values_list(
                 "pk", "group_id", "format_label", "format_order")),
             before)
+
+    def test_a_no_op_reseed_does_not_claim_it_updated_the_group(self):
+        """.update() returns rows MATCHED, so a log line keyed off it would
+        say "Updated" on every deploy for an identical fixture row -- and
+        the deploy log is how an operator learns what a seed changed."""
+        self.seed()
+
+        output = self.seed()
+
+        self.assertNotIn(f"Updated product group pk={DC4K_GROUP_PK}", output)
+        self.assertNotIn(f"Created product group pk={DC4K_GROUP_PK}", output)
+
+    def test_a_renamed_group_is_reported_and_reseeded(self):
+        """The other half, so the quiet path above is not quiet by being
+        inert: a real difference is both written and said."""
+        self.seed()
+        ProductGroup.objects.filter(pk=DC4K_GROUP_PK).update(
+            name="Renamed in the admin")
+
+        output = self.seed()
+
+        self.assertIn(f"Updated product group pk={DC4K_GROUP_PK}", output)
+        self.assertEqual(
+            ProductGroup.objects.get(pk=DC4K_GROUP_PK).name, WORK_NAME)
 
     def test_the_collapsed_listing_works_off_seeded_data(self):
         """End to end on the real deploy path rather than off loaddata: the

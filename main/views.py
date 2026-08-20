@@ -155,6 +155,15 @@ class HomeView(View):
         # collapse to a single card -- so the homepage would show one book
         # where it means to show three, and the slice would be silently
         # doing the opposite of its job.
+        #
+        # The cost of that ordering is that the whole category is fetched to
+        # render three cards, where the old code issued a LIMIT 3. Accepted
+        # knowingly: the collapse cannot stop early and stay correct, because
+        # a row anywhere later in the queryset can replace which member
+        # represents one of the first three groups (format_order decides, and
+        # release-date order does not deliver members together). The
+        # catalogue is nine rows; if it ever grows to where this matters, the
+        # fix belongs in collapse_format_groups(), not in a slice here.
         def carousel(cat):
             return (Product.objects.filter(cat=cat).exclude(noorder=True)
                     .order_by_release_date().collapse_format_groups()[:3])
