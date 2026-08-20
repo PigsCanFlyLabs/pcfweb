@@ -398,15 +398,37 @@ class ListingPriceRangeTest(ProductFactoryMixin, TestCase):
 
     def test_a_format_that_is_not_sold_here_stays_out_of_the_range(self):
         """pk 107's price is 0 because it is not sold, not because it is
-        free. Counting it would advertise a free book."""
+        free. Counting it would advertise a free book.
+
+        With it excluded the group has one sellable format left, which is no
+        more a range than an ungrouped row is -- the same answer the format
+        summary gives by rendering nothing for it. The card falls through to
+        this row's own price.
+        """
         group = ProductGroup.objects.create(name="A work with a dead format")
         Product.objects.filter(pk__in=(PRINT_PK, NOT_SOLD_HERE_PK)).update(
             group=group)
 
         product = Product.objects.get(pk=PRINT_PK)
 
-        self.assertEqual(product.listing_price_bounds(), (2000, 2000))
+        self.assertIsNone(product.listing_price_bounds())
         self.assertEqual(product.listing_price_display(), "20.00")
+        self.assertEqual(product.listing_format_labels(), [])
+
+    def test_the_range_and_the_summary_count_the_same_formats(self):
+        """The invariant the shared listed_group_members() exists for: the
+        two group-level statements printed inches apart on one card are
+        about one set of formats, whatever that set turns out to be."""
+        group = ProductGroup.objects.create(name="A work with a dead format")
+        Product.objects.filter(
+            pk__in=(PRINT_PK, EBOOK_PK, NOT_SOLD_HERE_PK)).update(group=group)
+        product = Product.objects.get(pk=PRINT_PK)
+
+        self.assertEqual(len(product.listing_format_labels()), 2)
+        self.assertEqual(product.listing_price_bounds(), (1299, 2000))
+        self.assertEqual(
+            len(product.listed_group_members()),
+            len(product.listing_format_labels()))
 
     def test_formats_that_agree_on_a_price_show_that_price(self):
         product = self.make_group(1500, 1500)
@@ -440,6 +462,34 @@ class ListingPriceRangeTest(ProductFactoryMixin, TestCase):
         product = self.make_group(1500, 1500, preorder_only=True)
 
         self.assertEqual(product.listing_price_display(), "Pre-order: 15.00")
+
+    def test_a_single_price_drops_the_prefix_if_a_sibling_ships_now(self):
+        """The prefix qualifies AVAILABILITY, not price, and availability is
+        per-format. A group of a preorder paperback and an e-book you can
+        download today, both at 15.00, must not tell the visitor the work
+        can only be pre-ordered -- the same misstatement a prefixed range
+        would make, reached through the degenerate case."""
+        group = ProductGroup.objects.create(name="A half-published work")
+        preorder = self.make_product(
+            pk=440, name="Paperback", price=1500, group=group,
+            format_order=0, preorder_only=True)
+        self.make_product(
+            pk=441, name="E-book", price=1500, group=group, format_order=1)
+
+        self.assertEqual(preorder.listing_price_display(), "15.00")
+
+    def test_the_mirror_case_is_also_plain(self):
+        """Representative available, sibling on pre-order: still one figure
+        and still no claim either way. The card links to a page that states
+        its own availability, and the chooser states the others'."""
+        group = ProductGroup.objects.create(name="A half-published work")
+        available = self.make_product(
+            pk=442, name="E-book", price=1500, group=group, format_order=0)
+        self.make_product(
+            pk=443, name="Paperback", price=1500, group=group,
+            format_order=1, preorder_only=True)
+
+        self.assertEqual(available.listing_price_display(), "15.00")
 
     def test_a_range_carries_no_preorder_prefix(self):
         """And not where it cannot: prefixing a span claims both ends ship
@@ -703,6 +753,29 @@ class FormatChooserTest(ProductFactoryMixin, TestCase):
                      if option["url"] == f"/product/{EXECUTIVE_PK}"][0]
 
         self.assertEqual(executive["note"], "Out of stock")
+
+    def test_a_grouped_page_asks_for_its_members_once(self):
+        """The chooser and the "other editions" filter both need the member
+        list, and a product page has no prefetch to serve them from -- so
+        without the memo on group_members() the identical query ran twice
+        per render."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        product = Product.objects.get(pk=PRINT_PK)
+
+        with CaptureQueriesContext(connection) as captured:
+            product.get_format_options()
+            product.get_other_edition_links()
+            product.listed_group_members()
+
+        # Counted by shape rather than in total, so an unrelated relation
+        # (get_cross_links' own x_links query) cannot make this drift.
+        member_queries = [
+            query for query in captured.captured_queries
+            if '"main_product"."group_id" =' in query["sql"]
+        ]
+        self.assertEqual(len(member_queries), 1, member_queries)
 
     def test_an_ungrouped_product_has_no_chooser(self):
         self.assertEqual(self.options(101), [])
@@ -990,6 +1063,148 @@ class SeedProductsGroupValidationTest(TestCase):
         """Guards the guard: without it the create path really does fail."""
         with self.assertRaises(ValueError):
             Product(pk=999, name="Bad", group=200)
+
+
+# ---------------------------------------------------------------------------
+# 6b. The admin
+# ---------------------------------------------------------------------------
+
+
+class ProductGroupAdminTest(TestCase):
+    """The group page edits presentation, so it must stay presentational.
+
+    Its whole purpose is arranging formats, and the two ways that went wrong
+    are both about a side effect: a save that reached Stripe, and a count
+    that changed when somebody typed in the search box.
+    """
+
+    fixtures = ["initial_products"]
+
+    def setUp(self):
+        from django.contrib.admin.sites import AdminSite
+
+        from main.admin import ProductGroupAdmin
+
+        self.admin = ProductGroupAdmin(ProductGroup, AdminSite())
+        self.group = ProductGroup.objects.get(pk=DC4K_GROUP_PK)
+
+    def member_formset(self, data):
+        """The inline's formset, bound to *data* as the browser would post."""
+        from django.contrib.admin.sites import AdminSite
+
+        from main.admin import ProductGroupAdmin
+
+        inline = ProductGroupAdmin.MemberInline(ProductGroup, AdminSite())
+        formset_class = inline.get_formset(None, self.group)
+        return formset_class(data, instance=self.group)
+
+    def posted(self, **overrides):
+        """A management-form-complete POST reordering the three members."""
+        members = self.group.members()
+        data = {
+            "products-TOTAL_FORMS": str(len(members)),
+            "products-INITIAL_FORMS": str(len(members)),
+            "products-MIN_NUM_FORMS": "0",
+            "products-MAX_NUM_FORMS": "1000",
+        }
+        for index, member in enumerate(members):
+            data[f"products-{index}-product_id"] = str(member.pk)
+            data[f"products-{index}-group"] = str(self.group.pk)
+            data[f"products-{index}-format_label"] = member.format_label
+            data[f"products-{index}-format_order"] = str(member.format_order)
+        data.update(overrides)
+        return data
+
+    def test_saving_the_inline_never_reaches_stripe(self):
+        """Product.save() mints a Stripe product for any row without an id,
+        which is every seeded row until it is first added to a cart. The
+        page for reordering formats must not issue live Stripe writes -- and
+        must not 500 mid-edit when Stripe is unreachable."""
+        formset = self.member_formset(
+            self.posted(**{"products-2-format_order": "5"}))
+        self.assertTrue(formset.is_valid(), formset.errors)
+
+        with mock.patch("main.models.Payments") as payments:
+            payments.create_product.side_effect = AssertionError(
+                "the admin reached Stripe")
+            self.admin.save_formset(None, None, formset, change=True)
+
+        payments.create_product.assert_not_called()
+
+    def test_saving_the_inline_writes_the_new_order(self):
+        """Anti-vacuity for the test above: bypassing save() still saves."""
+        formset = self.member_formset(
+            self.posted(**{"products-2-format_order": "5"}))
+        self.assertTrue(formset.is_valid(), formset.errors)
+
+        with mock.patch("main.models.Payments"):
+            self.admin.save_formset(None, None, formset, change=True)
+
+        self.assertEqual(
+            Product.objects.get(pk=EBOOK_PK).format_order, 5)
+
+    def test_saving_the_inline_leaves_the_stripe_id_empty(self):
+        """The lazy-mint contract, stated as the row's own state rather than
+        as a mock call count."""
+        formset = self.member_formset(
+            self.posted(**{"products-0-format_label": "Trade paperback"}))
+        self.assertTrue(formset.is_valid(), formset.errors)
+
+        with mock.patch("main.models.Payments"):
+            self.admin.save_formset(None, None, formset, change=True)
+
+        product = Product.objects.get(pk=PRINT_PK)
+        self.assertEqual(product.format_label, "Trade paperback")
+        self.assertFalse(product.external_product_id)
+
+    def test_the_member_count_survives_a_changelist_search(self):
+        """Count("products") without distinct=True is multiplied by the
+        search's own join over the same relation: searching a term that
+        matches all three member names made a three-format group read 9."""
+        queryset = self.admin.get_queryset(None)
+        searched, _ = self.admin.get_search_results(
+            None, queryset, "Distributed")
+
+        self.assertEqual(
+            self.admin.member_count(searched.get(pk=DC4K_GROUP_PK)), 3)
+        # Anti-vacuity: the search really does match several member names,
+        # which is what multiplies the rows the annotation counts.
+        self.assertGreater(
+            Product.objects.filter(
+                group=self.group, name__icontains="Distributed").count(), 1)
+
+    def test_the_unsearched_count_is_right_too(self):
+        self.assertEqual(
+            self.admin.member_count(
+                self.admin.get_queryset(None).get(pk=DC4K_GROUP_PK)),
+            3)
+
+    def test_the_inline_orders_members_by_the_shared_rule(self):
+        """The page for arranging format order reads format_rank()'s
+        spelling rather than restating it."""
+        from main.admin import ProductGroupAdmin
+
+        self.assertEqual(
+            ProductGroupAdmin.MemberInline.ordering,
+            Product.FORMAT_RANK_ORDERING)
+        self.assertEqual(
+            Product.FORMAT_RANK_ORDERING,
+            ("format_order", "pk"))
+
+    def test_the_page_says_the_fixture_wins_on_the_next_deploy(self):
+        """The two editing surfaces this feature ships disagree for a seeded
+        row, and the admin is the one that loses. Saying so on the page is
+        what keeps that from being a silent revert."""
+        from main.admin import ProductGroupAdmin
+
+        form = self.admin.get_form(None, self.group)
+
+        self.assertIn(
+            "next deploy",
+            str(form.base_fields["name"].help_text))
+        self.assertIn(
+            "initial_products.yaml",
+            str(ProductGroupAdmin.FIXTURE_OWNED_NOTE))
 
 
 # ---------------------------------------------------------------------------

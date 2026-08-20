@@ -54,7 +54,7 @@ rewritten to ``group_id`` on the way in for both paths; see
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Tuple
 
 import yaml
 from django.core.management.base import BaseCommand, CommandError
@@ -245,8 +245,14 @@ class Command(BaseCommand):
         "stock, print_asin and default_asin."
     )
 
-    def seed_groups(self, entries: list[dict[str, Any]]) -> int:
-        """Upsert the ``main.productgroup`` rows. Returns how many exist.
+    def seed_groups(self, entries: list[dict[str, Any]]) -> Tuple[int, int]:
+        """Upsert the ``main.productgroup`` rows. Returns (created, updated).
+
+        Counted the way the product pass counts, rather than returning the
+        number of fixture entries: the caller already knows how many entries
+        it handed over, and "how many the fixture declares" is not a fact
+        about what the seed did -- which is what the summary line, and the
+        operator reading it, is asking.
 
         Runs before the products, because a product's ``group`` key names one
         of these by pk and the FK has to resolve. Groups are wholly
@@ -258,6 +264,8 @@ class Command(BaseCommand):
         groups, and that is the state every deployment was in before format
         groups existed.
         """
+        created = 0
+        updated = 0
         for entry in entries:
             pk: int = entry["pk"]
             fields: dict = entry["fields"]
@@ -275,11 +283,13 @@ class Command(BaseCommand):
             if existing is None:
                 ProductGroup.objects.create(pk=pk, **fields)
                 self.stdout.write(f"Created product group pk={pk}")
+                created += 1
             elif any(getattr(existing, name) != value
                      for name, value in fields.items()):
                 ProductGroup.objects.filter(pk=pk).update(**fields)
                 self.stdout.write(f"Updated product group pk={pk}")
-        return len(entries)
+                updated += 1
+        return created, updated
 
     def handle(self, **options: Any) -> None:
         fixture_path = "main/fixtures/initial_products.yaml"
@@ -333,7 +343,7 @@ class Command(BaseCommand):
             # Groups first: a product's `group` key is an FK, and unlike the
             # M2M pass below there is no deferring it -- the value goes into
             # the same INSERT as the rest of the row.
-            groups = self.seed_groups(group_entries)
+            groups_created, groups_updated = self.seed_groups(group_entries)
             if declared_groups:
                 # As with the cross-links, a fixture row may legitimately
                 # name a group created in the admin, so the database counts
@@ -450,7 +460,8 @@ class Command(BaseCommand):
             self.style.SUCCESS(
                 f"Seed complete: {created} created, {updated} updated, "
                 f"{unchanged} unchanged, {linked} cross-linked, "
-                f"{groups} format group(s)"
+                f"{groups_created} format group(s) created, "
+                f"{groups_updated} updated"
             )
         )
 

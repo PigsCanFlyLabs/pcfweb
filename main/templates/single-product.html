@@ -198,26 +198,28 @@
 		    <div class="format-chooser">
 			<h6>{{ product.FORMAT_CHOOSER_HEADING }}</h6>
 			<ul>
+			    {% comment %}
+			       One row, not a current-branch and a link-branch
+			       holding two copies of the same four spans: they
+			       differed only by the <a> wrapper, the marker and
+			       two attributes, and a fix applied to one of them
+			       ships fine on every page except the format the
+			       tester happened to be looking at. The {% if %}s
+			       around the opening and closing <a> are unbalanced
+			       HTML inside the template and balanced in the
+			       output, which Django is happy to do.
+			    {% endcomment %}
 			    {% for option in format_options %}
-			    {% if option.is_current %}
-			    <li class="format-option format-option-current" aria-current="true">
+			    <li class="format-option{% if option.is_current %} format-option-current{% endif %}"{% if option.is_current %} aria-current="true"{% endif %}>
+				{% if not option.is_current %}<a href="{{ option.url }}">{% endif %}
 				<span class="format-option-label">{{ option.label }}</span>
 				<span class="format-option-price">{{ option.price }}</span>
 				{% if option.note %}<span class="format-option-note">{{ option.note }}</span>{% endif %}
-				<span class="format-option-current-marker">{{ product.FORMAT_CURRENT_MARKER }}</span>
+				{% if option.is_current %}<span class="format-option-current-marker">{{ product.FORMAT_CURRENT_MARKER }}</span>{% endif %}
+				{# The name of the row this lands on, not just the format. #}
 				<span class="format-option-name">{{ option.name }}</span>
+				{% if not option.is_current %}</a>{% endif %}
 			    </li>
-			    {% else %}
-			    <li class="format-option">
-				<a href="{{ option.url }}">
-				    <span class="format-option-label">{{ option.label }}</span>
-				    <span class="format-option-price">{{ option.price }}</span>
-				    {% if option.note %}<span class="format-option-note">{{ option.note }}</span>{% endif %}
-				    {# The name of the row this lands on, not just the format. #}
-				    <span class="format-option-name">{{ option.name }}</span>
-				</a>
-			    </li>
-			    {% endif %}
 			    {% endfor %}
 			</ul>
 		    </div>

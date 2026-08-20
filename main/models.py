@@ -536,6 +536,18 @@ class Product(models.Model):
         else:
             return formatted_price
 
+    def pwyw_suggested_cents(self) -> int:
+        """What this row suggests the buyer pay, in cents.
+
+        `price` today, and the one place that equivalence is written down.
+        Everything that quotes a suggestion goes through here -- the amount
+        input's pre-fill, the chooser's "suggested 12.99" note, the low end
+        of a listing card's price range -- so if a suggestion ever stops
+        being the price (its own column, a per-format rule) those three move
+        together instead of two of them quietly carrying on quoting `price`.
+        """
+        return self.price
+
     def pwyw_suggested_amount(self) -> str:
         """The suggested amount as a bare number, for the amount input.
 
@@ -544,7 +556,7 @@ class Product(models.Model):
         "Pre-order: " on preorder rows, which a number input cannot hold and
         which the running total already parseFloats into NaN.
         """
-        return "{0:.2f}".format(self.price / 100)
+        return _display_amount(self.pwyw_suggested_cents())
 
     def pwyw_charged_amount(self) -> str:
         """What the suggested amount would actually be charged at.
@@ -812,6 +824,13 @@ class Product(models.Model):
     # summary. See listing_format_labels() for why that flag has to be there.
     PWYW_FORMAT_SUFFIX = "pay what you want"
 
+    # The same ordering as format_rank() below, spelled as field names for
+    # the places that have to ask the database for it rather than sort in
+    # Python -- the admin inline that exists to arrange this very order. Two
+    # spellings of one rule, kept adjacent so a third component added to the
+    # rank is added here too.
+    FORMAT_RANK_ORDERING = ("format_order", "pk")
+
     def format_rank(self) -> Tuple[int, int]:
         """This SKU's position among its group's formats.
 
@@ -832,6 +851,13 @@ class Product(models.Model):
         """
         return self.format_label or self.name
 
+    # Per-instance memo for group_members() below. A class attribute holding
+    # an immutable None rather than an __init__ override: assigning through
+    # self creates an instance attribute, so no two products can ever share
+    # a list. Deliberately NOT a django cached_property -- those store under
+    # the method's own name, and this has to stay callable from a template.
+    _group_members_cache: Optional[List["Product"]] = None
+
     def group_members(self) -> List["Product"]:
         """Every SKU of this work, this one included, in format order.
 
@@ -839,15 +865,50 @@ class Product(models.Model):
         emptiness to mean "there is no choice of format to offer here", and a
         one-element list would make every ungrouped page render a chooser
         offering the page you are already on.
+
+        Memoised on the instance, because a grouped product page asks twice
+        over -- once for the chooser and once to filter the "other editions"
+        list -- and each ask was evaluating ``group.products.all()`` again.
+        On a listing the prefetch already serves both; on a product page,
+        which has no prefetch, this is what keeps the second ask free. The
+        cache lives on one request's instance and dies with it, so it cannot
+        serve a stale member list to a later request.
         """
-        # `self.group`, not `self.group_id`: on a nullable FK the descriptor
-        # returns None without a query when the column is NULL, so this costs
-        # no more than the id check and it narrows the type for the caller
-        # below.
-        group = self.group
-        if group is None:
-            return []
-        return group.members()
+        if self._group_members_cache is None:
+            # `self.group`, not `self.group_id`: on a nullable FK the
+            # descriptor returns None without a query when the column is
+            # NULL, so this costs no more than the id check and it narrows
+            # the type for the caller below.
+            group = self.group
+            self._group_members_cache = (
+                [] if group is None else group.members())
+        return self._group_members_cache
+
+    def listed_group_members(self) -> List["Product"]:
+        """The formats a listing card actually stands for.
+
+        Group members minus the ones that are not sold here. Every
+        group-level statement a card makes is computed over THIS list rather
+        than over group_members(): the format summary, the price range, the
+        published year and the pay-what-you-want notice. That is the point of
+        it being one method -- those four appear on the same card inches
+        apart, and a reader compares them. "Available in 3 formats" beside a
+        range spanning two of them is a self-contradiction that no individual
+        method's tests would catch, because each one would still be right
+        about its own rule.
+
+        A ``noorder`` row is excluded because the card renders this as
+        "Available in N formats" and a format that is not sold here is not
+        one of them; its price is also meaningless (pk 107's is literally 0)
+        and would drag a range down to 0.00. The chooser on the product page
+        does list such a format, which is not a contradiction -- the card
+        advertises what can be bought, and the chooser answers what exists,
+        saying "Not sold here" beside the one that cannot.
+
+        Empty for an ungrouped product, since group_members() is.
+        """
+        return [member for member in self.group_members()
+                if not member.noorder]
 
     def get_format_options(self) -> List[Dict[str, Any]]:
         """The format chooser for this product's page.
@@ -946,20 +1007,16 @@ class Product(models.Model):
         column says "Pay what you want" outright -- which is why this is not
         folded into get_format_label().
 
-        A ``noorder`` format is left out, the same rows
-        listing_price_bounds() leaves out of the range and for the same
-        reason: the card renders this as "Available in N formats", and a
-        format that is not sold here is not one of them. The chooser on the
-        product page does list it, which is not a contradiction -- the card
-        advertises what can be bought, and the chooser answers what exists,
-        saying "Not sold here" beside the one that cannot.
+        Over listed_group_members(), which is where the "not sold here"
+        exclusion and the reasoning for it live -- shared with the range, the
+        year and the notice so the four statements on one card cannot come to
+        disagree about which formats they are about.
 
         Empty for anything that is not a group with two or more formats for
         sale, so an ungrouped card renders exactly as it did before groups
         existed.
         """
-        listed = [member for member in self.group_members()
-                  if not member.noorder]
+        listed = self.listed_group_members()
         if len(listed) < 2:
             return []
         return [
@@ -995,8 +1052,8 @@ class Product(models.Model):
         the template already renders nothing for.
         """
         years = [member.release_date.year
-                 for member in self.group_members()
-                 if not member.noorder and member.release_date is not None]
+                 for member in self.listed_group_members()
+                 if member.release_date is not None]
         if not years:
             return (self.release_date.year
                     if self.release_date is not None else None)
@@ -1009,25 +1066,29 @@ class Product(models.Model):
         group of one, or a group with nothing sellable in it. Those cases
         fall back to the product's own price -- see listing_price_display().
 
-        A ``noorder`` member is left out, and that exclusion is the one thing
-        here that has to be right. Its price column is meaningless (pk 107's
-        is literally 0), so counting it would put "0.00 – 34.42" on a card
-        and advertise a free book that is not for sale at all.
+        Over listed_group_members(), so the range spans exactly the formats
+        the summary beside it counts -- and so a "group" whose only sellable
+        format is one row has no range at all, which is the same answer the
+        summary gives by rendering nothing.
 
-        A pay-what-you-want member contributes its SUGGESTED amount -- the
-        number in `price`, which for that row is a suggestion rather than a
-        price. That is the owner's call and it is what makes the low end of
-        the DC4K range 12.99 rather than 0.00; a range starting at 0.00 would
-        be true of the e-book alone and read as a claim about the book. What
-        keeps it honest is the format summary rendered beside it, which names
-        that format and flags it -- see listing_format_labels().
+        A pay-what-you-want member contributes its SUGGESTED amount, through
+        pwyw_suggested_cents() rather than by reading `price` directly: the
+        chooser's "suggested 12.99" note comes from the same accessor, so the
+        card's range and the page's note cannot come to quote different
+        numbers for one format. That is the owner's call and it is what makes
+        the low end of the DC4K range 12.99 rather than 0.00; a range
+        starting at 0.00 would be true of the e-book alone and read as a
+        claim about the book. What keeps it honest is the format summary
+        rendered beside it, which names that format and flags it -- see
+        listing_format_labels().
         """
-        members = self.group_members()
-        if len(members) < 2:
+        listed = self.listed_group_members()
+        if len(listed) < 2:
             return None
-        prices = [member.price for member in members if not member.noorder]
-        if not prices:
-            return None
+        prices = [
+            member.pwyw_suggested_cents() if member.is_pwyw else member.price
+            for member in listed
+        ]
         return (min(prices), max(prices))
 
     def listing_price_display(self) -> str:
@@ -1057,12 +1118,20 @@ class Product(models.Model):
         low, high = bounds
         if low == high:
             # One price, not a range: the formats agree on what the book
-            # costs. Answered by this row where it can be --
-            # get_display_price() keeps the "Pre-order: " prefix, which is
-            # safe here precisely because there is only one price to qualify
-            # -- and by the shared figure where it cannot, which is when this
-            # row is itself the delisted one left out of the bounds above.
-            if not self.noorder:
+            # costs. The figure is safe to state, but get_display_price()'s
+            # "Pre-order: " prefix is a claim about AVAILABILITY, not about
+            # the price, and availability is per-format -- so it survives
+            # only when every format the card stands for is a pre-order.
+            # Otherwise the card would tell a visitor the work can only be
+            # pre-ordered while one of its formats ships today, which is the
+            # same misstatement the range below refuses to make.
+            #
+            # `not self.noorder` as well, for the case this row is itself
+            # the delisted one the bounds left out: its own price is not the
+            # figure the card is quoting, so it cannot answer for it.
+            listed = self.listed_group_members()
+            if not self.noorder and all(
+                    member.preorder_only for member in listed):
                 return self.get_display_price()
             return _display_amount(low)
         return (f"{_display_amount(low)}{self.PRICE_RANGE_SEPARATOR}"
@@ -1103,12 +1172,11 @@ class Product(models.Model):
         """
         if not self.is_pwyw:
             return False
-        members = [member for member in self.group_members()
-                   if not member.noorder]
-        if len(members) < 2:
+        listed = self.listed_group_members()
+        if len(listed) < 2:
             return True
         return (not self.listing_price_is_a_range()
-                and all(member.is_pwyw for member in members))
+                and all(member.is_pwyw for member in listed))
 
     def get_other_edition_links(self) -> List[Tuple[str, str]]:
         """get_cross_links(), minus anything the format chooser already shows.
