@@ -946,18 +946,37 @@ class Product(models.Model):
 
         options = []
         for member in members:
+            # The note carries whatever the price column could not say, and
+            # it is built the same way for every row so that availability
+            # cannot go missing from one kind of format. It used to: a
+            # pay-what-you-want row's note was its suggestion and nothing
+            # else, so a physical PWYW format that was out of stock or still
+            # forthcoming read as available beside fixed-price siblings that
+            # said so -- and the reader only found out by following the link.
+            notes = []
             if member.noorder:
+                # "Not sold here" is the whole story; a stock or pre-order
+                # note under it would describe a state it does not have.
                 price = self.FORMAT_NOT_SOLD_HERE
-                note = ""
             elif member.is_pwyw:
                 price = self.FORMAT_PWYW_PRICE
-                note = f"suggested {member.pwyw_suggested_amount()}"
+                notes.append(f"suggested {member.pwyw_suggested_amount()}")
+                # A fixed price carries "Pre-order: " in the price column
+                # itself (see below); "Pay what you want" has nowhere to put
+                # it, so this row says it in the note instead.
+                if member.preorder_only:
+                    notes.append("Pre-order")
             else:
                 # get_display_price() already prefixes "Pre-order: " on a
                 # preorder row, which is the honest thing to say in a column
                 # of prices for formats that ship at different times.
                 price = member.get_display_price()
-                note = "Out of stock" if member.is_out_of_stock() else ""
+            if not member.noorder and member.is_out_of_stock():
+                # Never doubled up with the pre-order note above:
+                # is_out_of_stock() is false for a preorder row by
+                # definition, so at most one of the two applies.
+                notes.append("Out of stock")
+            note = " · ".join(notes)
             options.append({
                 "label": member.get_format_label(),
                 # The SKU's own name as well as its format label. The label

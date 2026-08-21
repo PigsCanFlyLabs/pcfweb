@@ -89,9 +89,26 @@ class ProductGroupAdmin(admin.ModelAdmin):
 
         Only the two fields this inline can edit are written, so a concurrent
         edit to the rest of the product is not clobbered by a stale form.
+
+        Bypassing formset.save() means bypassing its bookkeeping too, and
+        that bookkeeping is not optional: the admin calls
+        construct_change_message() straight after save_related(), and that
+        reads formset.new_objects, .changed_objects and .deleted_objects --
+        attributes only save_existing_objects()/save_new_objects() ever
+        assign. Without them the request raises AttributeError, and since the
+        change view runs in a transaction the UPDATEs above are rolled back
+        with it, so the page cannot save at all. They are populated here by
+        hand, which also keeps the admin's LogEntry an accurate record of
+        what moved.
         """
         if formset.model is not Product:
             return super().save_formset(request, form, formset, change)
+
+        # Adds and deletes are both turned off on this inline, so these two
+        # are empty by construction rather than by omission.
+        formset.new_objects = []
+        formset.deleted_objects = []
+        formset.changed_objects = []
 
         for member_form in formset.forms:
             if not member_form.has_changed() or not member_form.instance.pk:
@@ -107,9 +124,13 @@ class ProductGroupAdmin(admin.ModelAdmin):
                 continue
             Product.objects.filter(
                 pk=member_form.instance.pk).update(**changed)
-        # No formset.save()/save_m2m() pair here on purpose: adds and deletes
-        # are both turned off on this inline, so a changed row is the only
-        # thing there is to write, and the inline edits no M2M field.
+            # The fields actually written, not member_form.changed_data:
+            # the log should say what this page changed, and this page can
+            # only change these two.
+            formset.changed_objects.append(
+                (member_form.instance, sorted(changed)))
+        # No formset.save_m2m() to pair with the above: this inline edits no
+        # M2M field, and save_m2m only exists after a save(commit=False).
 
     def get_form(self, request, obj=None, **kwargs):
         form = super().get_form(request, obj, **kwargs)

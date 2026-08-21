@@ -754,6 +754,58 @@ class FormatChooserTest(ProductFactoryMixin, TestCase):
 
         self.assertEqual(executive["note"], "Out of stock")
 
+    def test_a_pwyw_format_keeps_its_availability_note(self):
+        """The suggestion is not the whole story. A physical
+        pay-what-you-want format that is out of stock used to say only
+        "suggested 15.00", so it read as available beside fixed-price
+        siblings that reported their state -- and the reader found out by
+        following the link."""
+        group = ProductGroup.objects.create(name="A pwyw paperback")
+        product = self.make_product(
+            pk=460, name="Fixed sibling", price=2000, group=group,
+            format_order=0)
+        self.make_product(
+            pk=461, name="PWYW paperback", price=1500, is_pwyw=True,
+            group=group, format_order=1, cat=Product.Categories.BOOKS,
+            delivery_type=Product.DeliveryTypes.PHYSICAL, stock=0)
+
+        pwyw = [option for option in product.get_format_options()
+                if option["url"] == "/product/461"][0]
+
+        self.assertEqual(pwyw["price"], Product.FORMAT_PWYW_PRICE)
+        self.assertIn("suggested 15.00", pwyw["note"])
+        self.assertIn("Out of stock", pwyw["note"])
+
+    def test_a_pwyw_preorder_format_says_it_is_a_preorder(self):
+        """A fixed price carries "Pre-order: " in the price column; "Pay what
+        you want" has nowhere to put it, so the note must."""
+        group = ProductGroup.objects.create(name="A forthcoming pwyw")
+        product = self.make_product(
+            pk=462, name="Fixed sibling", price=2000, group=group,
+            format_order=0)
+        self.make_product(
+            pk=463, name="PWYW preorder", price=1500, is_pwyw=True,
+            group=group, format_order=1, preorder_only=True)
+
+        pwyw = [option for option in product.get_format_options()
+                if option["url"] == "/product/463"][0]
+
+        self.assertIn("suggested 15.00", pwyw["note"])
+        self.assertIn("Pre-order", pwyw["note"])
+
+    def test_a_delisted_format_gets_no_availability_note(self):
+        """"Not sold here" is the whole story; a stock note under it would
+        describe a state the row does not have."""
+        group = ProductGroup.objects.create(name="A work with a dead format")
+        Product.objects.filter(pk__in=(PRINT_PK, NOT_SOLD_HERE_PK)).update(
+            group=group)
+
+        not_sold = [option for option in self.options(PRINT_PK)
+                    if option["url"] == f"/product/{NOT_SOLD_HERE_PK}"][0]
+
+        self.assertEqual(not_sold["price"], Product.FORMAT_NOT_SOLD_HERE)
+        self.assertEqual(not_sold["note"], "")
+
     def test_a_grouped_page_asks_for_its_members_once(self):
         """The chooser and the "other editions" filter both need the member
         list, and a product page has no prefetch to serve them from -- so
@@ -1156,6 +1208,60 @@ class ProductGroupAdminTest(TestCase):
         product = Product.objects.get(pk=PRINT_PK)
         self.assertEqual(product.format_label, "Trade paperback")
         self.assertFalse(product.external_product_id)
+
+    def test_a_real_admin_post_saves_the_new_order(self):
+        """End to end through the change view, which is what the unit tests
+        above could not see.
+
+        Bypassing formset.save() also bypassed the bookkeeping the admin
+        reads immediately afterwards (new_objects / changed_objects /
+        deleted_objects, via construct_change_message), so the request raised
+        AttributeError -- and because the change view is atomic, the UPDATEs
+        went back with it and the page could not save at all. Calling
+        save_formset() directly never reaches that code, which is exactly why
+        this test posts.
+        """
+        from django.contrib.auth.models import User
+
+        User.objects.create_superuser("root", "root@example.com", "pw")
+        self.client.login(username="root", password="pw")
+
+        with mock.patch("main.models.Payments") as payments:
+            response = self.client.post(
+                f"/timbit/admin/main/productgroup/{DC4K_GROUP_PK}/change/",
+                self.posted(**{"products-2-format_order": "7",
+                               "name": self.group.name,
+                               "_save": "Save"}))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Product.objects.get(pk=EBOOK_PK).format_order, 7)
+        # And still no Stripe: the reason for bypassing save() in the first
+        # place survives the fix for what bypassing it broke.
+        payments.create_product.assert_not_called()
+
+    def test_a_real_admin_post_logs_what_changed(self):
+        """The bookkeeping is populated to be correct, not merely present:
+        the admin's own history for the group names the moved row."""
+        from django.contrib.admin.models import LogEntry
+        from django.contrib.auth.models import User
+
+        User.objects.create_superuser("root", "root@example.com", "pw")
+        self.client.login(username="root", password="pw")
+
+        with mock.patch("main.models.Payments"):
+            self.client.post(
+                f"/timbit/admin/main/productgroup/{DC4K_GROUP_PK}/change/",
+                self.posted(**{"products-0-format_label": "Trade paperback",
+                               "name": self.group.name,
+                               "_save": "Save"}))
+
+        # Django renders the field's verbose name into the message, so this
+        # asserts what an owner reading the history actually sees.
+        entry = LogEntry.objects.latest("id")
+        self.assertIn("Format label", entry.change_message)
+        self.assertIn("product", entry.change_message)
+        self.assertEqual(
+            Product.objects.get(pk=PRINT_PK).format_label, "Trade paperback")
 
     def test_the_member_count_survives_a_changelist_search(self):
         """Count("products") without distinct=True is multiplied by the
