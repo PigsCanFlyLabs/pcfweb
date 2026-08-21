@@ -21,6 +21,65 @@
 	list-style: decimal;
 	margin-bottom: 15px;
     }
+
+    /* The format chooser. Kept here rather than in main.css because it is
+       used by exactly this page, and main.css is the shared theme. */
+    .format-chooser {
+	margin: 20px 0;
+    }
+
+    .format-chooser ul {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+    }
+
+    .format-option {
+	border: 1px solid #eee;
+	border-radius: 5px;
+	margin-bottom: 8px;
+    }
+
+    .format-option > a,
+    .format-option-current {
+	display: block;
+	padding: 10px 15px;
+	/* The whole row is the target, not just the words: these are the
+	   page's format switcher and a 60px-wide hit area is a fiddly one
+	   on a phone. */
+	text-decoration: none;
+	color: inherit;
+    }
+
+    .format-option:hover {
+	border-color: #ccc;
+    }
+
+    /* The row you are already on: marked by more than colour, since colour
+       alone is invisible to a screen reader and to anyone who cannot see
+       it. The marker span below says it in words, and aria-current says it
+       to assistive technology. */
+    .format-option-current {
+	border-color: #aaa;
+	background-color: #fafafa;
+    }
+
+    .format-option-label {
+	font-weight: 600;
+    }
+
+    .format-option-price {
+	float: right;
+    }
+
+    .format-option-note,
+    .format-option-name,
+    .format-option-current-marker {
+	display: block;
+	clear: both;
+	font-size: 13px;
+	color: #777;
+    }
 </style>
 
 {% endblock custom_css %}
@@ -117,6 +176,55 @@
 		      suggestion, not a price &mdash; you set your own amount
 		      below, and nothing at all is a valid amount.</p>
 		    {% endif %}
+		    {% comment %}
+		       The format chooser: this work's other SKUs, the way a
+		       bookshop page offers hardcover beside paperback beside
+		       e-book. Empty for anything that is not in a group with
+		       a sibling, so most pages render nothing here at all.
+
+		       Every entry is a link to that format's OWN product page
+		       and never a second add-to-cart on this one -- the rule
+		       get_ebook_cross_links() is written around. A format's
+		       price, ISBN and availability are its own, so the page
+		       that sells it is the page that must state them.
+
+		       The current format is listed too, unlinked and marked,
+		       rather than omitted: a chooser showing only the
+		       alternatives makes the reader work out what they are
+		       looking at from what is missing.
+		    {% endcomment %}
+		    {% with format_options=product.get_format_options %}
+		    {% if format_options %}
+		    <div class="format-chooser">
+			<h6>{{ product.FORMAT_CHOOSER_HEADING }}</h6>
+			<ul>
+			    {% comment %}
+			       One row, not a current-branch and a link-branch
+			       holding two copies of the same four spans: they
+			       differed only by the <a> wrapper, the marker and
+			       two attributes, and a fix applied to one of them
+			       ships fine on every page except the format the
+			       tester happened to be looking at. The {% if %}s
+			       around the opening and closing <a> are unbalanced
+			       HTML inside the template and balanced in the
+			       output, which Django is happy to do.
+			    {% endcomment %}
+			    {% for option in format_options %}
+			    <li class="format-option{% if option.is_current %} format-option-current{% endif %}"{% if option.is_current %} aria-current="true"{% endif %}>
+				{% if not option.is_current %}<a href="{{ option.url }}">{% endif %}
+				<span class="format-option-label">{{ option.label }}</span>
+				<span class="format-option-price">{{ option.price }}</span>
+				{% if option.note %}<span class="format-option-note">{{ option.note }}</span>{% endif %}
+				{% if option.is_current %}<span class="format-option-current-marker">{{ product.FORMAT_CURRENT_MARKER }}</span>{% endif %}
+				{# The name of the row this lands on, not just the format. #}
+				<span class="format-option-name">{{ option.name }}</span>
+				{% if not option.is_current %}</a>{% endif %}
+			    </li>
+			    {% endfor %}
+			</ul>
+		    </div>
+		    {% endif %}
+		    {% endwith %}
 		    {# get_display_text returns escaped markup (format_html), so #}
 		    {# this needs no autoescape override. #}
 		    <div class="product-description">{{ product.get_display_text }}</div>
@@ -231,7 +339,9 @@
 			</div>
 		    </form>
 		    {% comment %}
-		       Related editions and formats, from x_links. Outside the
+		       Related editions, from x_links -- minus anything the
+		       format chooser above already lists, which is what
+		       get_other_edition_links() filters out. Outside the
 		       form and styled as a plain list rather than as buttons,
 		       because these are navigation and not offers: they are
 		       ungated on is_purchasable() precisely so a title listed
@@ -240,7 +350,7 @@
 		       is evaluated once, rather than once for the emptiness
 		       test and a second time for the loop.
 		    {% endcomment %}
-		    {% with cross_links=product.get_cross_links %}
+		    {% with cross_links=product.get_other_edition_links %}
 		    {% if cross_links %}
 		    <div class="cross-links">
 			<h6>Other editions and formats</h6>

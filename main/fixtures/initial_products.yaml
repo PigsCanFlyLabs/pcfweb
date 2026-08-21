@@ -54,6 +54,27 @@
 #
 # `ebook_x_links` is directional and takes no such pairing: a print row points
 # at the e-book row, and the e-book does not point back at the paperback.
+#
+# Format groups (`main.productgroup` rows, and the `group` / `format_label` /
+# `format_order` keys on a product) are a different statement from either
+# cross-link field: "these SKUs are one work in several formats". A group
+# collapses the catalogue's duplicate cards into one and renders the format
+# chooser on each member's page. Groups are seeded before products by
+# seed_products, so a product may name a group defined further down this file.
+#
+# Grouping does NOT merge the SKUs: each keeps its own ISBN, price, tax code,
+# stock, Stripe product and product page, and each is still a separate offer
+# in the Google Merchant feed. It is a presentation rule and nothing else.
+#
+# pks 200+ for groups, which is a separate sequence from the 100+ product pks
+# and cannot collide with them -- they are different tables.
+- model: main.productgroup
+  pk: 200
+  fields:
+    # The work, not the edition: the name a single catalogue card carries for
+    # all three DC4K SKUs. It matches pk 104's own name because the standard
+    # paperback is the unsuffixed one; the other two suffix their format.
+    name: "Distributed Computing 4 Kids (and Executives)"
 - model: main.product
   pk: 100
   fields:
@@ -290,6 +311,31 @@
     tax_code: "txcd_35010000"
     delivery_type: "PHYSICAL"
     sells_ebook: false
+    # The book shipped -- it is out, not on its way -- so it is not a
+    # pre-order, and the deploy asserts that rather than leaving it to
+    # whatever the admin last held. This key is stated on all three DC4K rows
+    # for one reason: the flag was set here while the book was forthcoming,
+    # and an out-of-date pre-order flag is a claim to a customer that the
+    # thing they are buying has not been printed yet. It also prefixes the
+    # price with "Pre-order: " everywhere a price is rendered and reports
+    # `preorder` availability to Google Merchant.
+    #
+    # Stating it here makes preorder_only fixture-owned FOR THESE ROWS: a
+    # future pre-order is a YAML edit, not an admin tick. That is the trade
+    # deliberately taken for a title that is already published, and it is not
+    # done to the rest of the catalogue -- a row that omits the key keeps
+    # whatever the admin set, as with every other omitted field.
+    #
+    # ONE CONSEQUENCE TO KNOW BEFORE DEPLOYING: is_out_of_stock() ignores a
+    # pre-order row, so the stock gate only starts applying to the two print
+    # SKUs once this is false. If 104 and 105 are sitting at stock 0 in the
+    # admin they go from "Pre-Order" to "Out of Stock" -- both unbuyable
+    # here, but the second is the honest one. seed_products deliberately
+    # never writes stock on an existing row (see SEED_PROTECTED_FIELDS and
+    # the overselling note beside it), so the fix is a stock figure in the
+    # admin, not a fixture key. The e-book is exempt: a download has no unit
+    # count to run out of.
+    preorder_only: false
     # The three DC4K SKUs are one book in three formats, so all three name
     # the other two. Symmetrical, so 105 and 106 each list 104 in turn.
     x_links: [105, 106]
@@ -298,6 +344,17 @@
     # only either sell a paperback as a download or put a product the visitor
     # never named into their cart.
     ebook_x_links: [106]
+    # The three SKUs are one work, so they share a format group and the
+    # catalogue shows one card for them instead of three.
+    #
+    # format_order 0 makes this row the one that card links to, which is the
+    # deliberate choice and not a tiebreak: the standard paperback is what to
+    # show a visitor who has not picked a format. It is the middle price of
+    # the three, so neither the cheapest-first nor the dearest-first reading
+    # of an inferred order would have produced it.
+    group: 200
+    format_label: "Paperback"
+    format_order: 0
 - model: main.product
   pk: 105
   fields:
@@ -346,6 +403,11 @@
     tax_code: "txcd_35010000"
     delivery_type: "PHYSICAL"
     sells_ebook: false
+    # Out, not forthcoming -- see the note on pk 104. Stated on this row too
+    # rather than inferred from its sibling: the flag is per-SKU, and a
+    # chooser listing one format as a pre-order beside two that are not is
+    # exactly the kind of thing that has to be true row by row.
+    preorder_only: false
     x_links: [104, 106]
     # There is no separate Executive e-book, so the executive edition points
     # at the same pk 106 the standard paperback does. That is a real answer
@@ -353,6 +415,15 @@
     # which product it lands on, so nobody is told they are getting an
     # executive-edition download.
     ebook_x_links: [106]
+    # Second in the chooser, behind the standard paperback: this is the
+    # upgrade, and an upgrade listed first reads as the default.
+    #
+    # The label names the edition rather than the binding. It is a print SKU
+    # like pk 104 -- what a buyer is choosing between here is not paper
+    # versus cloth, it is the standard edition versus this one.
+    group: 200
+    format_label: "Executive Edition"
+    format_order: 1
 - model: main.product
   pk: 106
   fields:
@@ -405,6 +476,10 @@
     delivery_type: "DIGITAL"
     # This one is ours to distribute, so fulfilment is allowed to send it.
     sells_ebook: true
+    # Out, not forthcoming -- see the note on pk 104. A download has nothing
+    # to ship, so a pre-order flag on this row would have been claiming a
+    # wait that does not exist: fulfilment emails the file on payment.
+    preorder_only: false
     # <stem>.zip under settings.BOOK_ASSET_ROOT; must match the archive
     # committed to the pcfweb-book-assets repo.
     digital_asset_name: "distributed_computing_4_kids"
@@ -415,6 +490,15 @@
     # paperbacks would render "Get the e-book: ...(print edition)" buttons on
     # the e-book's own page. The key is omitted rather than set to [], so the
     # relation stays admin-editable if a second e-book edition ever exists.
+    #
+    # Last in the chooser, and last is not a judgement about the format --
+    # it is where a reader looking for "the book" expects the download to be,
+    # under the physical copies. Its price column says "Pay what you want"
+    # rather than 12.99, because 12.99 beside two fixed prices would read as
+    # a third fixed price; the suggestion goes in the note beneath.
+    group: 200
+    format_label: "E-book"
+    format_order: 2
 # "Fast Data Processing with Spark" (Packt, 2013) -- Holden's first book and
 # the first book written about Apache Spark. Listed for the history, not for
 # sale: noorder makes is_purchasable() false, which suppresses the buy button,

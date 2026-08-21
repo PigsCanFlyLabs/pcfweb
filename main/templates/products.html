@@ -44,23 +44,41 @@
                                         <li><a href="{% url 'product' product.pk %}"><i class="fa fa-shopping-cart"></i></a></li>
                                     </ul>
                                 </div>
+				{# The same name as the heading below: an assistive #}
+				{# technology reading this link out must not #}
+				{# announce a different title from the one on the #}
+				{# card it belongs to. #}
 				<a href="{% url 'product' product.pk %}"
-                                   aria-label="{{ product.name }}">
+                                   aria-label="{{ product.listing_name }}">
                                   <img src="{{ product.get_thumb }}" alt="">
 				</a>
                             </div>
                             <div class="down-content">
+				{% comment %}
+				   listing_name, not name: a card for a grouped
+				   work stands for every format of it, and the
+				   member representing the group carries a
+				   format-specific title ("... — E-book") that
+				   would misname the card. Ungrouped products --
+				   most of the catalogue -- get their own name
+				   back from it unchanged.
+				{% endcomment %}
                                 <h4><a href="{% url 'product' product.pk %}"
-                                       style="color: inherit; text-decoration: none;">{{product.name}}</a></h4>
-                                <span>
-				  {{product.get_display_price}}
-				  {% if product.is_pwyw %}
-				  <br><small class="pwyw-label">Pay what you want &mdash; suggested amount, or nothing at all</small>
-				  {% endif %}
-				</span>
-				{% if product.release_date %}
-				<span class="pub-year">{{ product.release_date.year }}</span>
+                                       style="color: inherit; text-decoration: none;">{{product.listing_name}}</a></h4>
+				{# The price line and format summary, shared with the homepage carousel. #}
+				{% include 'components/listing-card-price.html' %}
+				{% comment %}
+				   listing_release_year, not release_date.year:
+				   on a grouped card that is the work's first
+				   publication rather than the release date of
+				   whichever format the card happens to link to.
+				   Ungrouped cards get their own year back.
+				{% endcomment %}
+				{% with release_year=product.listing_release_year %}
+				{% if release_year %}
+				<span class="pub-year">{{ release_year }}</span>
 				{% endif %}
+				{% endwith %}
                             </div>
                         </div>
                     </div>

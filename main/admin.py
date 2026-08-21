@@ -1,5 +1,6 @@
 # type: ignore
 from django.contrib import admin
+from django.db.models import Count
 from django.urls import reverse
 from django.utils.html import format_html
 
@@ -10,6 +11,140 @@ from django.apps import apps
 admin.site.register(Cart)
 admin.site.register(Product)
 admin.site.register(CartProduct)
+
+
+@admin.register(ProductGroup)
+class ProductGroupAdmin(admin.ModelAdmin):
+    """One work, several format SKUs.
+
+    The inline is the point of this page: a group's members and their order
+    are what the group *is*, and editing them one product page at a time is
+    how two SKUs end up both claiming to be the first format.
+
+    Two things about saving here, both of which the page states in words to
+    whoever is using it (see FIXTURE_OWNED_NOTE and save_formset):
+
+    * for a fixture-owned row, an edit made here lasts until the next deploy
+      re-seeds it. The fixture is the source of truth for the shipped books;
+      this page is the source of truth for groups created in the admin.
+    * member rows are written with .update(), never Product.save(), because
+      save() mints a Stripe product for any row that has not got one yet.
+    """
+
+    FIXTURE_OWNED_NOTE = (
+        "Products seeded from main/fixtures/initial_products.yaml (the "
+        "shipped books) have their group, format label and format order "
+        "re-applied from that file on every deploy. Edit the fixture to "
+        "change those permanently; edits made here to a seeded row last "
+        "only until the next deploy."
+    )
+
+    class MemberInline(admin.TabularInline):
+        model = Product
+        extra = 0
+        fields = ("name", "format_label", "format_order", "price")
+        # Everything else about a product is edited on the product itself;
+        # this page is only about how the formats present as a set.
+        readonly_fields = ("name", "price")
+        can_delete = False
+        # Product.format_rank() is the rule -- (format_order, pk) -- and this
+        # is the page for arranging it, so it reads the rule rather than
+        # restating it. A tuple here would be the one surface still ordering
+        # members its own way if that rule ever gains a component.
+        ordering = Product.FORMAT_RANK_ORDERING
+
+        def has_add_permission(self, request, obj=None):
+            # Adding a member here would mean creating a Product from a
+            # blank row, and a Product needs far more than these four
+            # fields. Set `group` on the product instead.
+            return False
+
+    inlines = [MemberInline]
+    list_display = ("pk", "name", "member_count")
+    search_fields = ("name", "products__name")
+
+    def get_queryset(self, request):
+        # Annotated rather than counted per row: member_count on the
+        # changelist would otherwise issue one COUNT query per group listed.
+        #
+        # distinct=True is load-bearing, not decoration. search_fields above
+        # includes the multi-valued products__name, and the search adds a
+        # SECOND join over the same relation -- so without it a search whose
+        # term matches k member names multiplies the count and the column
+        # reads 3*k for a three-format group.
+        return super().get_queryset(request).annotate(
+            _member_count=Count("products", distinct=True))
+
+    def save_formset(self, request, form, formset, change):
+        """Write member rows with .update(), never Product.save().
+
+        Product.save() calls Payments.create_product for any row whose
+        external_product_id is empty -- which is every seeded row until
+        somebody adds it to a cart, since seed_products deliberately leaves
+        it blank for lazy minting. So reordering two formats on this page,
+        which is what the page is FOR, used to issue live Stripe writes: a
+        500 mid-edit when Stripe is unreachable or the key has rotated, and
+        a Stripe product created as a side effect of a presentation change
+        when it is not.
+
+        Only the two fields this inline can edit are written, so a concurrent
+        edit to the rest of the product is not clobbered by a stale form.
+
+        Bypassing formset.save() means bypassing its bookkeeping too, and
+        that bookkeeping is not optional: the admin calls
+        construct_change_message() straight after save_related(), and that
+        reads formset.new_objects, .changed_objects and .deleted_objects --
+        attributes only save_existing_objects()/save_new_objects() ever
+        assign. Without them the request raises AttributeError, and since the
+        change view runs in a transaction the UPDATEs above are rolled back
+        with it, so the page cannot save at all. They are populated here by
+        hand, which also keeps the admin's LogEntry an accurate record of
+        what moved.
+        """
+        if formset.model is not Product:
+            return super().save_formset(request, form, formset, change)
+
+        # Adds and deletes are both turned off on this inline, so these two
+        # are empty by construction rather than by omission.
+        formset.new_objects = []
+        formset.deleted_objects = []
+        formset.changed_objects = []
+
+        for member_form in formset.forms:
+            if not member_form.has_changed() or not member_form.instance.pk:
+                continue
+            changed = {
+                name: member_form.cleaned_data[name]
+                for name in ("format_label", "format_order")
+                if name in member_form.changed_data
+            }
+            # Nothing this inline owns actually moved -- do not issue an
+            # UPDATE with no columns in it.
+            if not changed:
+                continue
+            Product.objects.filter(
+                pk=member_form.instance.pk).update(**changed)
+            # The fields actually written, not member_form.changed_data:
+            # the log should say what this page changed, and this page can
+            # only change these two.
+            formset.changed_objects.append(
+                (member_form.instance, sorted(changed)))
+        # No formset.save_m2m() to pair with the above: this inline edits no
+        # M2M field, and save_m2m only exists after a save(commit=False).
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        # Said on the page rather than only in this docstring: an owner
+        # reordering the shipped book's formats has no way to know from the
+        # UI that the fixture will win on the next deploy.
+        form.base_fields["name"].help_text = self.FIXTURE_OWNED_NOTE
+        return form
+
+    def member_count(self, obj):
+        return obj._member_count
+
+    member_count.short_description = "formats"
+    member_count.admin_order_field = "_member_count"
 
 
 class OrderItemInline(admin.TabularInline):

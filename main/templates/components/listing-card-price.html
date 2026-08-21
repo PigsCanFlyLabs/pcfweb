@@ -1,0 +1,37 @@
+{% comment %}
+   The price line and format summary on a product card, shared by every
+   listing surface: /products (products.html) and the homepage carousels
+   (index.html). One partial rather than a copy per template, because the
+   two rendered the identical fragment and nothing kept them in step -- a
+   wording or gating change made on the catalogue would leave the homepage
+   quietly rendering the old card. Takes `product`, which both callers
+   already have in scope from their own {% for %}.
+
+   listing_price_display, not get_display_price: a card standing for a
+   format group shows the range its formats span, since the member the card
+   happens to link to was chosen by format_order and not by the visitor. An
+   ungrouped card gets its own price back unchanged, "Pre-order: " prefix
+   and all.
+
+   The pay-what-you-want notice is gated on listing_shows_pwyw_notice rather
+   than on is_pwyw, so it appears only where the number above it really is a
+   suggestion for every format the card stands for -- never under a range,
+   most of which is other rows' fixed prices, and never where a same-priced
+   sibling charges that figure outright.
+
+   The format summary is what stops collapsing the duplicate cards from also
+   taking away the only sign in the catalogue that the other formats exist.
+   It names the format the range opens at, and flags that format when its
+   end of the range is a pay-what-you-want suggestion rather than a price.
+{% endcomment %}
+<span>
+  {{ product.listing_price_display }}
+  {% if product.listing_shows_pwyw_notice %}
+  <br><small class="pwyw-label">Pay what you want &mdash; suggested amount, or nothing at all</small>
+  {% endif %}
+</span>
+{% with format_labels=product.listing_format_labels %}
+{% if format_labels %}
+<span class="format-summary"><small>Available in {{ format_labels|length }} formats: {{ format_labels|join:", " }}</small></span>
+{% endif %}
+{% endwith %}

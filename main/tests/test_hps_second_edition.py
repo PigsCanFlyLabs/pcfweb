@@ -298,6 +298,14 @@ class ProductsPageReleaseDateOrderingTest(TestCase):
     from product-card links parsed out of the rendered HTML.  It does not
     construct a queryset, import the view's ordering expression, or inspect
     ``order_by`` — it tests what the browser sees.
+
+    The expected sequences below carry pk 104 and not 105 or 106: the three
+    DC4K SKUs share a format group, so the listing renders one card for the
+    work rather than three near-identical ones (see
+    ``ProductQuerySet.collapse_format_groups``). That collapse is deliberately
+    NOT allowed to reorder anything -- a group keeps the position of its
+    first surviving member, so removing the duplicates leaves the rest of
+    this ordering exactly as it was.
     """
 
     fixtures = ["initial_products"]
@@ -339,9 +347,10 @@ class ProductsPageReleaseDateOrderingTest(TestCase):
         response = self.client.get("/products")
         pks = self._product_pks_from_html(response.content.decode())
 
-        # 104/105/106 (2026-07-28, pk tiebreak), 108 (2026-06-05),
-        # 103 (2022-11-29), 102 (2020-10-13), 101 (2017-06-16), 100 (2015-02-27)
-        expected = [104, 105, 106, 108, 103, 102, 101, 100]
+        # 104 standing for the DC4K group (2026-07-28, and format_order picks
+        # the paperback over 105/106), 108 (2026-06-05), 103 (2022-11-29),
+        # 102 (2020-10-13), 101 (2017-06-16), 100 (2015-02-27)
+        expected = [104, 108, 103, 102, 101, 100]
         self.assertEqual(
             pks, expected,
             f"Expected newest-first order {expected}, got {pks}",
@@ -364,13 +373,39 @@ class ProductsPageReleaseDateOrderingTest(TestCase):
             Product.objects.filter(pk=100).update(release_date=original)
 
     def test_no_products_are_missing_from_products_page(self):
-        """All non-noorder products are present in the rendered /products page."""
+        """Every sellable work reaches the rendered /products page.
+
+        "Work", not "row": a grouped SKU is represented by its group's card
+        rather than by one of its own, so the assertion is that nothing is
+        unreachable -- an ungrouped product has its own card, and a grouped
+        one has a card for its group. A product that is in neither is missing
+        from the catalogue, which is the failure this exists to catch.
+        """
         response = self.client.get("/products")
         pks = self._product_pks_from_html(response.content.decode())
+        listed = set(pks)
 
         # pk 107 is noorder=True, so it is excluded from /products
-        expected = {100, 101, 102, 103, 104, 105, 106, 108}
-        self.assertEqual(set(pks), expected)
+        sellable = Product.objects.exclude(noorder=True)
+        self.assertEqual(
+            {product.pk for product in sellable},
+            {100, 101, 102, 103, 104, 105, 106, 108},
+            "fixture changed; update this test's premise")
+
+        for product in sellable:
+            with self.subTest(pk=product.pk):
+                if product.group_id is None:
+                    self.assertIn(product.pk, listed)
+                else:
+                    represented = {
+                        member.pk for member in product.group_members()}
+                    self.assertTrue(
+                        represented & listed,
+                        f"nothing on the page stands for pk {product.pk}")
+
+        # And no work is listed twice: one card per group, so the three DC4K
+        # SKUs contribute exactly one link between them.
+        self.assertEqual(listed, {100, 101, 102, 103, 104, 108})
 
     # -- category page /products/B -------------------------------------------
 
@@ -381,7 +416,7 @@ class ProductsPageReleaseDateOrderingTest(TestCase):
 
         # Same expected order as the main /products page — all non-noorder
         # products are currently in the Books category.
-        expected = [104, 105, 106, 108, 103, 102, 101, 100]
+        expected = [104, 108, 103, 102, 101, 100]
         self.assertEqual(
             pks, expected,
             f"Expected books in newest-first order {expected}, got {pks}",
@@ -416,34 +451,47 @@ class HomepageOurBooksCarouselOrderingTest(TestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_our_books_carousel_contains_the_three_newest_books(self):
-        """After switching from '-price' to order_by_release_date(), the [:3]
-        slice on the homepage carousel selects the three DC4K SKUs (all dated
-        2026-07-28, pk-ascending tiebreak at 104/105/106).  This drops High
-        Performance Spark 2e, Ray and Kubeflow off the homepage entirely.
+        """Three different books, not three formats of one.
+
+        The slice is release-date ordered, and the three DC4K SKUs share a
+        date (2026-07-28) -- so before format groups they took all three
+        slots between them and the homepage advertised one book three times.
+        The view collapses the group BEFORE slicing, which is the whole
+        reason the order of those two operations is written down in
+        ``HomeView.get``: collapsing afterwards would leave the carousel with
+        a single card.
         """
         response = self.client.get('/')
         html = response.content.decode()
         pks = self._product_pks_from_html(html)
 
         # The page contains the hero link (pk 104) plus three carousel
-        # entries (104, 105, 106). After deduplication, the last three
+        # entries (104, 108, 103). After deduplication, the last three
         # unique PKs should be the carousel.
         unique_pks = list(dict.fromkeys(pks))
         carousel_pks = unique_pks[-3:] if len(unique_pks) >= 3 else []
 
         self.assertEqual(
-            carousel_pks, [104, 105, 106],
-            f"Carousel expected [104, 105, 106] but got {carousel_pks}. "
+            carousel_pks, [104, 108, 103],
+            f"Carousel expected [104, 108, 103] but got {carousel_pks}. "
             f"Full unique order: {unique_pks}",
         )
 
-        # None of the other books appear in the carousel slice.
-        not_in_carousel = [108, 103, 102, 101, 100]
-        for pk in not_in_carousel:
+        # The DC4K siblings are the ones the group card stands in for, so
+        # neither may take a slot of its own.
+        for pk in (105, 106):
             self.assertNotIn(
                 pk, carousel_pks,
-                f"pk {pk} should not appear in the carousel slice "
-                f"(it was displaced by DC4K filling all three [:3] slots). "
+                f"pk {pk} is another format of pk 104's book; the carousel "
+                f"shows the group once. Carousel: {carousel_pks}",
+            )
+
+        # And the books the collapse made room for are older, so they stop at
+        # the slice rather than all appearing.
+        for pk in (102, 101, 100):
+            self.assertNotIn(
+                pk, carousel_pks,
+                f"pk {pk} is outside the three newest. "
                 f"Carousel: {carousel_pks}",
             )
 

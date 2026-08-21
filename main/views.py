@@ -150,8 +150,26 @@ class HomeView(View):
                 .first())
 
     def get(self, request):
+        # collapse_format_groups() BEFORE the [:3] slice, not after. Sliced
+        # first, the three DC4K SKUs fill all three carousel slots and
+        # collapse to a single card -- so the homepage would show one book
+        # where it means to show three, and the slice would be silently
+        # doing the opposite of its job.
+        #
+        # The cost of that ordering is that the whole category is fetched to
+        # render three cards, where the old code issued a LIMIT 3. Accepted
+        # knowingly: the collapse cannot stop early and stay correct, because
+        # a row anywhere later in the queryset can replace which member
+        # represents one of the first three groups (format_order decides, and
+        # release-date order does not deliver members together). The
+        # catalogue is nine rows; if it ever grows to where this matters, the
+        # fix belongs in collapse_format_groups(), not in a slice here.
+        def carousel(cat):
+            return (Product.objects.filter(cat=cat).exclude(noorder=True)
+                    .order_by_release_date().collapse_format_groups()[:3])
+
         highlights = map(
-            lambda cat: ((cat, cat.label), list(Product.objects.filter(cat = cat).exclude(noorder=True).order_by_release_date()[:3])),
+            lambda cat: ((cat, cat.label), carousel(cat)),
             Product.Categories)
         # Only show categories with elements in them.
         highlights = list(filter(lambda x: len(x[1]) != 0, highlights))
@@ -324,7 +342,9 @@ class ProductsView(View):
             return render(request, 'products.html', context={
                 'title': 'Products',
                 'type': 'producs',
-                'products': Product.objects.exclude(noorder=True).order_by_release_date()
+                'products': (Product.objects.exclude(noorder=True)
+                             .order_by_release_date()
+                             .collapse_format_groups())
             })
         else:
             cat = category or request.GET["category"]
@@ -346,7 +366,10 @@ class ProductsView(View):
             return render(request, 'products.html', context={
                 'title': f'Products - {cat_name}',
                 'type': cat_name,
-                'products': Product.objects.filter(cat=cat).exclude(noorder=True).order_by_release_date(),
+                'products': (Product.objects.filter(cat=cat)
+                             .exclude(noorder=True)
+                             .order_by_release_date()
+                             .collapse_format_groups()),
                 'extra_style': extra_style
             })
 
