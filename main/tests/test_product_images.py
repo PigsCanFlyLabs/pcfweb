@@ -260,6 +260,30 @@ class GrabBookImagesTest(TestCase):
         self.assertNotIn("cover", row.alt_text)
         self.assertIn(product.name, row.alt_text)
 
+    def test_a_maximum_length_product_name_still_attaches(self):
+        # Product.name allows 250 characters and the alt-text prefix adds
+        # more, but alt_text is itself capped at 250. SQLite (these tests)
+        # would silently store the over-long value; PostgreSQL rejects it,
+        # and the exception would abort the run with every later product's
+        # images left unattached. So pin the bound directly, and pin that a
+        # product processed after the long-named one still gets its image.
+        name_limit = Product._meta.get_field("name").max_length
+        alt_limit = ProductImage._meta.get_field("alt_text").max_length
+        long_named = make_product(
+            name="A" * name_limit, image_name="book_covers/a_book.jpg")
+        later = make_product(
+            name="Later Book", image_name="book_covers/z_book.jpg")
+        self.write_image("a_book.jpg")
+        self.write_image("a_book_back.jpg")
+        self.write_image("z_book.jpg")
+        self.write_image("z_book_back.jpg")
+
+        self.run_command()
+
+        row = long_named.extra_images.get()
+        self.assertLessEqual(len(row.alt_text), alt_limit)
+        self.assertEqual(later.extra_images.count(), 1)
+
     def test_the_claimed_set_is_what_excludes_a_sibling(self):
         # Directly, so the exclusion cannot quietly become "nothing matched".
         self.write_image("hps.jpg")

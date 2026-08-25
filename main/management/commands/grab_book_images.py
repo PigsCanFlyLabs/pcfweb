@@ -164,16 +164,27 @@ class Command(BaseCommand):
                 attached += 1
                 self.stdout.write(f"  + {product.name}: {name}")
                 if not dry_run:
+                    # The honest generic: the file could be a back cover or
+                    # an interior page, and this command cannot tell. Rows
+                    # are never updated on a re-run, so a better description
+                    # typed into the admin survives.
+                    #
+                    # Bounded to the column, because Product.name's limit
+                    # plus this prefix exceeds alt_text's limit: on
+                    # PostgreSQL an over-long value is not truncated but
+                    # rejected, and the exception would abort the command
+                    # with this product's remaining images -- and every
+                    # later product's -- left unattached.
+                    alt_limit = ProductImage._meta.get_field(
+                        "alt_text").max_length
                     ProductImage.objects.create(
                         product=product,
                         image_name=name,
                         position=ProductImage.objects.filter(
                             product=product).count(),
-                        # The honest generic: the file could be a back cover
-                        # or an interior page, and this command cannot tell.
-                        # Rows are never updated on a re-run, so a better
-                        # description typed into the admin survives.
-                        alt_text=f"Additional picture of {product.name}",
+                        alt_text=(
+                            f"Additional picture of "
+                            f"{product.name}")[:alt_limit],
                     )
 
         verb = "would attach" if dry_run else "attached"
