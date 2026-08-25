@@ -30,6 +30,34 @@ SHIPPING_RATE_ERROR = (
 )
 
 
+# The free rate is built inline rather than being a fifth STRIPE_SHIPPING_RATES
+# id, and that is the whole point of it: a shr_... is livemode-scoped, so a
+# dashboard rate has to be created twice and configured per environment before
+# the offer works anywhere -- and until it is, the site advertises free
+# shipping that checkout does not offer. Inline shipping_rate_data needs
+# nothing created in advance and is identical under a test and a live key.
+FREE_SHIPPING_DISPLAY_NAME = "Free shipping"
+
+# Stripe's tax code for shipping. Named in the Checkout Session API docs and
+# required here because automatic tax is on: a rate with no tax behavior is
+# rejected by a session that computes tax. The amount is zero, so this decides
+# nothing about what is charged -- it decides whether the session is accepted.
+SHIPPING_TAX_CODE = "txcd_92010001"
+
+
+def free_shipping_option(currency: str = "usd") -> dict:
+    """The inline Stripe shipping option for a cart that has earned it."""
+    return {
+        "shipping_rate_data": {
+            "type": "fixed_amount",
+            "display_name": FREE_SHIPPING_DISPLAY_NAME,
+            "fixed_amount": {"amount": 0, "currency": currency},
+            "tax_behavior": stripe_tax_behavior(),
+            "tax_code": SHIPPING_TAX_CODE,
+        },
+    }
+
+
 def stripe_tax_behavior() -> TaxBehavior:
     value = str(getattr(settings, "STRIPE_TAX_BEHAVIOR", "exclusive"))
     if value == "exclusive":
@@ -204,9 +232,19 @@ class Payments:
             # Livemode-scoped ids, so they come from settings rather than
             # being hardcoded here; see STRIPE_SHIPPING_RATES.
             shipping_rates = getattr(settings, "STRIPE_SHIPPING_RATES", [])
-            if shipping_rates:
-                extras["shipping_options"] = [
-                    {"shipping_rate": rate} for rate in shipping_rates]
+            shipping_options = [
+                {"shipping_rate": rate} for rate in shipping_rates]
+            # First in the list, because Stripe preselects the first option:
+            # a buyer who has earned free shipping should not have to notice
+            # it, and the paid rates stay available underneath for anyone who
+            # wants the faster one. Cart.qualifies_for_free_shipping() is the
+            # single definition of the offer -- the cart page advertises it
+            # from the same method, so the page cannot promise a rate this
+            # session will not carry.
+            if cart.qualifies_for_free_shipping(products):
+                shipping_options.insert(0, free_shipping_option())
+            if shipping_options:
+                extras["shipping_options"] = shipping_options
 
         if has_physical:
             extras["shipping_address_collection"] = {"allowed_countries": ["US", "CA"]}

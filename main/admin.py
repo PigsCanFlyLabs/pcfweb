@@ -9,8 +9,33 @@ from django.apps import apps
 
 # Register your models here.
 admin.site.register(Cart)
-admin.site.register(Product)
 admin.site.register(CartProduct)
+
+
+class ProductImageInline(admin.TabularInline):
+    """The extra pictures of one product, edited on the product itself.
+
+    Inline rather than a standalone page because an image only means anything
+    next to the product it is of: adding one from its own form means picking
+    the product out of a dropdown of near-identical edition names, which is
+    how the Executive Edition ends up carrying the paperback's photograph.
+    """
+
+    model = ProductImage
+    extra = 1
+    fields = ("position", "image_name", "image", "alt_text")
+
+
+@admin.register(Product)
+class ProductAdmin(admin.ModelAdmin):
+    """Deliberately still the default form, plus the images inline.
+
+    Product has a lot of columns and no curated admin; listing fields here
+    would freeze that set, so a column added to the model would silently stop
+    being editable. The inline is the only thing this class exists for.
+    """
+
+    inlines = [ProductImageInline]
 
 
 @admin.register(ProductGroup)

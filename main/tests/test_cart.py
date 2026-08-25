@@ -9,7 +9,7 @@ from django.contrib.messages.middleware import MessageMiddleware
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.db import IntegrityError, transaction
 from django.http import HttpResponse
-from django.test import Client, RequestFactory
+from django.test import Client, RequestFactory, override_settings
 from django.utils.cache import add_never_cache_headers
 
 from main.models import Cart, CartProduct, Product
@@ -772,3 +772,77 @@ class CartNotSoldHereTest(CartTestBase):
 
         self.assertIn("Not sold here", html)
         self.assertNotIn("shipping-notice", html)
+
+
+@override_settings(THUMBNAIL_DEBUG=False, FREE_SHIPPING_ENABLED=True,
+                   FREE_SHIPPING_THRESHOLD=4000)
+class CartFreeShippingNoticeTest(CartTestBase):
+    """What the cart page says about the free shipping offer.
+
+    The page and Payments.checkout read one method, so these are the other
+    half of test_shipping.FreeShippingTest: that one pins what the session
+    carries, this one pins what the buyer was told before they got there.
+    """
+
+    def add(self, pk, quantity=1):
+        Product.objects.filter(pk=pk).update(stock=99)
+        response = self.client.post(f"/add-to-cart/{pk}/{quantity}")
+        self.assertIn(response.status_code, {200, 302})
+
+    def cart_html(self):
+        response = self.client.get("/cart")
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def test_a_short_cart_is_told_how_much_more_it_needs(self):
+        Product.objects.filter(pk=100).update(
+            price=1500, delivery_type=Product.DeliveryTypes.PHYSICAL)
+        self.add(100)
+
+        self.assertIn("Add <strong>$25.00</strong> more", self.cart_html())
+
+    def test_a_qualifying_cart_is_told_it_has_earned_it(self):
+        Product.objects.filter(pk=100).update(
+            price=4200, delivery_type=Product.DeliveryTypes.PHYSICAL)
+        self.add(100)
+
+        html = self.cart_html()
+
+        self.assertIn("this order qualifies", html)
+        self.assertNotIn("more and\n                    shipping is on us",
+                         html)
+
+    def test_the_shortfall_follows_the_quantity(self):
+        # Two $15 books leave $10 to go, not $25. A shortfall computed off the
+        # unit price would keep nagging a cart that had already qualified.
+        Product.objects.filter(pk=100).update(
+            price=1500, delivery_type=Product.DeliveryTypes.PHYSICAL)
+        self.add(100, quantity=2)
+
+        self.assertIn("Add <strong>$10.00</strong> more", self.cart_html())
+
+    def test_a_digital_cart_is_not_offered_free_shipping(self):
+        # Nothing to post: a download has no shipping to be free, and telling
+        # a buyer to spend more to save postage they were never charged is
+        # the shipping-on-a-PDF bug wearing a different hat.
+        Product.objects.filter(pk=100).update(
+            price=1500, delivery_type=Product.DeliveryTypes.DIGITAL)
+        self.add(100)
+
+        html = self.cart_html()
+
+        self.assertNotIn("more and", html)
+        self.assertNotIn("this order qualifies", html)
+
+    @override_settings(FREE_SHIPPING_THRESHOLD=9900)
+    def test_the_advertised_threshold_follows_the_setting(self):
+        # The offer is advertised from the setting checkout reads, so moving
+        # the threshold cannot leave a stale "$40" on the page.
+        Product.objects.filter(pk=100).update(
+            price=1500, delivery_type=Product.DeliveryTypes.PHYSICAL)
+        self.add(100)
+
+        html = self.cart_html()
+
+        self.assertIn("orders over $99", html)
+        self.assertNotIn("orders over $40", html)

@@ -40,10 +40,10 @@ from main.forms import (
     MailingListImportForm, MailingListSendForm, MailingListSignupForm,
     PurchaseFeedbackForm)
 from main.models import (
-    PWYW_ROUND_DOWN_BELOW, Cart, CartProduct, EmailIdentity,
-    MailingListMessage, Order, Product, PurchaseFeedback, PwywAmountError,
-    SuppressedAddress, normalize_email_identity, parse_pwyw_amount,
-    send_batch_size)
+    MAX_HANDLING_DAYS, MIN_HANDLING_DAYS, PWYW_ROUND_DOWN_BELOW, Cart,
+    CartProduct, EmailIdentity, MailingListMessage, Order, Product,
+    PurchaseFeedback, PwywAmountError, SuppressedAddress,
+    normalize_email_identity, parse_pwyw_amount, send_batch_size)
 from main.payments import Payments
 from main.socials import LIBERATED_BREAD_URL, follow_targets
 from main.utils import (
@@ -882,7 +882,18 @@ class GoogleProductFeed(View):
         everything_but_services = (Product.objects.exclude(
             cat=Product.Categories.SERVICES)
             .exclude(noorder=True))
-        return render(request, "google_products.xml", context={'products': everything_but_services}, content_type="text/xml")
+        return render(
+            request,
+            "google_products.xml",
+            context={
+                'products': everything_but_services,
+                # Published to Google here and used for the estimated
+                # delivery date reported by the Customer Reviews opt-in.
+                # One pair of numbers, so the two cannot drift apart.
+                'min_handling_days': MIN_HANDLING_DAYS,
+                'max_handling_days': MAX_HANDLING_DAYS,
+            },
+            content_type="text/xml")
 
 
 
@@ -897,16 +908,13 @@ class CartView(View, BaseCartView):
         repriced = cart.pwyw_merge_notice_names()
         if repriced:
             messages.warning(request, self._merge_notice(repriced))
-        cart_products = cart.products.select_related("product")
-        # A noorder line contributes nothing to the total. Public add-to-cart
-        # refuses these and checkout re-checks, so one is only here because it
-        # was added before the flag was set -- but it still cannot be bought,
-        # and billing for it in the displayed total would be a number the
-        # customer is never charged. pk 107 happens to be priced 0, so this
-        # matters for the general case: an admin flagging an existing priced
-        # product noorder would otherwise leave its price silently in the sum.
-        total_price = sum(cp.total_price() for cp in cart_products
-                          if not cp.product.noorder)
+        cart_products = list(cart.products.select_related("product"))
+        # Which lines count towards the total, and why a noorder one does
+        # not, now lives on the cart itself -- checkout reads the same method
+        # to decide whether free shipping has been earned, and two copies of
+        # that sum are two chances for the page to advertise an offer the
+        # Stripe session does not carry.
+        total_price = cart.billable_total(cart_products)
         total_display_price = "{0:.2f}".format(total_price / 100)
         has_physical = any(cp.product.is_physical_good() for cp in cart_products
                            if not cp.product.noorder)
@@ -916,6 +924,9 @@ class CartView(View, BaseCartView):
         # it is what tells a buyer the row is theirs to change.
         has_pwyw = any(cp.product.is_pwyw for cp in cart_products)
         has_unavailable = any(cp.product.noorder for cp in cart_products)
+        # Only a cart with something to post is told about shipping at all;
+        # a download has no shipping to be free.
+        shortfall = cart.free_shipping_shortfall(cart_products)
         response = render(request, 'cart.html', context={
             'title': 'Cart',
             'products': cart_products,
@@ -923,6 +934,12 @@ class CartView(View, BaseCartView):
             'has_physical': has_physical,
             'has_pwyw': has_pwyw,
             'has_unavailable': has_unavailable,
+            'free_shipping_earned': (
+                has_physical and cart.qualifies_for_free_shipping(
+                    cart_products)),
+            'free_shipping_shortfall': (
+                "{0:.2f}".format(shortfall / 100)
+                if has_physical and shortfall else ""),
         })
         # Cleared here and nowhere else, and only for a request that is
         # actually being sent the basket:
@@ -1197,6 +1214,7 @@ class CheckoutSuccessView(View, BaseCartView):
             'order': order,
         }
         context.update(post_purchase_context(request, order))
+        context.update(google_customer_reviews_context(order))
         return render(request, 'checkout_success.html', context=context)
 
     def _reconcile_with_stripe(self, order: Order, session_id: str) -> None:
@@ -1252,6 +1270,33 @@ class CheckoutSuccessView(View, BaseCartView):
 
         order.refresh_from_db()
         webhook.fulfil_order(order)
+
+
+def google_customer_reviews_context(
+        order: Optional[Order]) -> Dict[str, Any]:
+    """What the Google Customer Reviews opt-in module needs, or blanks.
+
+    Google requires an order id, an email, a delivery country and an estimated
+    delivery date, and its module fails silently in the browser when one is
+    missing. Resolving them here rather than in the template means the
+    template's guard is a single readable condition, and means a PENDING order
+    -- which has no email until Stripe reports one on the paid session -- is
+    the same "nothing to render" case as no order at all.
+    """
+    if order is None:
+        return {
+            'merchant_id': '',
+            'delivery_country': '',
+            'estimated_delivery_date': None,
+            'review_gtins': [],
+        }
+    return {
+        'merchant_id': getattr(
+            settings, "GOOGLE_CUSTOMER_REVIEWS_MERCHANT_ID", ""),
+        'delivery_country': order.delivery_country(),
+        'estimated_delivery_date': order.estimated_delivery_date(),
+        'review_gtins': order.review_gtins(),
+    }
 
 
 def post_purchase_context(request, order: Optional[Order]) -> Dict[str, Any]:

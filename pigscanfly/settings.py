@@ -193,6 +193,7 @@ class Base(Configuration):
                     'django.template.context_processors.request',
                     'django.contrib.auth.context_processors.auth',
                     'django.contrib.messages.context_processors.messages',
+                    'main.context_processors.free_shipping',
                 ],
             },
         },
@@ -380,6 +381,39 @@ class Base(Configuration):
             "shr_0MJrL4nkDnSOC1s7cPSy15CO",  # media mail
             "shr_0MNOZrnkDnSOC1s7TSLZig6Z",  # faster
         ])))
+
+    # Order total, in cents, at or above which shipping costs the buyer
+    # nothing. Deliberately not scoped to the United States even though the
+    # offer was first described that way: Stripe Checkout fixes the shipping
+    # rate list when the session is created and collects the address
+    # afterwards, and a shipping option carries no country, so a rate offered
+    # to a US buyer is offered to a Canadian one in the same breath. The
+    # choice was between a US-only rate a Canadian could still select and an
+    # offer that means what it says in both countries; this is the second.
+    #
+    # Zero or negative would make every order qualify, which is a real
+    # (if unlikely) thing to want -- "free shipping on everything" -- so it is
+    # not clamped. The offer is switched off by unsetting
+    # FREE_SHIPPING_ENABLED instead.
+    FREE_SHIPPING_THRESHOLD: int = parse_int(
+        os.getenv("FREE_SHIPPING_THRESHOLD"), 4000)
+
+    # The kill switch for the offer, separate from the threshold above so that
+    # turning it off does not require inventing a threshold nothing can reach.
+    # Read by both checkout and the templates that advertise it, so the site
+    # cannot promise something the session will not honour.
+    FREE_SHIPPING_ENABLED: bool = os.getenv(
+        "FREE_SHIPPING_ENABLED", "true").strip().lower() not in {
+            "false", "0", "no", ""}
+
+    # GOOGLE CUSTOMER REVIEWS
+    # The Merchant Center account the post-purchase survey opt-in belongs to.
+    # Not a secret -- it ships in the page source, as Google's module requires
+    # -- but a setting rather than a template literal so a test deployment can
+    # point at a different account (or blank it) without editing a template.
+    # Blank switches the module off; see components/google-customer-reviews.
+    GOOGLE_CUSTOMER_REVIEWS_MERCHANT_ID: str = os.getenv(
+        "GOOGLE_CUSTOMER_REVIEWS_MERCHANT_ID", "686906834").strip()
 
     # DISCORD INVITE
     # The invite link for /discord, held as two halves that are only ever

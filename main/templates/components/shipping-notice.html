@@ -1,3 +1,17 @@
 <div class="alert alert-warning shipping-notice" role="alert">
     <strong>Heads up:</strong> shipping times for physical goods are currently long &mdash; please expect delays.
 </div>
+{% comment %}
+    The threshold is rendered from the setting checkout reads, never typed
+    into the copy: a hardcoded "$40" here would go on advertising an offer
+    after FREE_SHIPPING_THRESHOLD moved, and the buyer would find a different
+    rate at the till. free_shipping_threshold_display is supplied by the
+    context processor in main/context_processors.py, so this component works
+    on every page that includes it rather than only the two whose views
+    happen to remember to pass it.
+{% endcomment %}
+{% if free_shipping_enabled %}
+<div class="alert alert-info shipping-notice free-shipping-offer" role="alert">
+    <strong>Free shipping</strong> on orders over ${{ free_shipping_threshold_display }}, to the US and Canada alike.
+</div>
+{% endif %}
