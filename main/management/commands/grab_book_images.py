@@ -13,7 +13,10 @@ that sits beside that one and starts with the same stem:
 
 Matching on the stem rather than on a hand-written list is what makes this
 worth running more than once: dropping a new ``..._back.jpg`` into the assets
-repository and re-running is all it takes, with nothing here to edit.
+repository is all it takes, with nothing here to edit. The primary pod runs
+this on every startup (scripts/start-server.sh, right after seed_products),
+so the next deploy attaches the new file everywhere -- including on a fresh
+database, whose ProductImage table starts empty.
 
 The stem rule alone is not enough, and the catalogue already contains the
 counter-example that proves it::
@@ -166,7 +169,11 @@ class Command(BaseCommand):
                         image_name=name,
                         position=ProductImage.objects.filter(
                             product=product).count(),
-                        alt_text=f"{product.name} cover",
+                        # The honest generic: the file could be a back cover
+                        # or an interior page, and this command cannot tell.
+                        # Rows are never updated on a re-run, so a better
+                        # description typed into the admin survives.
+                        alt_text=f"Additional picture of {product.name}",
                     )
 
         verb = "would attach" if dry_run else "attached"
