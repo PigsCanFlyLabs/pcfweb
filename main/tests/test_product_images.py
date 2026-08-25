@@ -8,6 +8,7 @@ an image that belongs to a different product (a misrepresented offer that
 looks fine).
 """
 
+import re
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -21,6 +22,8 @@ from main.models import Product, ProductImage
 
 
 G = "{http://base.google.com/ns/1.0}"
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def make_product(**fields):
@@ -242,6 +245,45 @@ class GrabBookImagesTest(TestCase):
         with override_settings(STATIC_ROOT=str(self.root / "nowhere")):
             call_command("grab_book_images")
 
+    def test_seeded_alt_text_does_not_call_an_interior_page_a_cover(self):
+        # The command cannot know whether a matched file is a back cover or
+        # an interior illustration, so the seeded description must not claim
+        # either. It used to say "<name> cover", which was a false statement
+        # to a screen reader for every extra picture that is not one.
+        product = make_product()
+        self.write_image("a_book.jpg")
+        self.write_image("a_book_back.jpg")
+
+        self.run_command()
+
+        row = product.extra_images.get()
+        self.assertNotIn("cover", row.alt_text)
+        self.assertIn(product.name, row.alt_text)
+
+    def test_a_maximum_length_product_name_still_attaches(self):
+        # Product.name allows 250 characters and the alt-text prefix adds
+        # more, but alt_text is itself capped at 250. SQLite (these tests)
+        # would silently store the over-long value; PostgreSQL rejects it,
+        # and the exception would abort the run with every later product's
+        # images left unattached. So pin the bound directly, and pin that a
+        # product processed after the long-named one still gets its image.
+        name_limit = Product._meta.get_field("name").max_length
+        alt_limit = ProductImage._meta.get_field("alt_text").max_length
+        long_named = make_product(
+            name="A" * name_limit, image_name="book_covers/a_book.jpg")
+        later = make_product(
+            name="Later Book", image_name="book_covers/z_book.jpg")
+        self.write_image("a_book.jpg")
+        self.write_image("a_book_back.jpg")
+        self.write_image("z_book.jpg")
+        self.write_image("z_book_back.jpg")
+
+        self.run_command()
+
+        row = long_named.extra_images.get()
+        self.assertLessEqual(len(row.alt_text), alt_limit)
+        self.assertEqual(later.extra_images.count(), 1)
+
     def test_the_claimed_set_is_what_excludes_a_sibling(self):
         # Directly, so the exclusion cannot quietly become "nothing matched".
         self.write_image("hps.jpg")
@@ -254,3 +296,40 @@ class GrabBookImagesTest(TestCase):
 
         self.assertEqual([path.name for path in without], ["hps_2ed.jpg"])
         self.assertEqual(with_claim, [])
+
+
+class StartServerGrabBookImagesTest(TestCase):
+    """The wiring: the extra pictures only reach the feed if startup attaches
+    them.
+
+    Same argument as StartServerBookAssetCheckTest: the command is only
+    useful if something actually runs it, and before this wiring a fresh
+    database served a feed with no <g:additional_image_link> on any offer
+    until somebody remembered a manual command.
+    """
+
+    def setUp(self):
+        with open(REPO_ROOT / "scripts" / "start-server.sh") as fh:
+            self.script = fh.read()
+
+    def test_the_primary_attaches_extra_images(self):
+        primary_block = re.search(
+            r'if \[ -n "\$\{PRIMARY:-\}" \];.*?\nfi\n', self.script, re.S)
+
+        self.assertIsNotNone(primary_block, "the PRIMARY block moved")
+        self.assertIn("grab_book_images", primary_block.group(0))
+
+    def test_it_runs_after_the_catalogue_is_seeded(self):
+        # The command walks Product rows, so running it before seed_products
+        # on a fresh database would attach nothing and report success.
+        self.assertLess(
+            self.script.index("seed_products"),
+            self.script.index("grab_book_images"))
+
+    def test_the_attach_cannot_take_the_pod_down(self):
+        """`set -e` plus a bare call would turn a bad picture into an outage."""
+        call = re.search(r"\./manage\.py grab_book_images.*?\n(.*\n)?",
+                         self.script)
+
+        self.assertIsNotNone(call)
+        self.assertIn("||", call.group(0))

@@ -544,6 +544,23 @@ for weeks:
 Running `build.sh` with `../pcfweb-assets` absent no longer deletes your
 local copy: the sibling checkout is verified before anything is removed.
 
+### Extra product pictures
+
+A product names its primary image in its fixture row (`image_name`); any
+image in the same directory whose name extends that file's stem with an
+underscore — `book_covers/distributed_computing_4_kids_back.jpg` beside
+`book_covers/distributed_computing_4_kids.jpg` — is an additional picture of
+the same product. The primary pod attaches those as `ProductImage` rows on
+every startup (`manage.py grab_book_images`), and the Google Merchant feed
+serves them as `<g:additional_image_link>`, up to ten per offer, in filename
+order. So the whole workflow for adding a back cover is: drop the file into
+`pcfweb-assets` next to the cover, deploy. The rules live in
+`main/management/commands/grab_book_images.py`: another product's primary
+image is never adopted as an extra (`high_performance_spark_2ed.jpg` extends
+`high_performance_spark`'s stem but is the 2nd edition's cover), and a file
+that does not open as an image (an unmaterialised LFS pointer) is reported
+and skipped rather than sent to Google as a broken URL.
+
 ## Deploying
 
 `./build.sh` is the whole pipeline: re-sync the sibling `pcfweb-assets` images

@@ -13,7 +13,10 @@ that sits beside that one and starts with the same stem:
 
 Matching on the stem rather than on a hand-written list is what makes this
 worth running more than once: dropping a new ``..._back.jpg`` into the assets
-repository and re-running is all it takes, with nothing here to edit.
+repository is all it takes, with nothing here to edit. The primary pod runs
+this on every startup (scripts/start-server.sh, right after seed_products),
+so the next deploy attaches the new file everywhere -- including on a fresh
+database, whose ProductImage table starts empty.
 
 The stem rule alone is not enough, and the catalogue already contains the
 counter-example that proves it::
@@ -161,12 +164,27 @@ class Command(BaseCommand):
                 attached += 1
                 self.stdout.write(f"  + {product.name}: {name}")
                 if not dry_run:
+                    # The honest generic: the file could be a back cover or
+                    # an interior page, and this command cannot tell. Rows
+                    # are never updated on a re-run, so a better description
+                    # typed into the admin survives.
+                    #
+                    # Bounded to the column, because Product.name's limit
+                    # plus this prefix exceeds alt_text's limit: on
+                    # PostgreSQL an over-long value is not truncated but
+                    # rejected, and the exception would abort the command
+                    # with this product's remaining images -- and every
+                    # later product's -- left unattached.
+                    alt_limit = ProductImage._meta.get_field(
+                        "alt_text").max_length
                     ProductImage.objects.create(
                         product=product,
                         image_name=name,
                         position=ProductImage.objects.filter(
                             product=product).count(),
-                        alt_text=f"{product.name} cover",
+                        alt_text=(
+                            f"Additional picture of "
+                            f"{product.name}")[:alt_limit],
                     )
 
         verb = "would attach" if dry_run else "attached"

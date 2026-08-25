@@ -41,6 +41,16 @@ if [ -n "${PRIMARY:-}" ]; then
   # one that runs migrations, so failing here would block a deploy on it.
   ./manage.py check_book_assets \
     || echo "start-server.sh: check_book_assets failed; starting anyway." >&2
+  # Attach the extra product pictures shipped in this image (back covers,
+  # interior pages -- assets/images files that extend a primary image's stem)
+  # as ProductImage rows, so the Google Merchant feed's
+  # <g:additional_image_link> entries appear on a fresh database too instead
+  # of depending on somebody remembering a manual command. After
+  # seed_products, because it walks the catalogue those rows come from.
+  # Idempotent, and non-fatal for the usual reason: an extra picture is an
+  # enrichment, not something to stop the site over.
+  ./manage.py grab_book_images \
+    || echo "start-server.sh: grab_book_images failed; starting anyway." >&2
 fi
 
 # Keep this under the ingress/proxy read timeout and comfortably above
