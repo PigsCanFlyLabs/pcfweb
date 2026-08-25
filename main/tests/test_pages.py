@@ -1309,3 +1309,21 @@ class ReturnPolicyTest(TestCase):
         # the one case that is not scoped to the US, since outside it we
         # reimburse instead of mailing a label.
         self.assertIn("we cover return shipping wherever you are", self.page())
+
+    def test_an_eu_withdrawal_is_refunded_its_standard_delivery_charge(self):
+        # Article 13 of the EU Consumer Rights Directive: on withdrawal, the
+        # outbound delivery cost is part of the refund, capped at the least
+        # expensive standard delivery (13(2) lets the supplement for a faster
+        # service be withheld). A blanket "original shipping charges are not
+        # refunded" told EU customers a mandatory part of their refund would
+        # be kept, so the blanket sentence must carry its qualifier and the
+        # EU section must state the refund explicitly.
+        page = self.page()
+        self.assertIn(
+            "we also refund what you paid for the original delivery", page)
+        self.assertIn(
+            "up to the cost of our least expensive standard delivery", page)
+        self.assertNotIn(
+            "Original shipping charges are not refunded.", page,
+            "the blanket no-refund sentence lost its except-where-the-law-"
+            "requires qualifier")
