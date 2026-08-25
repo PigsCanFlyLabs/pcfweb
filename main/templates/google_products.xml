@@ -4,7 +4,8 @@
 <title>Pigs Can Fly Labs Products</title>
 <link>https://www.pigscanfly.ca</link>
 <description>Pigs Can Fly Labs Google Product Feed</description>
-{% with min_handling_days=3 max_handling_days=21 %}
+{# Handling days come from the view, which reads the same constants #}
+{# Order.estimated_delivery_date() does; see MIN/MAX_HANDLING_DAYS.   #}
 {% for product in products %}
 {% for size in product.get_sizes %}
 {% with availability=product.get_availability %}
@@ -16,6 +17,12 @@
 {% if product.get_image_url %}
 <g:image_link>https://www.pigscanfly.ca{{ product.get_image_url }}</g:image_link>
 {% endif %}
+{# Up to ten of these per offer; get_additional_image_urls() enforces the cap #}
+{# and drops anything that repeats image_link above, because Google rejects  #}
+{# an item whose extra images duplicate its main one.                        #}
+{% for extra_image_url in product.get_additional_image_urls %}
+<g:additional_image_link>https://www.pigscanfly.ca{{ extra_image_url }}</g:additional_image_link>
+{% endfor %}
 <g:availability>{{ availability }}</g:availability>
 
 {% if product.date_available is not None and availability != "out_of_stock" and availability != "in_stock" %}
@@ -56,10 +63,14 @@
   <g:min_transit_time>1</g:min_transit_time>
   <g:max_transit_time>3</g:max_transit_time>
 </g:shipping>
+{# An item priced at or above FREE_SHIPPING_THRESHOLD reaches the offer on #}
+{# its own, so the economy rate it would be charged is zero. Keyed off the  #}
+{# item price rather than a basket total because <g:shipping> describes     #}
+{# shipping for THIS item; see Product.ships_free_in_feed().                #}
 <g:shipping>
   <g:country>US</g:country>
   <g:service>US Economy Shipping</g:service>
-  <g:price>10.0 USD</g:price>
+  <g:price>{% if product.ships_free_in_feed %}0.0{% else %}10.0{% endif %} USD</g:price>
   <g:min_handling_time>{{ min_handling_days }}</g:min_handling_time>
   <g:max_handling_time>{{ max_handling_days }}</g:max_handling_time>
   <g:min_transit_time>1</g:min_transit_time>
@@ -77,7 +88,7 @@
 <g:shipping>
   <g:country>CA</g:country>
   <g:service>CA Economy Shipping</g:service>
-  <g:price>10.0 USD</g:price>
+  <g:price>{% if product.ships_free_in_feed %}0.0{% else %}10.0{% endif %} USD</g:price>
   <g:min_handling_time>{{ min_handling_days }}</g:min_handling_time>
   <g:max_handling_time>{{ max_handling_days }}</g:max_handling_time>
   <g:min_transit_time>1</g:min_transit_time>
@@ -88,6 +99,5 @@
 {% endwith %}
 {% endfor %}
 {% endfor %}
-{% endwith %}
 </channel>
 </rss>

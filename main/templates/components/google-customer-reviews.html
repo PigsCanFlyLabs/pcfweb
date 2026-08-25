@@ -1,0 +1,33 @@
+{% comment %}
+    Google Customer Reviews opt-in.
+
+    Renders only when there is a real order to describe. Google's module
+    requires the order id, the customer's email, a delivery country and an
+    estimated delivery date, and it fails silently in the browser when any of
+    them is missing -- so the guard below is the difference between "no
+    survey" and "a survey that never explains why it did not appear".
+
+    A PENDING order has no email yet (Stripe reports it on the paid session),
+    which is why customer_email rather than the order itself is the condition.
+
+    The estimated delivery date is deliberately the slow end of the published
+    handling and transit windows; see Order.estimated_delivery_date().
+{% endcomment %}
+{% if merchant_id and order and order.customer_email and delivery_country and estimated_delivery_date %}
+<script src="https://apis.google.com/js/platform.js?onload=renderOptIn" async defer></script>
+<script>
+ window.renderOptIn = function() {
+     window.gapi.load('surveyoptin', function() {
+         window.gapi.surveyoptin.render(
+             {
+                 "merchant_id": {{ merchant_id }},
+                 "order_id": "{{ order.pk|escapejs }}",
+                 "email": "{{ order.customer_email|escapejs }}",
+                 "delivery_country": "{{ delivery_country|escapejs }}",
+                 "estimated_delivery_date": "{{ estimated_delivery_date|date:'Y-m-d' }}"{% if review_gtins %},
+                 "products": [{% for gtin in review_gtins %}{"gtin":"{{ gtin|escapejs }}"}{% if not forloop.last %}, {% endif %}{% endfor %}]{% endif %}
+             });
+     });
+ }
+</script>
+{% endif %}

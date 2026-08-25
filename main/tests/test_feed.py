@@ -326,3 +326,70 @@ class ProductCopyEscapingTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(b"Angle < bracket", response.content)
         self.assertIn(b"&lt;", response.content)
+
+
+@override_settings(THUMBNAIL_DEBUG=False, FREE_SHIPPING_ENABLED=True,
+                   FREE_SHIPPING_THRESHOLD=4000)
+class FeedFreeShippingTest(ProductFeedTest):
+    """The feed's shipping prices have to match what checkout charges.
+
+    A listing that advertises $10 postage on an item the site ships free is
+    the mismatch Merchant Center suspends accounts over, and it is invisible
+    from the site itself -- nothing renders the feed's shipping rows in a
+    browser.
+    """
+
+    def shipping_rows(self, item):
+        return {
+            (row.find(f"{G}country").text.strip(),
+             row.find(f"{G}service").text.strip()):
+            row.find(f"{G}price").text.strip()
+            for row in item.findall(f"{G}shipping")}
+
+    def test_an_item_over_the_threshold_advertises_free_postage(self):
+        self.make_product(price=4500)
+
+        rows = self.shipping_rows(self.feed_items()[0])
+
+        self.assertEqual(rows[("US", "US Economy Shipping")], "0.0 USD")
+        self.assertEqual(rows[("CA", "CA Economy Shipping")], "0.0 USD")
+
+    def test_an_item_under_the_threshold_still_advertises_the_real_price(self):
+        # It can still ship free inside a big enough basket, but the feed has
+        # no way to say "over $40 of anything" -- and claiming free shipping
+        # on a $12 book is a price checkout would not honour.
+        self.make_product(price=1200)
+
+        rows = self.shipping_rows(self.feed_items()[0])
+
+        self.assertEqual(rows[("US", "US Economy Shipping")], "10.0 USD")
+        self.assertEqual(rows[("CA", "CA Economy Shipping")], "10.0 USD")
+
+    def test_the_faster_service_is_never_given_away(self):
+        # Free shipping is the economy rate, not every rate: expedited
+        # postage costs us real money on a $45 order too.
+        self.make_product(price=4500)
+
+        rows = self.shipping_rows(self.feed_items()[0])
+
+        self.assertEqual(rows[("US", "Faster US Shipping")], "30.0 USD")
+
+    @override_settings(FREE_SHIPPING_ENABLED=False)
+    def test_switching_the_offer_off_restores_the_paid_prices(self):
+        self.make_product(price=4500)
+
+        rows = self.shipping_rows(self.feed_items()[0])
+
+        self.assertEqual(rows[("US", "US Economy Shipping")], "10.0 USD")
+
+    def test_a_pwyw_item_never_claims_free_postage(self):
+        # A pay-what-you-want price is the owner's suggestion, not what the
+        # buyer pays, so it cannot earn the claim. Today PWYW exists only on
+        # digital products, which emit no shipping rows at all -- this pins
+        # the guard that keeps the first physical PWYW row from advertising
+        # free shipping checkout would not honour.
+        self.make_product(price=4500, is_pwyw=True)
+
+        rows = self.shipping_rows(self.feed_items()[0])
+
+        self.assertEqual(rows[("US", "US Economy Shipping")], "10.0 USD")

@@ -1,4 +1,5 @@
 import logging
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
@@ -621,6 +622,34 @@ class Product(models.Model):
                 return static(f"assets/images/{self.image_name}")
             else:
                 return None
+
+    # Google accepts at most 10 additional images per offer and drops the
+    # whole item on more, so the cap is enforced here rather than trusted to
+    # whoever is filling the admin in.
+    MAX_ADDITIONAL_IMAGES = 10
+
+    def get_additional_image_urls(self) -> List[str]:
+        """Extra pictures, for the feed's additional_image_link.
+
+        Never includes the primary image. Google rejects an offer whose
+        additional_image_link repeats its image_link, and the duplicate is
+        easy to create by accident: attaching a book's own cover as an extra
+        image is exactly what somebody filling in the admin would try first.
+
+        Rows that resolve to nothing are dropped rather than yielding an empty
+        <g:additional_image_link>, which Google reads as a malformed URL and
+        rejects the item over.
+        """
+        primary = self.get_image_url()
+        urls: List[str] = []
+        for extra in self.extra_images.all():
+            url = extra.get_image_url()
+            if not url or url == primary or url in urls:
+                continue
+            urls.append(url)
+            if len(urls) >= self.MAX_ADDITIONAL_IMAGES:
+                break
+        return urls
 
     # The one place the cover thumbnail size is written down. Named rather than
     # inline because it is no longer used only here: the build pre-generates
@@ -1342,6 +1371,33 @@ class Product(models.Model):
         """
         return "{0:.2f}".format(self.price / 100)
 
+    def ships_free_in_feed(self) -> bool:
+        """Whether the feed may advertise $0 shipping on this item.
+
+        Keyed off this product's own price, not off a cart, because that is
+        what a feed entry can honestly claim: Google's per-item <g:shipping>
+        describes shipping for this item, and an item priced at or above the
+        threshold does reach it on its own. A cheaper item can still ship free
+        in a big enough basket, but the feed has no way to say "over $40 of
+        anything" -- and claiming free shipping on a $12 book would be a price
+        Google shows and checkout does not honour, which is the mismatch
+        Merchant Center suspends accounts over.
+        """
+        from django.conf import settings
+
+        if not getattr(settings, "FREE_SHIPPING_ENABLED", True):
+            return False
+        # A pay-what-you-want price is the owner's suggestion, not what the
+        # buyer will pay, so it can never earn the claim. Today this is
+        # belt-and-braces -- PWYW exists only on digital products, which get
+        # no <g:shipping> rows at all -- but that is a catalogue policy, not
+        # a schema rule, and the first physical PWYW row would otherwise
+        # advertise free shipping checkout does not honour.
+        if self.is_pwyw:
+            return False
+        threshold = getattr(settings, "FREE_SHIPPING_THRESHOLD", 0)
+        return self.price >= threshold
+
     def get_gtin(self):
         # Each Product row is one offer; prefer the print ISBN because the
         # current book rows are print offers, then use an e-book ISBN for
@@ -1396,6 +1452,76 @@ class Product(models.Model):
         return self.mpn or f"PCF{self.pk}"
 
 
+class ProductImage(models.Model):
+    """One more picture of a product, beyond the primary one on Product.
+
+    The primary image stays where it was -- Product.image/image_name -- rather
+    than becoming the first row here. That keeps every existing caller,
+    template and thumbnail path working unchanged, and it keeps the "which one
+    is the main image" question answered by a column instead of by an
+    ordering: a product whose rows got reordered would otherwise silently
+    change what the catalogue card shows.
+
+    Both storage mechanisms Product already supports are supported here for
+    the same reasons they exist there. `image_name` points into the static
+    tree, which is where every real picture on this site lives (committed to
+    the sibling pcfweb-assets checkout); `image` is an upload into MEDIA_ROOT,
+    which no deployment mounts a volume over, so an uploaded file is gone on
+    the next restart. Prefer image_name for anything that matters -- see the
+    Image assets section of the README.
+    """
+
+    product = models.ForeignKey(
+        "Product", on_delete=models.CASCADE, related_name="extra_images")
+    image = models.ImageField(upload_to="data_here", blank=True)
+    image_name = models.CharField(
+        max_length=250,
+        default="",
+        blank=True,
+        help_text=(
+            "Path under static assets/images/, e.g. "
+            "book_covers/high_performance_spark_2ed.jpg. Preferred over an "
+            "upload: uploads do not survive a pod restart."
+        ),
+    )
+    alt_text = models.CharField(
+        max_length=250,
+        default="",
+        blank=True,
+        help_text="Describes the picture for screen readers.",
+    )
+    # Explicit rather than relying on pk order, so an image added later can be
+    # placed second without deleting and re-adding the ones after it. Google
+    # reads additional_image_link in feed order and shows the earliest first.
+    position = models.PositiveIntegerField(
+        default=0,
+        db_default=0,
+        help_text="Lowest first. Ties break on id, so order is never random.")
+
+    class Meta:
+        ordering = ["position", "pk"]
+
+    def get_image_url(self) -> Optional[str]:
+        """Where this picture is served from, or None if it is not there.
+
+        Mirrors Product.get_image_url() deliberately, including the order of
+        the two mechanisms, so an extra image resolves exactly the way the
+        primary one does.
+        """
+        try:
+            return self.image.url
+        except Exception:
+            if self.image_name:
+                return static(f"assets/images/{self.image_name}")
+            return None
+
+    def __str__(self) -> str:
+        return f"{self.product.name}: {self.image_name or self.image}"
+
+    def __repr__(self) -> str:
+        return f"<ProductImage: {self.product.name} #{self.position}>"
+
+
 class Cart(models.Model):
     user = models.OneToOneField(
         User,
@@ -1430,6 +1556,61 @@ class Cart(models.Model):
             # is not portable, and the pks are already in hand.
             CartProduct.objects.filter(pk__in=pks).update(
                 pwyw_amount_merged=False)
+
+    def billable_total(self, cart_products=None) -> int:
+        """What the buyer will actually be charged for the lines, in cents.
+
+        A noorder line contributes nothing. Public add-to-cart refuses these
+        and checkout re-checks, so one is only in a cart because it was added
+        before the flag was set -- but it still cannot be bought, and counting
+        it would inflate a total the customer is never charged. pk 107 happens
+        to be priced 0, so this matters for the general case rather than for
+        the row that prompted it: an admin flagging an existing priced product
+        noorder would otherwise leave its price silently in the sum.
+
+        A pay-what-you-want line contributes the amount the buyer named, not
+        the owner's suggestion, because effective_unit_amount() is what
+        checkout bills.
+
+        *cart_products* lets a caller that has already fetched the rows pass
+        them in rather than paying for a second query. It is the same sum
+        either way -- the argument is not a filter, and a caller handing in a
+        narrowed list would get a total that is not this cart's.
+        """
+        rows = self.products.select_related(
+            "product") if cart_products is None else cart_products
+        return sum(row.total_price() for row in rows
+                   if not row.product.noorder)
+
+    def qualifies_for_free_shipping(self, cart_products=None) -> bool:
+        """Whether this cart has earned the free shipping rate.
+
+        The single definition of the offer: checkout builds the Stripe session
+        from it and the cart page advertises it from it, so the page cannot
+        promise something the session will not honour. Both read the same
+        settings, and a cart with nothing physical in it is not asked -- see
+        Payments.checkout, which only offers shipping at all when something
+        has to be posted.
+        """
+        from django.conf import settings
+
+        if not getattr(settings, "FREE_SHIPPING_ENABLED", True):
+            return False
+        threshold = getattr(settings, "FREE_SHIPPING_THRESHOLD", 0)
+        return self.billable_total(cart_products) >= threshold
+
+    def free_shipping_shortfall(self, cart_products=None) -> int:
+        """Cents still to add before shipping is free; 0 once it already is.
+
+        Never negative, so the cart page can render it without deciding
+        whether a negative number means "qualified" or "bug".
+        """
+        from django.conf import settings
+
+        if not getattr(settings, "FREE_SHIPPING_ENABLED", True):
+            return 0
+        threshold = getattr(settings, "FREE_SHIPPING_THRESHOLD", 0)
+        return max(0, threshold - self.billable_total(cart_products))
 
     def clear(self):
         """Empty the cart.
@@ -1703,6 +1884,21 @@ def parse_pwyw_amount(raw: Any) -> int:
     # fraction of a cent, a word or an absurd number is still an error -- it
     # does not become a free download.
     return round_pwyw_amount(cents)
+
+
+# How long a physical order takes to reach a buyer, in days. Published to
+# Google in two places that must not drift apart: the product feed's
+# <g:min_handling_time>/<g:max_handling_time> rows, and the estimated delivery
+# date the Customer Reviews opt-in reports. Google compares the second against
+# when the survey may be sent, so a number invented separately in each place
+# would have us promising one delivery window and surveying against another.
+MIN_HANDLING_DAYS = 3
+MAX_HANDLING_DAYS = 21
+# The slowest transit any published shipping row claims (CA economy, 21 days).
+# The estimate below deliberately uses the slow end: a survey that arrives
+# before the parcel does asks the customer to rate a delivery that has not
+# happened.
+MAX_TRANSIT_DAYS = 21
 
 
 class Order(models.Model):
@@ -2227,6 +2423,57 @@ class Order(models.Model):
         return any(
             item.product is not None and item.product.is_physical_good()
             for item in self.items.select_related('product'))
+
+    def estimated_delivery_date(self):
+        """When this order should have arrived, as a date.
+
+        Reported to Google Customer Reviews, which holds the survey until
+        after this date. Built from the same handling and transit numbers the
+        product feed publishes, and from the slow end of them: a survey that
+        arrives before the parcel asks the customer to rate a delivery that
+        has not happened, which is worse than one that arrives late.
+
+        A digital order is delivered the moment it is paid, so it estimates
+        the day it was placed rather than three weeks out -- otherwise every
+        e-book buyer would be surveyed a month after they had already read
+        the thing.
+
+        Counted from paid_at when the payment has landed, and from created_at
+        otherwise, so a delayed payment method does not date the estimate from
+        before the order was really placed.
+        """
+        placed = self.paid_at or self.created_at
+        if placed is None:
+            return None
+        placed_date = timezone.localtime(placed).date()
+        if not self.has_physical_items:
+            return placed_date
+        return placed_date + timedelta(
+            days=MAX_HANDLING_DAYS + MAX_TRANSIT_DAYS)
+
+    def review_gtins(self) -> List[str]:
+        """GTINs of the ordered products, for the Customer Reviews opt-in.
+
+        Optional in Google's module, and skipped for any line whose product
+        has been deleted or carries no GTIN -- the field is a list of
+        identifiers, and an empty string in it is not one.
+        """
+        gtins = []
+        for item in self.items.select_related("product"):
+            if item.product is None:
+                continue
+            gtin = item.product.get_gtin()
+            if gtin and gtin not in gtins:
+                gtins.append(str(gtin))
+        return gtins
+
+    def delivery_country(self) -> str:
+        """Where this went, as a two-letter code.
+
+        Falls back to the billing country because a digital order collects no
+        shipping address at all, and Customer Reviews requires a country.
+        """
+        return self.shipping_country or self.billing_country
 
     def deliverable_digital_items(self) -> List["OrderItem"]:
         """Digital lines this site is licensed to deliver itself.

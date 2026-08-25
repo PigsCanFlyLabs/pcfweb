@@ -108,6 +108,17 @@
         <div class="row">
             <div class="col-lg-12">
                 {% include 'components/shipping-notice.html' %}
+                {% if free_shipping_earned %}
+                <div class="alert alert-success free-shipping-notice" role="alert">
+                    <strong>Free shipping</strong> &mdash; this order qualifies,
+                    so the free rate is waiting for you at checkout.
+                </div>
+                {% elif free_shipping_shortfall %}
+                <div class="alert alert-info free-shipping-notice" role="alert">
+                    Add <strong>${{ free_shipping_shortfall }}</strong> more and
+                    shipping is on us.
+                </div>
+                {% endif %}
             </div>
         </div>
         {% endif %}
@@ -162,6 +173,19 @@
 		      Coupon (optional): <input type="text" name="coupon" />
                       <button type="submit" class="proceed-btn">Proceed to Checkout</button>
 		    </form>
+                    {% comment %}
+                        Stated on the page rather than in the Google product
+                        feed, which has no attribute for payment methods --
+                        accepted payment methods are a Merchant Center account
+                        setting, not per-offer data. Nothing here enables
+                        Google Pay: checkout leaves payment_method_types unset,
+                        so Stripe offers whatever the account has switched on.
+                        This is the sentence that tells a buyer so before they
+                        leave the cart.
+                    {% endcomment %}
+                    <p class="payment-methods text-muted">
+                        We accept Google Pay, Apple Pay and all major cards.
+                    </p>
                 </div>
             </div>
         </div>

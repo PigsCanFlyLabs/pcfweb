@@ -1248,3 +1248,82 @@ class FooterCopyrightTest(TestCase):
         """
         _, end = self.footer_years()
         self.assertEqual(end, self.django_year())
+
+
+class ReturnPolicyTest(TestCase):
+    """The terms the returns page has to state.
+
+    Each of these is a promise to a customer that costs real money when the
+    page and the way we actually handle a return disagree, so they are pinned
+    to the copy rather than left to a smoke test that only asks for a 200.
+    """
+
+    def page(self):
+        response = self.client.get("/returns")
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def test_it_charges_a_fifteen_percent_restocking_fee(self):
+        page = self.page()
+        self.assertIn("15% restocking fee", page)
+        # Stated where the money is actually taken, too: a fee named in its
+        # own section but absent from Refunds reads as a fee we forgot to
+        # deduct.
+        refunds = page.split("Refunds", 1)[1]
+        self.assertIn("15% restocking fee", refunds)
+
+    def test_electronics_are_not_returnable_unless_dead_on_arrival(self):
+        page = self.page()
+        self.assertIn("Electronics are not returnable", page)
+        self.assertIn("dead on arrival", page)
+
+    def test_a_domestic_return_gets_a_prepaid_label(self):
+        page = self.page()
+        self.assertIn("prepaid return shipping label", page)
+        # Promised where a customer starting a return actually reads, not
+        # only in the shipping section further down.
+        instructions = page.split("If your return is accepted", 1)[1]
+        self.assertIn("prepaid return shipping label", instructions[:400])
+
+    def test_an_international_return_is_shipped_at_the_customers_expense(self):
+        page = self.page()
+        self.assertIn("you arrange and pay for the shipping yourself", page)
+        self.assertIn(
+            "We cannot send a prepaid label outside the United States", page)
+
+    def test_the_label_is_scoped_to_the_united_states(self):
+        # The label half and the pay-your-own half are one term, and the
+        # assertions above pass just as well on a page that offers the label
+        # to everyone and then contradicts itself. What makes them a single
+        # coherent term is that the offer is qualified where it is made.
+        page = self.page()
+        for offer in re.finditer("prepaid return shipping label", page):
+            around = page[max(0, offer.start() - 300):offer.end() + 300]
+            self.assertIn(
+                "United States", around,
+                "a prepaid label is offered without saying it is only for "
+                "returns shipped from the United States")
+
+    def test_we_pay_the_shipping_when_the_return_is_our_fault(self):
+        # Our fault means defective, damaged, wrong item, or DOA -- and it is
+        # the one case that is not scoped to the US, since outside it we
+        # reimburse instead of mailing a label.
+        self.assertIn("we cover return shipping wherever you are", self.page())
+
+    def test_an_eu_withdrawal_is_refunded_its_standard_delivery_charge(self):
+        # Article 13 of the EU Consumer Rights Directive: on withdrawal, the
+        # outbound delivery cost is part of the refund, capped at the least
+        # expensive standard delivery (13(2) lets the supplement for a faster
+        # service be withheld). A blanket "original shipping charges are not
+        # refunded" told EU customers a mandatory part of their refund would
+        # be kept, so the blanket sentence must carry its qualifier and the
+        # EU section must state the refund explicitly.
+        page = self.page()
+        self.assertIn(
+            "we also refund what you paid for the original delivery", page)
+        self.assertIn(
+            "up to the cost of our least expensive standard delivery", page)
+        self.assertNotIn(
+            "Original shipping charges are not refunded.", page,
+            "the blanket no-refund sentence lost its except-where-the-law-"
+            "requires qualifier")

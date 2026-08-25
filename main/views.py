@@ -40,10 +40,10 @@ from main.forms import (
     MailingListImportForm, MailingListSendForm, MailingListSignupForm,
     PurchaseFeedbackForm)
 from main.models import (
-    PWYW_ROUND_DOWN_BELOW, Cart, CartProduct, EmailIdentity,
-    MailingListMessage, Order, Product, PurchaseFeedback, PwywAmountError,
-    SuppressedAddress, normalize_email_identity, parse_pwyw_amount,
-    send_batch_size)
+    MAX_HANDLING_DAYS, MIN_HANDLING_DAYS, PWYW_ROUND_DOWN_BELOW, Cart,
+    CartProduct, EmailIdentity, MailingListMessage, Order, Product,
+    PurchaseFeedback, PwywAmountError, SuppressedAddress,
+    normalize_email_identity, parse_pwyw_amount, send_batch_size)
 from main.payments import Payments
 from main.socials import LIBERATED_BREAD_URL, follow_targets
 from main.utils import (
@@ -881,8 +881,22 @@ class GoogleProductFeed(View):
     def get(self, request):
         everything_but_services = (Product.objects.exclude(
             cat=Product.Categories.SERVICES)
-            .exclude(noorder=True))
-        return render(request, "google_products.xml", context={'products': everything_but_services}, content_type="text/xml")
+            .exclude(noorder=True)
+            # The template calls get_additional_image_urls() per (item, size)
+            # pair; without this that is one query each on a URL Google polls.
+            .prefetch_related("extra_images"))
+        return render(
+            request,
+            "google_products.xml",
+            context={
+                'products': everything_but_services,
+                # Published to Google here and used for the estimated
+                # delivery date reported by the Customer Reviews opt-in.
+                # One pair of numbers, so the two cannot drift apart.
+                'min_handling_days': MIN_HANDLING_DAYS,
+                'max_handling_days': MAX_HANDLING_DAYS,
+            },
+            content_type="text/xml")
 
 
 
@@ -897,16 +911,13 @@ class CartView(View, BaseCartView):
         repriced = cart.pwyw_merge_notice_names()
         if repriced:
             messages.warning(request, self._merge_notice(repriced))
-        cart_products = cart.products.select_related("product")
-        # A noorder line contributes nothing to the total. Public add-to-cart
-        # refuses these and checkout re-checks, so one is only here because it
-        # was added before the flag was set -- but it still cannot be bought,
-        # and billing for it in the displayed total would be a number the
-        # customer is never charged. pk 107 happens to be priced 0, so this
-        # matters for the general case: an admin flagging an existing priced
-        # product noorder would otherwise leave its price silently in the sum.
-        total_price = sum(cp.total_price() for cp in cart_products
-                          if not cp.product.noorder)
+        cart_products = list(cart.products.select_related("product"))
+        # Which lines count towards the total, and why a noorder one does
+        # not, now lives on the cart itself -- checkout reads the same method
+        # to decide whether free shipping has been earned, and two copies of
+        # that sum are two chances for the page to advertise an offer the
+        # Stripe session does not carry.
+        total_price = cart.billable_total(cart_products)
         total_display_price = "{0:.2f}".format(total_price / 100)
         has_physical = any(cp.product.is_physical_good() for cp in cart_products
                            if not cp.product.noorder)
@@ -916,6 +927,18 @@ class CartView(View, BaseCartView):
         # it is what tells a buyer the row is theirs to change.
         has_pwyw = any(cp.product.is_pwyw for cp in cart_products)
         has_unavailable = any(cp.product.noorder for cp in cart_products)
+        # Only a cart with something to post is told about shipping at all;
+        # a download has no shipping to be free. A cart holding any
+        # subscription line is excluded too: Stripe Checkout does not support
+        # shipping options in subscription mode, so Payments.checkout attaches
+        # none and such an order already ships free -- nagging its owner to
+        # add $25 more to earn what they have would be the page contradicting
+        # its own checkout. Deliberately mirrors checkout's mode rule, which
+        # looks at every line, noorder ones included.
+        charges_shipping = has_physical and not any(
+            cp.product.mode == Product.Modes.SUBSCRIPTION
+            for cp in cart_products)
+        shortfall = cart.free_shipping_shortfall(cart_products)
         response = render(request, 'cart.html', context={
             'title': 'Cart',
             'products': cart_products,
@@ -923,6 +946,12 @@ class CartView(View, BaseCartView):
             'has_physical': has_physical,
             'has_pwyw': has_pwyw,
             'has_unavailable': has_unavailable,
+            'free_shipping_earned': (
+                charges_shipping and cart.qualifies_for_free_shipping(
+                    cart_products)),
+            'free_shipping_shortfall': (
+                "{0:.2f}".format(shortfall / 100)
+                if charges_shipping and shortfall else ""),
         })
         # Cleared here and nowhere else, and only for a request that is
         # actually being sent the basket:
@@ -1197,6 +1226,7 @@ class CheckoutSuccessView(View, BaseCartView):
             'order': order,
         }
         context.update(post_purchase_context(request, order))
+        context.update(google_customer_reviews_context(order))
         return render(request, 'checkout_success.html', context=context)
 
     def _reconcile_with_stripe(self, order: Order, session_id: str) -> None:
@@ -1252,6 +1282,56 @@ class CheckoutSuccessView(View, BaseCartView):
 
         order.refresh_from_db()
         webhook.fulfil_order(order)
+
+
+# How long after payment the checkout success page keeps offering the Google
+# Customer Reviews opt-in -- and with it, keeps embedding the buyer's email in
+# the page source. See google_customer_reviews_context().
+GOOGLE_REVIEWS_OPT_IN_WINDOW = timedelta(hours=24)
+
+
+def google_customer_reviews_context(
+        order: Optional[Order]) -> Dict[str, Any]:
+    """What the Google Customer Reviews opt-in module needs, or blanks.
+
+    Google requires an order id, an email, a delivery country and an estimated
+    delivery date, and its module fails silently in the browser when one is
+    missing. Resolving them here rather than in the template means the
+    template's guard is a single readable condition, and means a PENDING order
+    -- which has no email until Stripe reports one on the paid session -- is
+    the same "nothing to render" case as no order at all.
+    """
+    blanks: Dict[str, Any] = {
+        'merchant_id': '',
+        'delivery_country': '',
+        'estimated_delivery_date': None,
+        'review_gtins': [],
+    }
+    if order is None:
+        return blanks
+    # The module embeds the buyer's email in the page source, and this page
+    # is reachable by anyone holding the session id -- browser history, a
+    # shared link, a logged URL. The opt-in only makes sense in the moments
+    # after checkout anyway, so it stops rendering once the order is a day
+    # old rather than serving that email indefinitely.
+    placed = order.paid_at or order.created_at
+    if placed is None or (
+            timezone.now() - placed > GOOGLE_REVIEWS_OPT_IN_WINDOW):
+        return blanks
+    merchant_id = str(getattr(
+        settings, "GOOGLE_CUSTOMER_REVIEWS_MERCHANT_ID", ""))
+    # The template renders this as an unquoted numeric literal, as Google's
+    # module requires, so a non-numeric value would be a JavaScript syntax
+    # error that kills the whole block silently. Refusing it here turns a
+    # misconfiguration into the same visible "module off" as a blank.
+    if not merchant_id.isdigit():
+        merchant_id = ''
+    return {
+        'merchant_id': merchant_id,
+        'delivery_country': order.delivery_country(),
+        'estimated_delivery_date': order.estimated_delivery_date(),
+        'review_gtins': order.review_gtins(),
+    }
 
 
 def post_purchase_context(request, order: Optional[Order]) -> Dict[str, Any]:
