@@ -1248,3 +1248,41 @@ class FooterCopyrightTest(TestCase):
         """
         _, end = self.footer_years()
         self.assertEqual(end, self.django_year())
+
+
+class ReturnPolicyTest(TestCase):
+    """The three terms the returns page has to state, and one it must not.
+
+    Each of these is a promise to a customer that costs real money when the
+    page and the way we actually handle a return disagree, so they are pinned
+    to the copy rather than left to a smoke test that only asks for a 200.
+    """
+
+    def page(self):
+        response = self.client.get("/returns")
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def test_it_charges_a_fifteen_percent_restocking_fee(self):
+        page = self.page()
+        self.assertIn("15% restocking fee", page)
+        # Stated where the money is actually taken, too: a fee named in its
+        # own section but absent from Refunds reads as a fee we forgot to
+        # deduct.
+        refunds = page.split("Refunds", 1)[1]
+        self.assertIn("15% restocking fee", refunds)
+
+    def test_electronics_are_not_returnable_unless_dead_on_arrival(self):
+        page = self.page()
+        self.assertIn("Electronics are not returnable", page)
+        self.assertIn("dead on arrival", page)
+
+    def test_the_customer_pays_for_return_shipping(self):
+        self.assertIn(
+            "You are responsible for the cost of return shipping", self.page())
+
+    def test_it_no_longer_promises_a_prepaid_return_label(self):
+        # The page used to say "we'll send you a return shipping label",
+        # which is the opposite of the term above and would have survived
+        # every other assertion here.
+        self.assertNotIn("return shipping label", self.page())
