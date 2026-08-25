@@ -1251,7 +1251,7 @@ class FooterCopyrightTest(TestCase):
 
 
 class ReturnPolicyTest(TestCase):
-    """The three terms the returns page has to state, and one it must not.
+    """The terms the returns page has to state.
 
     Each of these is a promise to a customer that costs real money when the
     page and the way we actually handle a return disagree, so they are pinned
@@ -1277,12 +1277,35 @@ class ReturnPolicyTest(TestCase):
         self.assertIn("Electronics are not returnable", page)
         self.assertIn("dead on arrival", page)
 
-    def test_the_customer_pays_for_return_shipping(self):
-        self.assertIn(
-            "You are responsible for the cost of return shipping", self.page())
+    def test_a_domestic_return_gets_a_prepaid_label(self):
+        page = self.page()
+        self.assertIn("prepaid return shipping label", page)
+        # Promised where a customer starting a return actually reads, not
+        # only in the shipping section further down.
+        instructions = page.split("If your return is accepted", 1)[1]
+        self.assertIn("prepaid return shipping label", instructions[:400])
 
-    def test_it_no_longer_promises_a_prepaid_return_label(self):
-        # The page used to say "we'll send you a return shipping label",
-        # which is the opposite of the term above and would have survived
-        # every other assertion here.
-        self.assertNotIn("return shipping label", self.page())
+    def test_an_international_return_is_shipped_at_the_customers_expense(self):
+        page = self.page()
+        self.assertIn("you arrange and pay for the shipping yourself", page)
+        self.assertIn(
+            "We cannot send a prepaid label outside the United States", page)
+
+    def test_the_label_is_scoped_to_the_united_states(self):
+        # The label half and the pay-your-own half are one term, and the
+        # assertions above pass just as well on a page that offers the label
+        # to everyone and then contradicts itself. What makes them a single
+        # coherent term is that the offer is qualified where it is made.
+        page = self.page()
+        for offer in re.finditer("prepaid return shipping label", page):
+            around = page[max(0, offer.start() - 300):offer.end() + 300]
+            self.assertIn(
+                "United States", around,
+                "a prepaid label is offered without saying it is only for "
+                "returns shipped from the United States")
+
+    def test_we_pay_the_shipping_when_the_return_is_our_fault(self):
+        # Our fault means defective, damaged, wrong item, or DOA -- and it is
+        # the one case that is not scoped to the US, since outside it we
+        # reimburse instead of mailing a label.
+        self.assertIn("we cover return shipping wherever you are", self.page())
