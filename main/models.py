@@ -1387,6 +1387,14 @@ class Product(models.Model):
 
         if not getattr(settings, "FREE_SHIPPING_ENABLED", True):
             return False
+        # A pay-what-you-want price is the owner's suggestion, not what the
+        # buyer will pay, so it can never earn the claim. Today this is
+        # belt-and-braces -- PWYW exists only on digital products, which get
+        # no <g:shipping> rows at all -- but that is a catalogue policy, not
+        # a schema rule, and the first physical PWYW row would otherwise
+        # advertise free shipping checkout does not honour.
+        if self.is_pwyw:
+            return False
         threshold = getattr(settings, "FREE_SHIPPING_THRESHOLD", 0)
         return self.price >= threshold
 

@@ -402,9 +402,13 @@ class Base(Configuration):
     # turning it off does not require inventing a threshold nothing can reach.
     # Read by both checkout and the templates that advertise it, so the site
     # cannot promise something the session will not honour.
-    FREE_SHIPPING_ENABLED: bool = os.getenv(
-        "FREE_SHIPPING_ENABLED", "true").strip().lower() not in {
-            "false", "0", "no", ""}
+    #
+    # parse_email_flag rather than an inline set, so this switch accepts the
+    # same spellings every other boolean env var here does -- an operator who
+    # writes FREE_SHIPPING_ENABLED=off must get the offer off, not silently
+    # still on.
+    FREE_SHIPPING_ENABLED: bool = parse_email_flag(
+        os.getenv("FREE_SHIPPING_ENABLED", "true"))
 
     # GOOGLE CUSTOMER REVIEWS
     # The Merchant Center account the post-purchase survey opt-in belongs to.

@@ -168,3 +168,33 @@ class CustomerReviewsOptInTest(TestCase):
             self.make_product(), shipping_country="", billing_country="")
 
         self.assertNotIn("surveyoptin", self.success_html(order))
+
+    def test_the_module_stops_rendering_once_the_order_is_a_day_old(self):
+        # The module embeds the buyer's email, and the page is reachable by
+        # anyone holding the session id -- history, a shared link, a logged
+        # URL. The opt-in only makes sense right after checkout, so it stops
+        # rendering (and stops serving that email) once the order ages out.
+        order = self.make_order(
+            self.make_product(),
+            paid_at=timezone.now() - timedelta(hours=25))
+
+        html = self.success_html(order)
+
+        self.assertNotIn("surveyoptin", html)
+        # The email may still appear on the page -- the post-purchase block
+        # pre-fills the mailing list form with the receipt address, and has
+        # since before the opt-in existed. What this change controls is the
+        # script block, so its config key (colon and all: the bare '"email"'
+        # also matches the form's name="email" attribute) is what must be
+        # gone.
+        self.assertNotIn('"email":', html)
+
+    @override_settings(GOOGLE_CUSTOMER_REVIEWS_MERCHANT_ID="GCR-686906834")
+    def test_a_non_numeric_merchant_id_switches_the_module_off(self):
+        # The template renders the id as an unquoted numeric literal, as
+        # Google's module requires, so a non-numeric value would be a
+        # JavaScript syntax error that kills the block silently -- the exact
+        # invisible failure the render guard exists to prevent.
+        order = self.make_order(self.make_product())
+
+        self.assertNotIn("surveyoptin", self.success_html(order))

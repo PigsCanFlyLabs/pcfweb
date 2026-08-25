@@ -381,3 +381,15 @@ class FeedFreeShippingTest(ProductFeedTest):
         rows = self.shipping_rows(self.feed_items()[0])
 
         self.assertEqual(rows[("US", "US Economy Shipping")], "10.0 USD")
+
+    def test_a_pwyw_item_never_claims_free_postage(self):
+        # A pay-what-you-want price is the owner's suggestion, not what the
+        # buyer pays, so it cannot earn the claim. Today PWYW exists only on
+        # digital products, which emit no shipping rows at all -- this pins
+        # the guard that keeps the first physical PWYW row from advertising
+        # free shipping checkout would not honour.
+        self.make_product(price=4500, is_pwyw=True)
+
+        rows = self.shipping_rows(self.feed_items()[0])
+
+        self.assertEqual(rows[("US", "US Economy Shipping")], "10.0 USD")

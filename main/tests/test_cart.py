@@ -846,3 +846,20 @@ class CartFreeShippingNoticeTest(CartTestBase):
 
         self.assertIn("orders over $99", html)
         self.assertNotIn("orders over $40", html)
+
+    def test_a_cart_with_a_subscription_line_is_not_nagged(self):
+        # Stripe Checkout does not support shipping options in subscription
+        # mode, so Payments.checkout attaches none and a mixed cart already
+        # ships free. Telling its owner to add $25 more to earn free shipping
+        # would be the page contradicting its own checkout.
+        Product.objects.filter(pk=100).update(
+            price=1500, delivery_type=Product.DeliveryTypes.PHYSICAL)
+        Product.objects.filter(pk=101).update(
+            price=500, mode=Product.Modes.SUBSCRIPTION)
+        self.add(100)
+        self.add(101)
+
+        html = self.cart_html()
+
+        self.assertNotIn("more and", html)
+        self.assertNotIn("this order qualifies", html)

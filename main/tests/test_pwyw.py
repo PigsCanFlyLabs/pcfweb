@@ -19,7 +19,8 @@ from unittest import mock
 
 from django.conf import settings
 from django.core import mail
-from django.test import Client, RequestFactory, TestCase
+from django.test import (
+    Client, RequestFactory, TestCase, override_settings)
 
 from main.models import (
     MAX_PWYW_AMOUNT, PWYW_ROUND_DOWN_BELOW, Cart, CartProduct, Order, Product,
@@ -332,8 +333,16 @@ class PwywCheckoutShapeTest(TestCase):
         self.assertEqual(item["adjustable_quantity"], {"enabled": True})
         self.assertEqual(params["mode"], "payment")
 
+    @override_settings(FREE_SHIPPING_ENABLED=False)
     def test_fixed_price_lines_keep_adjustable_quantity_and_count(self):
-        # Unchanged by this work, and kept for exactly that reason.
+        # Unchanged by the PWYW work, and kept for exactly that reason. Run
+        # with the free shipping offer off because that offer -- not anything
+        # about PWYW -- now removes the stepper from carts that are charged
+        # shipping: Stripe fixes shipping_options at session creation, so a
+        # quantity changed on Stripe's page could cross the offer's threshold
+        # without the rate following. See
+        # test_shipping.FreeShippingTest for that behaviour; this test still
+        # pins that no PWYW constraint takes the stepper away.
         first = self._fixed()
         second = Product.objects.create(
             name="Poster", external_product_id="prod_poster", price=2000)

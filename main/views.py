@@ -881,7 +881,10 @@ class GoogleProductFeed(View):
     def get(self, request):
         everything_but_services = (Product.objects.exclude(
             cat=Product.Categories.SERVICES)
-            .exclude(noorder=True))
+            .exclude(noorder=True)
+            # The template calls get_additional_image_urls() per (item, size)
+            # pair; without this that is one query each on a URL Google polls.
+            .prefetch_related("extra_images"))
         return render(
             request,
             "google_products.xml",
@@ -925,7 +928,16 @@ class CartView(View, BaseCartView):
         has_pwyw = any(cp.product.is_pwyw for cp in cart_products)
         has_unavailable = any(cp.product.noorder for cp in cart_products)
         # Only a cart with something to post is told about shipping at all;
-        # a download has no shipping to be free.
+        # a download has no shipping to be free. A cart holding any
+        # subscription line is excluded too: Stripe Checkout does not support
+        # shipping options in subscription mode, so Payments.checkout attaches
+        # none and such an order already ships free -- nagging its owner to
+        # add $25 more to earn what they have would be the page contradicting
+        # its own checkout. Deliberately mirrors checkout's mode rule, which
+        # looks at every line, noorder ones included.
+        charges_shipping = has_physical and not any(
+            cp.product.mode == Product.Modes.SUBSCRIPTION
+            for cp in cart_products)
         shortfall = cart.free_shipping_shortfall(cart_products)
         response = render(request, 'cart.html', context={
             'title': 'Cart',
@@ -935,11 +947,11 @@ class CartView(View, BaseCartView):
             'has_pwyw': has_pwyw,
             'has_unavailable': has_unavailable,
             'free_shipping_earned': (
-                has_physical and cart.qualifies_for_free_shipping(
+                charges_shipping and cart.qualifies_for_free_shipping(
                     cart_products)),
             'free_shipping_shortfall': (
                 "{0:.2f}".format(shortfall / 100)
-                if has_physical and shortfall else ""),
+                if charges_shipping and shortfall else ""),
         })
         # Cleared here and nowhere else, and only for a request that is
         # actually being sent the basket:
@@ -1272,6 +1284,12 @@ class CheckoutSuccessView(View, BaseCartView):
         webhook.fulfil_order(order)
 
 
+# How long after payment the checkout success page keeps offering the Google
+# Customer Reviews opt-in -- and with it, keeps embedding the buyer's email in
+# the page source. See google_customer_reviews_context().
+GOOGLE_REVIEWS_OPT_IN_WINDOW = timedelta(hours=24)
+
+
 def google_customer_reviews_context(
         order: Optional[Order]) -> Dict[str, Any]:
     """What the Google Customer Reviews opt-in module needs, or blanks.
@@ -1283,16 +1301,33 @@ def google_customer_reviews_context(
     -- which has no email until Stripe reports one on the paid session -- is
     the same "nothing to render" case as no order at all.
     """
+    blanks: Dict[str, Any] = {
+        'merchant_id': '',
+        'delivery_country': '',
+        'estimated_delivery_date': None,
+        'review_gtins': [],
+    }
     if order is None:
-        return {
-            'merchant_id': '',
-            'delivery_country': '',
-            'estimated_delivery_date': None,
-            'review_gtins': [],
-        }
+        return blanks
+    # The module embeds the buyer's email in the page source, and this page
+    # is reachable by anyone holding the session id -- browser history, a
+    # shared link, a logged URL. The opt-in only makes sense in the moments
+    # after checkout anyway, so it stops rendering once the order is a day
+    # old rather than serving that email indefinitely.
+    placed = order.paid_at or order.created_at
+    if placed is None or (
+            timezone.now() - placed > GOOGLE_REVIEWS_OPT_IN_WINDOW):
+        return blanks
+    merchant_id = str(getattr(
+        settings, "GOOGLE_CUSTOMER_REVIEWS_MERCHANT_ID", ""))
+    # The template renders this as an unquoted numeric literal, as Google's
+    # module requires, so a non-numeric value would be a JavaScript syntax
+    # error that kills the whole block silently. Refusing it here turns a
+    # misconfiguration into the same visible "module off" as a blank.
+    if not merchant_id.isdigit():
+        merchant_id = ''
     return {
-        'merchant_id': getattr(
-            settings, "GOOGLE_CUSTOMER_REVIEWS_MERCHANT_ID", ""),
+        'merchant_id': merchant_id,
         'delivery_country': order.delivery_country(),
         'estimated_delivery_date': order.estimated_delivery_date(),
         'review_gtins': order.review_gtins(),

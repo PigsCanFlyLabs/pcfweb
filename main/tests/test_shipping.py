@@ -153,7 +153,8 @@ class FreeShippingTest(TestCase):
 
         options = create_session.call_args.kwargs["shipping_options"]
         rate = options[0]["shipping_rate_data"]
-        self.assertEqual(rate["fixed_amount"], {"amount": 0, "currency": "usd"})
+        self.assertEqual(
+            rate["fixed_amount"], {"amount": 0, "currency": "usd"})
         # First, because Stripe preselects the first option: a buyer who has
         # earned it should not have to go looking.
         self.assertEqual(options[1], {"shipping_rate": "shr_one"})
@@ -264,3 +265,61 @@ class FreeShippingTest(TestCase):
             4000, delivery_type=Product.DeliveryTypes.DIGITAL))
 
         self.assertNotIn("shipping_options", create_session.call_args.kwargs)
+
+    @override_settings(STRIPE_SHIPPING_RATES=["shr_one"])
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_quantities_are_settled_in_the_cart_while_the_offer_is_live(
+            self, create_session):
+        # Stripe fixes shipping_options at session creation and never
+        # recomputes them, so the quantity stepper on Stripe's own page could
+        # carry a $39 cart to $78 while the paid rate stays, or a $40 cart
+        # down to $15 while the free rate stays. Both directions break the
+        # advertised offer, so a cart that is charged shipping loses the
+        # stepper -- whether it qualifies (this cart) or not (the next test).
+        create_session.return_value.url = "https://checkout.example/session"
+
+        self._checkout(self._cart(4000))
+
+        for item in create_session.call_args.kwargs["line_items"]:
+            self.assertNotIn("adjustable_quantity", item)
+
+    @override_settings(STRIPE_SHIPPING_RATES=["shr_one"])
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_a_cart_below_the_threshold_also_loses_the_stepper(
+            self, create_session):
+        # Below the threshold matters just as much: bumping the quantity on
+        # Stripe's page is exactly how a non-qualifying cart would cross $40
+        # and still be charged the paid rate.
+        create_session.return_value.url = "https://checkout.example/session"
+
+        self._checkout(self._cart(1500))
+
+        for item in create_session.call_args.kwargs["line_items"]:
+            self.assertNotIn("adjustable_quantity", item)
+
+    @override_settings(STRIPE_SHIPPING_RATES=["shr_one"],
+                       FREE_SHIPPING_ENABLED=False)
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_switching_the_offer_off_restores_the_stepper(
+            self, create_session):
+        # With no threshold to protect, the paid rates are flat and a changed
+        # quantity changes nothing about shipping.
+        create_session.return_value.url = "https://checkout.example/session"
+
+        self._checkout(self._cart(4000))
+
+        item, = create_session.call_args.kwargs["line_items"]
+        self.assertEqual(item["adjustable_quantity"], {"enabled": True})
+
+    @override_settings(STRIPE_SHIPPING_RATES=["shr_one"])
+    @mock.patch("main.payments.stripe.checkout.Session.create")
+    def test_a_digital_cart_keeps_the_stepper(self, create_session):
+        # No shipping is charged, so there is no rate for a quantity change
+        # to outrun.
+        create_session.return_value.url = "https://checkout.example/session"
+
+        self._checkout(self._cart(
+            4000, delivery_type=Product.DeliveryTypes.DIGITAL))
+
+        item, = create_session.call_args.kwargs["line_items"]
+        self.assertEqual(item["adjustable_quantity"], {"enabled": True})

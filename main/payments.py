@@ -245,6 +245,18 @@ class Payments:
                 shipping_options.insert(0, free_shipping_option())
             if shipping_options:
                 extras["shipping_options"] = shipping_options
+            # Stripe fixes shipping_options at session creation and never
+            # recomputes them, but adjustable_quantity would let the buyer
+            # change the total on Stripe's own page -- a $39 cart bumped to
+            # two copies pays the paid rate on an order the site said ships
+            # free, and a $40 cart dropped to one $15 copy keeps a free rate
+            # it no longer earns. So while the offer is live, quantities are
+            # settled in the cart: the stepper is the price of a threshold
+            # Stripe cannot re-check. Digital and subscription carts carry no
+            # shipping and keep it, as does everything when the offer is off.
+            if getattr(settings, "FREE_SHIPPING_ENABLED", True):
+                for item in items:
+                    item.pop('adjustable_quantity', None)
 
         if has_physical:
             extras["shipping_address_collection"] = {"allowed_countries": ["US", "CA"]}
