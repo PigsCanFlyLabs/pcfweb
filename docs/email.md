@@ -16,27 +16,56 @@ touches the network.
 
 | Sender | Trigger | From | To | Failure lands in |
 |---|---|---|---|---|
-| `Order.notify_owner()` | Stripe webhook marks an order paid | `DEFAULT_FROM_EMAIL` | `ADMINS` (`ORDER_NOTIFICATION_EMAIL`) | `Order.notification_error`, pod log |
-| `Order._deliver_digital_goods()` | Same webhook, orders with digital items | `DEFAULT_FROM_EMAIL` | the customer, Bcc `SALES_BCC_EMAILS` | `Order.digital_delivery_error`, pod log |
-| `Order.send_receipt()` | Same webhook, every paid order | `DEFAULT_FROM_EMAIL` | the customer, Bcc `SALES_BCC_EMAILS` | `Order.receipt_error`, pod log |
+| `Order.notify_owner()` | Stripe webhook marks an order paid (or the success page fulfils it first) | `DEFAULT_FROM_EMAIL` | `ADMINS` (`ORDER_NOTIFICATION_EMAIL`) | `Order.notification_error`, pod log |
+| `Order._deliver_digital_goods()` | Same fulfilment, orders with digital items | `DEFAULT_FROM_EMAIL` | the customer, plus a copy to `SALES_COPY_EMAILS` | `Order.digital_delivery_error`, pod log |
+| `Order.send_receipt()` | Same fulfilment, every paid order | `DEFAULT_FROM_EMAIL` | the customer, plus a copy to `SALES_COPY_EMAILS` | `Order.receipt_error`, pod log |
 | `PurchaseFeedback.notify_owner()` | A buyer answers "what made you buy this?" on the checkout success page | `DEFAULT_FROM_EMAIL` | `ADMINS` (`ORDER_NOTIFICATION_EMAIL`) | pod log only — the answer itself is a row in the admin, so a failed send loses only the notification |
 | `manage.py check_book_assets` | Primary pod startup | `DEFAULT_FROM_EMAIL` | `ADMINS` | pod log only |
 | Django's `AdminEmailHandler` | Any 500 while `DEBUG=False` | `SERVER_EMAIL` | `ADMINS` | pod log only |
 | Password reset (`django.contrib.auth`) | User asks on `/accounts/` | `DEFAULT_FROM_EMAIL` | the user | the request 500s |
 | django-newsletter | Manual submission from the admin | per-newsletter sender rows | subscribers | admin output |
 
-The first five run where a hang cannot be afforded — inside the webhook or
-during startup — which is why `EMAIL_TIMEOUT` exists and is 10 seconds.
+The three fulfilment senders and the startup audit run where a hang cannot
+be afforded — which is why `EMAIL_TIMEOUT` exists and is 10 seconds. Note
+that "the webhook" is not the only caller: `CheckoutSuccessView` runs the
+same `fulfil_order` inline (`main/views.py`) when the webhook has not landed
+yet, so those three can also send in a request the buyer is watching render.
 
-The two customer-facing sale emails carry a blind copy to `SALES_BCC_EMAILS`
-(`main.utils.send_sales_email`). The owner otherwise only ever sees the order
-notification, which is a pick/pack list rather than the message that reached
-the buyer — so "the link in my email is broken" could not be answered without
-asking them to forward it. It is a Bcc on the same message, not a second send:
-the copy cannot drift from the original, and smtplib only raises when *every*
-recipient is refused, so a copy address the relay dislikes costs the copy and
-nothing else. The buyer's own address is dropped from the copy list, so the
-owner buying from their own shop does not get their receipt twice.
+## Copies of the sale emails
+
+The two customer-facing sale emails are copied to `SALES_COPY_EMAILS`. The
+owner otherwise only ever sees the order notification, which is a pick/pack
+list rather than the message that reached the buyer — so "the link in my
+email is broken" could not be answered without asking them to forward it.
+
+**The copy is its own message, not a Bcc on the buyer's**, and that is the
+load-bearing detail. `smtplib.sendmail` raises `SMTPRecipientsRefused` only
+when *every* envelope recipient is refused, so a copy address sharing the
+buyer's envelope turns "the buyer's address was rejected" into a silent
+success — and `send_receipt()` / `_deliver_digital_goods()` stamp
+`receipt_sent_at` / `digital_delivery_sent_at` on anything that does not
+raise, which the fulfilment guards then never retry. A customer would have
+paid, received nothing, and the admin row would say delivered. Keeping the
+buyer alone on their envelope is what preserves "refused means recorded".
+
+The same separation is why nothing configured here can cost a sale: Django's
+SMTP backend runs every recipient through `sanitize_address` *before* the
+send and outside its own `except smtplib.SMTPException`, so a malformed
+address raises `ValueError` out of whichever message carries it. On the
+copy's own message that costs the copy; on the buyer's it would have cost
+the receipt. `sales_copy_recipients()` also validates each entry and drops
+unusable ones with a warning, and the copy send itself never raises — a
+failed copy must not have the order recorded as unsent, or the next
+redelivery would mail the customer a second receipt.
+
+The buyer's own address is dropped from the copy list (compared on the
+mailbox, so a display-name entry still matches), so the owner buying from
+their own shop does not get their receipt twice.
+
+The copy carries an `X-PCF-Copy: sale` header and is otherwise byte-identical
+to what the customer got, subject included. That header is what an inbox rule
+should filter on to file these away, and it is what lets the test suite keep
+saying "exactly one receipt went out" without counting the copy.
 
 Deliberately not applied to the mailing list, which sends one message per
 subscriber: a copy rule there would mean a copy of every mailing times every
@@ -62,7 +91,7 @@ each other by `DeployManifestTest.test_the_mail_relay_in_the_manifest_matches_th
 | `DEFAULT_FROM_EMAIL` | code default | `support@pigscanfly.ca` |
 | `SERVER_EMAIL` | code default | follows `DEFAULT_FROM_EMAIL`. Django's own default is `root@localhost`, which relays reject — never leave this to the framework |
 | `ORDER_NOTIFICATION_EMAIL` | code default | `support@pigscanfly.ca`; feeds `ADMINS` |
-| `SALES_BCC_EMAILS` | code default | `holden@pigscanfly.ca`; comma-separated, empty sends no copies |
+| `SALES_COPY_EMAILS` | code default | `holden@pigscanfly.ca`; comma-separated, empty sends no copies |
 
 Changing the relay is therefore a ConfigMap edit plus a pod restart. A
 rebuild is only needed if the *defaults* should change.
@@ -119,7 +148,8 @@ whether the server actually listens on 465 (a refused or timed-out
 connection here means it does not — flip the ConfigMap to `587` with
 `EMAIL_USE_TLS` on and `EMAIL_USE_SSL` off), and whether it presents a
 certificate valid for `mail.pigscanfly.ca`. After a deploy, the passive
-signals are: `Order.notification_error` / `digital_delivery_error` in the
+signals are: `Order.notification_error` / `receipt_error` /
+`digital_delivery_error` in the
 admin's order list (empty on healthy sends), and `check_book_assets` output
 in the primary pod's startup log.
 

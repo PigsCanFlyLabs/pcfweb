@@ -24,15 +24,16 @@ from django.core import mail
 from django.test import Client, TestCase, override_settings
 
 from main.models import Order, OrderItem, Product
+from main.utils import SALE_COPY_HEADER
 
 
 SHIPPING_NOTICE_TEXT = "shipping times for physical goods are currently long"
 WEBHOOK_SECRET = "whsec_test_secret_value"
 WEBHOOK_URL = "/stripe/webhook"
 OWNER_EMAIL = "owner@example.com"
-# The address SALES_BCC_EMAILS is pinned to for order tests, so they assert
+# The address SALES_COPY_EMAILS is pinned to for order tests, so they assert
 # against a known copy recipient rather than whatever the shipped default is.
-SALES_BCC_EMAIL = "copies@example.com"
+SALES_COPY_EMAIL = "copies@example.com"
 NEVER_CACHE_DIRECTIVES = {
     "max-age=0",
     "no-cache",
@@ -84,6 +85,21 @@ def assert_never_cache_response(testcase, response) -> None:
     testcase.assertIn("Expires", response)
 
 
+def customer_mail(needle: str):
+    """Messages a customer received, excluding the owner's copies of them.
+
+    The copy of a sale email carries the same subject as the original --
+    being the same message is the point of it -- so a subject filter on its
+    own counts two, and every "exactly one receipt went out" assertion in
+    this suite would quietly start passing on a duplicate. The copy is told
+    apart by the header main.utils puts on it, which is also what an inbox
+    rule would filter on.
+    """
+    return [m for m in mail.outbox
+            if needle in m.subject
+            and SALE_COPY_HEADER not in (m.extra_headers or {})]
+
+
 """The settings every order test needs. Kept as a dict rather than applied
 once, because the concurrency tests need the same settings on a
 ``TransactionTestCase`` -- real threads on real connections cannot see the
@@ -91,7 +107,7 @@ uncommitted data a ``TestCase`` leaves in its wrapping transaction."""
 ORDER_TEST_SETTINGS = dict(
     STRIPE_WEBHOOK_SECRET=WEBHOOK_SECRET,
     ADMINS=[("Owner", OWNER_EMAIL)],
-    SALES_BCC_EMAILS=[SALES_BCC_EMAIL],
+    SALES_COPY_EMAILS=[SALES_COPY_EMAIL],
     DEFAULT_FROM_EMAIL="support@pigscanfly.ca")
 
 
