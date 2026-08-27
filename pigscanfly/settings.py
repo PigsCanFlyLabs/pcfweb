@@ -559,6 +559,28 @@ class Base(Configuration):
         "ORDER_NOTIFICATION_EMAIL", "support@pigscanfly.ca")
     ADMINS = [("Pigs Can Fly Labs Orders", ORDER_NOTIFICATION_EMAIL)]
 
+    # Who gets a blind copy of the mail a sale sends the buyer -- the receipt
+    # and the download links. The owner otherwise only ever sees the order
+    # notification, which is a pick/pack list and not the message that
+    # actually landed in the customer's inbox; a copy is what makes "the link
+    # in my email is broken" answerable without asking them to forward it.
+    #
+    # Bcc rather than a second send: it is one message down one SMTP
+    # connection, so the copy cannot drift from the original, and the buyer's
+    # copy cannot be lost to a failure that only affects ours -- smtplib only
+    # raises when *every* recipient is refused, so a copy address the relay
+    # dislikes costs the copy and nothing else. Bcc also keeps the address off
+    # the message: Django puts these in the envelope only, so the customer
+    # never sees who else was on it.
+    #
+    # Comma-separated; empty sends no copies. Deliberately not applied to the
+    # mailing list, which sends one message per subscriber -- a copy rule
+    # there would mean a copy of every mailing times every recipient, which
+    # is a mailbox nobody can read. The admin's send page is the record of
+    # those, and send_test() previews one.
+    SALES_BCC_EMAILS: List[str] = parse_comma_list(
+        os.getenv("SALES_BCC_EMAILS", "holden@pigscanfly.ca"))
+
 
 class Dev(Base):
     DEBUG = True

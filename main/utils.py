@@ -4,11 +4,11 @@ import ipaddress
 import logging
 import secrets
 
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.core.mail import get_connection, send_mail
+from django.core.mail import EmailMessage, get_connection, send_mail
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,49 @@ def email_admins(subject: str, body: str, error_logger: logging.Logger,
             "Could not email %s: %s", ", ".join(recipients), failure_message)
         return False
     return True
+
+
+def sales_bcc(exclude: Iterable[str] = ()) -> List[str]:
+    """Who gets a blind copy of what a sale sends the buyer.
+
+    `exclude` is the message's own visible recipients. The owner buying from
+    their own shop -- which is how the checkout gets tested -- is otherwise on
+    the message twice, and Django hands both to the relay, so they get two
+    copies of their own receipt. Compared normalized because case is not
+    identity for a mailbox, but the address is *sent* exactly as configured:
+    the local part is case-sensitive per the RFC, so lower-casing somebody
+    else's mailbox on the way out is not ours to do.
+    """
+    excluded = {normalize_email(address) for address in exclude}
+    recipients = []
+    seen = set()
+    for address in getattr(settings, "SALES_BCC_EMAILS", None) or []:
+        normalized = normalize_email(address)
+        if not normalized or normalized in excluded or normalized in seen:
+            continue
+        seen.add(normalized)
+        recipients.append(address.strip())
+    return recipients
+
+
+def send_sales_email(subject: str, body: str, to: List[str]) -> None:
+    """Send one customer-facing sale email, copied to SALES_BCC_EMAILS.
+
+    Raises whatever the mail backend raises. Every caller is inside the Stripe
+    webhook and already catches, records the failure on the order and returns
+    2xx anyway -- a retried webhook means duplicate mail, so that decision
+    belongs to them and must not be pre-empted here.
+
+    A plain EmailMessage rather than send_mail() because that helper has no
+    Bcc argument; this is the same message it would have built.
+    """
+    EmailMessage(
+        subject=subject,
+        body=body,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=to,
+        bcc=sales_bcc(exclude=to),
+    ).send(fail_silently=False)
 
 
 def generate_username(email: str):

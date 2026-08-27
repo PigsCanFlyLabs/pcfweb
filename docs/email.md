@@ -17,15 +17,31 @@ touches the network.
 | Sender | Trigger | From | To | Failure lands in |
 |---|---|---|---|---|
 | `Order.notify_owner()` | Stripe webhook marks an order paid | `DEFAULT_FROM_EMAIL` | `ADMINS` (`ORDER_NOTIFICATION_EMAIL`) | `Order.notification_error`, pod log |
-| `Order._deliver_digital_goods()` | Same webhook, orders with digital items | `DEFAULT_FROM_EMAIL` | the customer | `Order.digital_delivery_error`, pod log |
+| `Order._deliver_digital_goods()` | Same webhook, orders with digital items | `DEFAULT_FROM_EMAIL` | the customer, Bcc `SALES_BCC_EMAILS` | `Order.digital_delivery_error`, pod log |
+| `Order.send_receipt()` | Same webhook, every paid order | `DEFAULT_FROM_EMAIL` | the customer, Bcc `SALES_BCC_EMAILS` | `Order.receipt_error`, pod log |
 | `PurchaseFeedback.notify_owner()` | A buyer answers "what made you buy this?" on the checkout success page | `DEFAULT_FROM_EMAIL` | `ADMINS` (`ORDER_NOTIFICATION_EMAIL`) | pod log only — the answer itself is a row in the admin, so a failed send loses only the notification |
 | `manage.py check_book_assets` | Primary pod startup | `DEFAULT_FROM_EMAIL` | `ADMINS` | pod log only |
 | Django's `AdminEmailHandler` | Any 500 while `DEBUG=False` | `SERVER_EMAIL` | `ADMINS` | pod log only |
 | Password reset (`django.contrib.auth`) | User asks on `/accounts/` | `DEFAULT_FROM_EMAIL` | the user | the request 500s |
 | django-newsletter | Manual submission from the admin | per-newsletter sender rows | subscribers | admin output |
 
-The first four run where a hang cannot be afforded — inside the webhook or
+The first five run where a hang cannot be afforded — inside the webhook or
 during startup — which is why `EMAIL_TIMEOUT` exists and is 10 seconds.
+
+The two customer-facing sale emails carry a blind copy to `SALES_BCC_EMAILS`
+(`main.utils.send_sales_email`). The owner otherwise only ever sees the order
+notification, which is a pick/pack list rather than the message that reached
+the buyer — so "the link in my email is broken" could not be answered without
+asking them to forward it. It is a Bcc on the same message, not a second send:
+the copy cannot drift from the original, and smtplib only raises when *every*
+recipient is refused, so a copy address the relay dislikes costs the copy and
+nothing else. The buyer's own address is dropped from the copy list, so the
+owner buying from their own shop does not get their receipt twice.
+
+Deliberately not applied to the mailing list, which sends one message per
+subscriber: a copy rule there would mean a copy of every mailing times every
+recipient. `MailingListMessage.send_test()` previews one instead, and the
+admin's send page is the record of what went out.
 
 ## Where each setting comes from
 
@@ -46,6 +62,7 @@ each other by `DeployManifestTest.test_the_mail_relay_in_the_manifest_matches_th
 | `DEFAULT_FROM_EMAIL` | code default | `support@pigscanfly.ca` |
 | `SERVER_EMAIL` | code default | follows `DEFAULT_FROM_EMAIL`. Django's own default is `root@localhost`, which relays reject — never leave this to the framework |
 | `ORDER_NOTIFICATION_EMAIL` | code default | `support@pigscanfly.ca`; feeds `ADMINS` |
+| `SALES_BCC_EMAILS` | code default | `holden@pigscanfly.ca`; comma-separated, empty sends no copies |
 
 Changing the relay is therefore a ConfigMap edit plus a pod restart. A
 rebuild is only needed if the *defaults* should change.

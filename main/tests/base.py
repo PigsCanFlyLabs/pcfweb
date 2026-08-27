@@ -30,6 +30,9 @@ SHIPPING_NOTICE_TEXT = "shipping times for physical goods are currently long"
 WEBHOOK_SECRET = "whsec_test_secret_value"
 WEBHOOK_URL = "/stripe/webhook"
 OWNER_EMAIL = "owner@example.com"
+# The address SALES_BCC_EMAILS is pinned to for order tests, so they assert
+# against a known copy recipient rather than whatever the shipped default is.
+SALES_BCC_EMAIL = "copies@example.com"
 NEVER_CACHE_DIRECTIVES = {
     "max-age=0",
     "no-cache",
@@ -88,6 +91,7 @@ uncommitted data a ``TestCase`` leaves in its wrapping transaction."""
 ORDER_TEST_SETTINGS = dict(
     STRIPE_WEBHOOK_SECRET=WEBHOOK_SECRET,
     ADMINS=[("Owner", OWNER_EMAIL)],
+    SALES_BCC_EMAILS=[SALES_BCC_EMAIL],
     DEFAULT_FROM_EMAIL="support@pigscanfly.ca")
 
 

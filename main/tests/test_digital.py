@@ -587,7 +587,7 @@ class DigitalDeliveryTest(BookAssetRootMixin, OrderTestBase):
     def test_a_mail_failure_leaves_the_order_paid_and_records_why(self):
         order = self.buy_the_ebook()
 
-        with mock.patch("main.models.send_mail",
+        with mock.patch("main.models.send_sales_email",
                         side_effect=OSError("SMTP is down")):
             with self.assertLogs("main.models", level="ERROR"):
                 response = self.deliver(self.event_body(order))

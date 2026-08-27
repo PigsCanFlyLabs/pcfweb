@@ -93,6 +93,16 @@ data:
   EMAIL_USE_TLS: "false"
   EMAIL_USE_SSL: "true"
   EMAIL_HOST_USER: "support"
+  #
+  # Who gets a blind copy of the two emails a sale sends the buyer -- the
+  # receipt and the download links. Comma-separated; set it to "" to stop
+  # copying anyone, which is an edit here plus a pod restart rather than a
+  # rebuild. Unset, the code default in settings.py applies (the owner), so
+  # this is only worth writing out to change it. Not the relay settings
+  # above: the pinning test does not cover it, deliberately, because whose
+  # inbox this is belongs to whoever runs the site.
+  #
+  # SALES_BCC_EMAILS: "holden@pigscanfly.ca"
 ---
 apiVersion: apps/v1
 kind: Deployment

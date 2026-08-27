@@ -1113,10 +1113,11 @@ class WebhookBuyerReceiptTest(OrderTestBase):
         self.assertEqual(len(self._receipts()), 0)
 
     def test_redelivery_after_failed_receipt_retries_it(self):
-        real_send = main_models.send_mail
-        with mock.patch(
-                "main.models.send_mail",
-                side_effect=[OSError("SMTP is down"), real_send]):
+        # send_sales_email, not send_mail: the buyer's copies go out through
+        # the Bcc-carrying helper, and the owner notification is the only
+        # thing still on send_mail.
+        with mock.patch("main.models.send_sales_email",
+                        side_effect=OSError("SMTP is down")):
             with self.assertLogs("main.models", level="ERROR"):
                 self.deliver(self.event_body(self.order))
 
@@ -1137,10 +1138,10 @@ class WebhookBuyerReceiptTest(OrderTestBase):
     # ---- requirement 3: failure isolation ----
 
     def test_receipt_failure_never_blocks_the_owner_notification(self):
-        real_send = main_models.send_mail
-        with mock.patch(
-                "main.models.send_mail",
-                side_effect=[OSError("SMTP is down"), real_send]):
+        # Only the buyer-facing send is broken here, which is the point: the
+        # owner's notification goes out over send_mail and must still arrive.
+        with mock.patch("main.models.send_sales_email",
+                        side_effect=OSError("SMTP is down")):
             with self.assertLogs("main.models", level="ERROR"):
                 self.deliver(self.event_body(self.order))
 
@@ -1152,10 +1153,13 @@ class WebhookBuyerReceiptTest(OrderTestBase):
                              "owner was not notified")
 
     def test_receipt_failure_never_blocks_the_order_from_completing(self):
-        # The worst case: send_mail raises for EVERY call, yet the order
-        # still transitions to PAID and the webhook still returns 200.
+        # The worst case: every send raises -- the owner notification on
+        # send_mail and the buyer's copies on send_sales_email alike -- yet
+        # the order still transitions to PAID and the webhook returns 200.
         with mock.patch("main.models.send_mail",
-                        side_effect=OSError("SMTP is down")):
+                        side_effect=OSError("SMTP is down")), \
+                mock.patch("main.models.send_sales_email",
+                           side_effect=OSError("SMTP is down")):
             with self.assertLogs("main.models", level="ERROR"):
                 response = self.deliver(self.event_body(self.order))
 
@@ -1262,7 +1266,7 @@ class WebhookBuyerReceiptConcurrentTest(OrderTestMixin, TransactionTestCase):
         body = self.event_body(order)
         overlapped = []
         failures = []
-        real_send = main_models.send_mail
+        real_send = main_models.send_sales_email
 
         def second_worker():
             try:
@@ -1286,7 +1290,9 @@ class WebhookBuyerReceiptConcurrentTest(OrderTestMixin, TransactionTestCase):
                                  "the second worker never finished")
             return real_send(*args, **kwargs)
 
-        with mock.patch("main.models.send_mail", send_and_overlap):
+        # Patched on send_sales_email so the overlap lands in the window the
+        # receipt is actually sent in, which is the send this test is about.
+        with mock.patch("main.models.send_sales_email", send_and_overlap):
             self.deliver(body)
 
         self.assertEqual(failures, [], "the second worker raised")
