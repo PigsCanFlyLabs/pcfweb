@@ -324,14 +324,30 @@ class DeployManifestTest(TestCase):
             self.docs = [doc for doc in yaml.safe_load_all(fh) if doc]
         self.deployments = [
             doc for doc in self.docs if doc.get("kind") == "Deployment"]
+        self.cronjobs = [
+            doc for doc in self.docs if doc.get("kind") == "CronJob"]
 
     def pod_spec(self, deployment):
         return deployment["spec"]["template"]["spec"]
 
+    def cronjob_pod_spec(self, cronjob):
+        return cronjob["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+
+    def all_pod_specs(self):
+        """Every pod spec in the manifest, whatever runs it.
+
+        A CronJob's containers are as much a part of the deploy as a
+        Deployment's -- they run the same image against the same database --
+        so the invariants below have to walk them too. Walking only
+        Deployments is how the sweeper's image tag would have been free to
+        drift a release behind everything else.
+        """
+        return ([self.pod_spec(d) for d in self.deployments]
+                + [self.cronjob_pod_spec(c) for c in self.cronjobs])
+
     def all_images(self):
         images = []
-        for deployment in self.deployments:
-            spec = self.pod_spec(deployment)
+        for spec in self.all_pod_specs():
             for container in (spec.get("initContainers", [])
                               + spec.get("containers", [])):
                 images.append(container["image"])
@@ -389,8 +405,7 @@ class DeployManifestTest(TestCase):
             " ".join(init_containers[0].get("args", [])))
 
     def test_containers_declare_resources(self):
-        for deployment in self.deployments:
-            spec = self.pod_spec(deployment)
+        for spec in self.all_pod_specs():
             for container in (spec.get("initContainers", [])
                               + spec.get("containers", [])):
                 with self.subTest(container=container["name"]):
