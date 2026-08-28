@@ -323,12 +323,16 @@ spec:
 # The order sweeper. Stripe redelivers a webhook only when the *delivery*
 # failed, so a fulfilment step that fails gracefully -- an SMTP blip, a slow
 # line-item lookup, a missing book archive -- answers 200, and nothing ever
-# comes back to retry it. This is what comes back.
+# comes back to retry it. This is what comes back. It also asks Stripe about
+# orders still PENDING past the grace period, which is the only thing that
+# notices a webhook that has stopped arriving at all (rotated secret,
+# unregistered endpoint, pod clock drift).
 #
 # Hourly rather than every few minutes: the webhook is still the primary path
 # and handles the overwhelming majority within seconds, so this is the repair
 # pass, not the mechanism. A buyer waiting on a download after an SMTP outage
-# waits at most an hour.
+# waits at most an hour; the Stripe API cost is one lookup per genuinely
+# stuck order.
 apiVersion: batch/v1
 kind: CronJob
 metadata:

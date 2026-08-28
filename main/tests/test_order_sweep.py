@@ -8,7 +8,9 @@ delivery, and a graceful failure is answered with a clean 200, so the resume
 logic had no trigger for exactly the failures it was written for.
 
 ``WebhookGracefulFailureIsNeverRetriedTest`` below pins that down -- it is the
-bug -- and everything after it covers the command that repairs it.
+bug -- and everything after it covers the command that repairs both halves:
+paid orders that never finished, and pending orders no webhook ever arrived
+for at all.
 """
 
 from datetime import timedelta
@@ -359,6 +361,256 @@ class SweepDigitalOrderTest(BookAssetRootMixin, OrderTestBase):
 
 
 @override_settings(STRIPE_API_KEY="sk_test_sweep")
+class SweepPendingOrdersTest(OrderTestBase):
+    """Orders no webhook ever arrived for, which is the outage case."""
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order(product_pk=100, quantity=1)
+        backdate(self.order, hours=2)
+
+    def retrieve(self, **overrides):
+        session = self.session_payload(self.order, **overrides)
+        return mock.patch("stripe.checkout.Session.retrieve",
+                          return_value=session)
+
+    def test_an_order_stripe_says_was_paid_is_paid_and_fulfilled(self):
+        with self.retrieve(status="complete"):
+            with self.assertLogs("main.management.commands.sweep_orders",
+                                 level="ERROR") as log:
+                output = sweep()
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertIsNotNone(self.order.paid_at)
+        self.assertIsNotNone(self.order.notified_at)
+        self.assertEqual(len(self.order_emails()), 1)
+        self.assertTrue(any("no webhook ever recorded it" in m
+                            for m in log.output))
+        self.assertIn("Check STRIPE_WEBHOOK_SECRET", output)
+
+    def test_a_free_order_stripe_never_charges_for_is_also_paid(self):
+        with self.retrieve(status="complete",
+                           payment_status="no_payment_required"):
+            with self.assertLogs("main.management.commands.sweep_orders",
+                                 level="ERROR"):
+                sweep()
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+
+    def test_an_expired_session_cancels_the_order(self):
+        with self.retrieve(status="expired", payment_status="unpaid"):
+            output = sweep()
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.CANCELLED)
+        self.assertEqual(mail.outbox, [])
+        self.assertIn("session expired unpaid", output)
+
+    def test_a_session_still_open_is_left_alone(self):
+        with self.retrieve(status="open", payment_status="unpaid"):
+            output = sweep()
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+        self.assertIn("1 still open", output)
+
+    def test_a_delayed_payment_that_has_not_settled_is_left_alone(self):
+        with self.retrieve(status="complete", payment_status="unpaid"):
+            sweep()
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+
+    def test_an_order_inside_the_grace_period_is_not_asked_about(self):
+        fresh = self.place_order(
+            product_pk=100, quantity=1, session_id="cs_fresh")
+
+        with mock.patch("stripe.checkout.Session.retrieve") as retrieve:
+            retrieve.return_value = self.session_payload(
+                self.order, status="open", payment_status="unpaid")
+            sweep(pending_after_minutes=60)
+
+        asked = [call.args[0] for call in retrieve.call_args_list]
+        self.assertNotIn("cs_fresh", asked,
+                         "a buyer may still be on Stripe's page")
+        fresh.refresh_from_db()
+        self.assertEqual(fresh.status, Order.Status.PENDING)
+
+    def test_a_session_that_is_not_the_one_asked_for_is_refused(self):
+        """paid_fields() writes stripe_session_id, so the binding is checked."""
+        other = self.place_order(
+            product_pk=100, quantity=1, session_id="cs_someone_else")
+
+        with mock.patch("stripe.checkout.Session.retrieve",
+                        return_value=self.session_payload(other)):
+            with self.assertLogs("main.management.commands.sweep_orders",
+                                 level="ERROR") as log:
+                output = sweep()
+
+        self.order.refresh_from_db()
+        other.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+        self.assertEqual(self.order.stripe_session_id, "cs_test_session")
+        self.assertEqual(other.status, Order.Status.PENDING)
+        self.assertTrue(any("Not marking it paid" in m for m in log.output))
+        self.assertIn("not the one asked for", output)
+
+    def test_an_order_with_no_session_id_is_never_looked_up(self):
+        Order.objects.filter(pk=self.order.pk).update(stripe_session_id=None)
+
+        with mock.patch("stripe.checkout.Session.retrieve") as retrieve:
+            sweep()
+
+        self.assertEqual(retrieve.call_count, 0)
+
+    def test_a_stripe_lookup_failure_does_not_stop_the_sweep(self):
+        second = self.place_order(
+            product_pk=100, quantity=1, session_id="cs_second")
+        backdate(second, hours=2)
+        good = self.session_payload(second, status="complete")
+
+        def retrieve(session_id, *args, **kwargs):
+            if session_id == self.order.stripe_session_id:
+                raise RuntimeError("Stripe is unreachable")
+            return good
+
+        with mock.patch("stripe.checkout.Session.retrieve",
+                        side_effect=retrieve):
+            with self.assertLogs("main.management.commands.sweep_orders"):
+                output = sweep()
+
+        self.order.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+        self.assertEqual(second.status, Order.Status.PAID,
+                         "one bad session must not strand the rest")
+        self.assertIn("1 unreadable", output)
+
+    def test_the_owner_is_mailed_that_the_webhook_is_not_working(self):
+        """The one failure that is invisible from the site itself."""
+        with self.retrieve(status="complete"):
+            with self.assertLogs("main.management.commands.sweep_orders",
+                                 level="ERROR"):
+                sweep()
+
+        alerts = [m for m in mail.outbox
+                  if "no webhook recorded" in m.subject]
+        self.assertEqual(len(alerts), 1)
+        self.assertIn(f"#{self.order.pk}", alerts[0].body)
+        self.assertIn("STRIPE_WEBHOOK_SECRET", alerts[0].body)
+
+    def test_one_alert_covers_every_stranded_order(self):
+        second = self.place_order(
+            product_pk=100, quantity=1, session_id="cs_second")
+        backdate(second, hours=2)
+
+        def retrieve(session_id, *args, **kwargs):
+            asked = Order.objects.get(stripe_session_id=session_id)
+            return self.session_payload(asked, status="complete")
+
+        with mock.patch("stripe.checkout.Session.retrieve",
+                        side_effect=retrieve):
+            with self.assertLogs("main.management.commands.sweep_orders",
+                                 level="ERROR"):
+                sweep()
+
+        alerts = [m for m in mail.outbox
+                  if "no webhook recorded" in m.subject]
+        self.assertEqual(len(alerts), 1, "one mail, not one per order")
+        self.assertIn(f"#{self.order.pk}", alerts[0].body)
+        self.assertIn(f"#{second.pk}", alerts[0].body)
+
+    def test_a_working_webhook_raises_no_alert(self):
+        self.deliver(self.event_body(self.order))
+        mail.outbox.clear()
+
+        sweep()
+
+        self.assertEqual(
+            [m for m in mail.outbox if "no webhook recorded" in m.subject], [])
+
+    def test_a_failed_alert_does_not_lose_the_repair(self):
+        with self.retrieve(status="complete"):
+            with self.assertLogs("main.management.commands.sweep_orders",
+                                 level="ERROR"):
+                with mock.patch("main.utils.send_mail",
+                                side_effect=OSError("SMTP is down")):
+                    sweep()
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID,
+                         "the alert is best-effort; the repair is not")
+
+    def test_dry_run_raises_no_alert(self):
+        with self.retrieve(status="complete"):
+            sweep(dry_run=True)
+
+        self.assertEqual(
+            [m for m in mail.outbox if "no webhook recorded" in m.subject], [])
+
+    def test_dry_run_asks_stripe_but_changes_nothing(self):
+        with self.retrieve(status="complete"):
+            output = sweep(dry_run=True)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+        self.assertEqual(mail.outbox, [])
+        self.assertIn("paying and fulfilling it", output)
+
+    def test_a_paid_backlog_cannot_starve_the_pending_sweep(self):
+        """--limit is per phase, and the urgent phase runs first."""
+        for index in range(3):
+            stale = self.place_order(
+                product_pk=100, quantity=1, session_id=f"cs_paid_{index}")
+            self.deliver(self.event_body(stale))
+            Order.objects.filter(pk=stale.pk).update(notified_at=None)
+        mail.outbox.clear()
+
+        with self.retrieve(status="complete"):
+            with self.assertLogs("main.management.commands.sweep_orders",
+                                 level="ERROR"):
+                sweep(limit=1)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID,
+                         "the unrecorded payment must still be reached")
+
+    def test_the_limit_bounds_the_run_and_says_what_it_skipped(self):
+        for index in range(3):
+            extra = self.place_order(
+                product_pk=100, quantity=1, session_id=f"cs_extra_{index}")
+            backdate(extra, hours=2)
+
+        def retrieve(session_id, *args, **kwargs):
+            # Answer for whichever session was asked about, so this exercises
+            # the limit rather than tripping the session-binding guard.
+            asked = Order.objects.get(stripe_session_id=session_id)
+            return self.session_payload(
+                asked, status="open", payment_status="unpaid")
+
+        with mock.patch("stripe.checkout.Session.retrieve",
+                        side_effect=retrieve) as retrieved:
+            output = sweep(limit=2)
+
+        self.assertEqual(retrieved.call_count, 2)
+        self.assertIn("unexamined", output)
+
+    def test_a_sweep_racing_a_live_webhook_pays_the_order_once(self):
+        body = self.event_body(self.order)
+        self.deliver(body)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        emails_after_webhook = len(self.order_emails())
+
+        with self.retrieve(status="complete"):
+            sweep()
+
+        self.assertEqual(len(self.order_emails()), emails_after_webhook,
+                         "the sweep must not re-notify a finished order")
+
+
 class OrderSweepIsScheduledTest(SimpleTestCase):
     """The command only closes the gap if something actually runs it.
 
