@@ -55,11 +55,19 @@ def broken_mail(message: str = "SMTP is down"):
 def backdate(order: Order, **delta) -> Order:
     """Age an order past a grace period.
 
+    Moves paid_at along with created_at when the order has one, because the
+    paid sweep's window measures how long fulfilment has been outstanding --
+    so an order that is merely old, but was paid ten minutes ago, is not the
+    thing a caller asking for a 90-day-old order means.
+
     A plain UPDATE because created_at is auto_now_add, which save() would
     leave untouched and which no test can otherwise move.
     """
-    Order.objects.filter(pk=order.pk).update(
-        created_at=timezone.now() - timedelta(**delta))
+    when = timezone.now() - timedelta(**delta)
+    fields = {"created_at": when}
+    if order.paid_at is not None:
+        fields["paid_at"] = when
+    Order.objects.filter(pk=order.pk).update(**fields)
     order.refresh_from_db()
     return order
 
@@ -266,6 +274,58 @@ class SweepPaidOrdersTest(OrderTestBase):
 
         self.order.refresh_from_db()
         self.assertIsNotNone(self.order.notified_at)
+
+    def test_the_window_runs_from_payment_not_from_checkout(self):
+        """A delayed payment method pays an order long after it is created.
+
+        Windowing on created_at puts an order that was just paid, but placed
+        a while ago, permanently outside every sweep -- stranded exactly the
+        way this command exists to prevent.
+        """
+        Order.objects.filter(pk=self.order.pk).update(notified_at=None)
+        # Placed 90 days ago; the ACH debit settled ten minutes ago.
+        backdate(self.order, days=90)
+        Order.objects.filter(pk=self.order.pk).update(
+            paid_at=timezone.now() - timedelta(minutes=10))
+
+        sweep(window_days=30)
+
+        self.order.refresh_from_db()
+        self.assertIsNotNone(
+            self.order.notified_at,
+            "fulfilment has been outstanding ten minutes, not 90 days")
+
+    def test_a_capped_run_reads_only_its_budget_of_rows(self):
+        """--limit has to bound the work, not just the retries.
+
+        Walking the whole queryset to count what it would skip consulted
+        outstanding_fulfilment() -- which reads an order's items -- on every
+        matching row, so a large backlog turned a job capped at 200 retries
+        into thousands of queries.
+
+        fulfil_order is stubbed out so the only thing left that would touch
+        a candidate row is the scan itself.
+        """
+        for index in range(4):
+            extra = self.place_order(
+                product_pk=100, quantity=1, session_id=f"cs_backlog_{index}")
+            self.deliver(self.event_body(extra))
+            Order.objects.filter(pk=extra.pk).update(notified_at=None)
+        Order.objects.filter(pk=self.order.pk).update(notified_at=None)
+        self.assertEqual(Order.needing_fulfilment().count(), 5)
+
+        with mock.patch.object(StripeWebhookView, "fulfil_order"):
+            with mock.patch.object(
+                    Order, "outstanding_fulfilment", autospec=True,
+                    side_effect=Order.outstanding_fulfilment) as consulted:
+                output = sweep(limit=1)
+
+        # The one row this run's budget bought, and the same row re-checked
+        # after fulfilment. Not one per matching order.
+        self.assertLessEqual(
+            consulted.call_count, 2,
+            f"examined {consulted.call_count} orders for a --limit of 1")
+        self.assertIn("unexamined", output)
 
     def test_a_capped_run_does_not_spend_itself_on_the_same_stuck_orders(self):
         """The starvation --limit would otherwise cause every single run.
