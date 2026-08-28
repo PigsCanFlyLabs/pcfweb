@@ -14,6 +14,7 @@ from django.test import Client, RequestFactory, TransactionTestCase, override_se
 
 from main.models import Cart, CartProduct, Order, OrderItem, Product
 from main.tests.base import (
+    customer_mail,
     ORDER_TEST_SETTINGS, OrderTestBase, OrderTestMixin,
     OWNER_EMAIL, stripe_signature, WEBHOOK_URL,
     assert_never_cache_response)
@@ -376,8 +377,7 @@ class CheckoutSuccessReconciliationTest(OrderTestBase):
         self.assertIsNotNone(order.notified_at)
         self.assertIsNotNone(order.receipt_sent_at)
         self.assertEqual(len(self.order_emails()), 1)
-        receipt_emails = [m for m in mail.outbox
-                          if "Your receipt" in m.subject]
+        receipt_emails = customer_mail("Your receipt")
         self.assertEqual(len(receipt_emails), 1)
 
     def test_stripe_reports_unpaid_order_stays_pending(self):
@@ -416,8 +416,7 @@ class CheckoutSuccessReconciliationTest(OrderTestBase):
         self.assertIsNotNone(order.receipt_sent_at,
                             "$0 order must also get a receipt")
         self.assertEqual(len(self.order_emails()), 1)
-        receipt_emails = [m for m in mail.outbox
-                          if "Your receipt" in m.subject]
+        receipt_emails = customer_mail("Your receipt")
         self.assertEqual(len(receipt_emails), 1)
 
     def test_already_paid_order_does_not_call_stripe(self):
@@ -599,7 +598,7 @@ class CheckoutSuccessReceiptTest(OrderTestBase):
         order.refresh_from_db()
         self.assertIsNotNone(order.receipt_sent_at)
         receipt_count_before = len(
-            [m for m in mail.outbox if "Your receipt" in m.subject])
+            customer_mail("Your receipt"))
         self.assertEqual(receipt_count_before, 1)
 
         # Load the success page -- order is already PAID, so no Stripe call.
@@ -611,7 +610,7 @@ class CheckoutSuccessReceiptTest(OrderTestBase):
         self.assertEqual(response.status_code, 200)
         retrieve.assert_not_called()
         receipt_count_after = len(
-            [m for m in mail.outbox if "Your receipt" in m.subject])
+            customer_mail("Your receipt"))
         self.assertEqual(receipt_count_after, 1)
 
     def test_receipt_failure_does_not_block_fulfilment(self):
@@ -671,7 +670,7 @@ class CheckoutSuccessConcurrencyTest(OrderTestMixin, TransactionTestCase):
 
     @staticmethod
     def customer_emails():
-        return [m for m in mail.outbox if "Your download" in m.subject]
+        return customer_mail("Your download")
 
     def test_one_of_each_email_when_webhook_and_page_race(self):
         """Webhook + success page concurrently: exactly one fulfilment."""
@@ -739,8 +738,7 @@ class CheckoutSuccessConcurrencyTest(OrderTestMixin, TransactionTestCase):
         # Exactly one download email.
         self.assertEqual(len(self.customer_emails()), 1)
         # Exactly one buyer receipt.
-        receipt_emails = [m for m in mail.outbox
-                          if "Your receipt" in m.subject]
+        receipt_emails = customer_mail("Your receipt")
         self.assertEqual(len(receipt_emails), 1,
                          "concurrent webhook + success page must send "
                          "exactly one buyer receipt")

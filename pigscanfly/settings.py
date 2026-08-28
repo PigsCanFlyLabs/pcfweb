@@ -559,6 +559,29 @@ class Base(Configuration):
         "ORDER_NOTIFICATION_EMAIL", "support@pigscanfly.ca")
     ADMINS = [("Pigs Can Fly Labs Orders", ORDER_NOTIFICATION_EMAIL)]
 
+    # Who gets a copy of the mail a sale sends the buyer -- the receipt and
+    # the download links. The owner otherwise only ever sees the order
+    # notification, which is a pick/pack list and not the message that
+    # actually landed in the customer's inbox; a copy is what makes "the link
+    # in my email is broken" answerable without asking them to forward it.
+    #
+    # Sent as its own message rather than as a Bcc on the buyer's, which is
+    # the one detail here that is load-bearing. smtplib raises only when
+    # *every* envelope recipient is refused, so a copy address riding along
+    # with the buyer would turn a rejected buyer address into a silent
+    # success -- main.utils.send_sales_email has the long version. Keeping
+    # the buyer alone on their envelope preserves "refused means recorded",
+    # and means no value set here can cost a customer their receipt.
+    #
+    # Comma-separated; empty sends no copies, and an entry that is not a
+    # usable address is dropped with a warning rather than breaking a send.
+    # Deliberately not applied to the mailing list, which sends one message
+    # per subscriber -- a copy rule there would mean a copy of every mailing
+    # times every recipient, which is a mailbox nobody can read. The admin's
+    # send page is the record of those, and send_test() previews one.
+    SALES_COPY_EMAILS: List[str] = parse_comma_list(
+        os.getenv("SALES_COPY_EMAILS", "holden@pigscanfly.ca"))
+
 
 class Dev(Base):
     DEBUG = True
