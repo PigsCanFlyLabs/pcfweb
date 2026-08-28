@@ -27,7 +27,8 @@ from main.models import (
     PwywAmountError, parse_pwyw_amount, round_pwyw_amount)
 from main.payments import Payments
 from main.tests.base import (
-    EBOOK_PK, BookAssetRootMixin, CartTestBase, OrderTestBase)
+    EBOOK_PK, BookAssetRootMixin, CartTestBase, OrderTestBase,
+    customer_mail)
 
 # The print edition of the same book: the other half of the bundle that could
 # not be bought in one go until this change.
@@ -1063,7 +1064,7 @@ class ZeroOrderStillDeliversTheBookTest(BookAssetRootMixin, OrderTestBase):
     @staticmethod
     def customer_emails():
         """The download mails, as test_digital.DigitalDeliveryTest counts them."""
-        return [m for m in mail.outbox if "Your download" in m.subject]
+        return customer_mail("Your download")
 
     def _buy_at(self, amount, session_id):
         self.client.post(
