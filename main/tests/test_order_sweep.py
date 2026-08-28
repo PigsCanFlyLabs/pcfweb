@@ -13,6 +13,7 @@ paid orders that never finished, and pending orders no webhook ever arrived
 for at all.
 """
 
+import contextlib
 from datetime import timedelta
 from io import StringIO
 from unittest import mock
@@ -25,7 +26,7 @@ from django.utils import timezone
 
 from main.models import Order, Product
 from main.tests.base import (
-    EBOOK_PK, REPO_ROOT, BookAssetRootMixin, OrderTestBase,
+    EBOOK_PK, REPO_ROOT, BookAssetRootMixin, OrderTestBase, customer_mail,
 )
 from main.views import StripeWebhookView
 
@@ -35,6 +36,22 @@ def sweep(**options) -> str:
     out = StringIO()
     call_command("sweep_orders", stdout=out, stderr=out, **options)
     return out.getvalue()
+
+
+@contextlib.contextmanager
+def broken_mail(message: str = "SMTP is down"):
+    """Break every way a sale sends mail, not just one of them.
+
+    notify_owner() is on send_mail, while the receipt and the download go
+    through send_sales_email (which also copies the owner). An outage that
+    broke only one of the two would leave half the fulfilment succeeding --
+    not the failure any of these tests is about, and enough to make a
+    "nothing was sent" assertion pass on mail that did go out.
+    """
+    error = OSError(message)
+    with mock.patch("main.models.send_mail", side_effect=error), \
+            mock.patch("main.models.send_sales_email", side_effect=error):
+        yield
 
 
 def backdate(order: Order, **delta) -> Order:
@@ -63,8 +80,7 @@ class WebhookGracefulFailureIsNeverRetriedTest(OrderTestBase):
         self.order = self.place_order(product_pk=100, quantity=1)
 
     def test_a_failed_owner_email_leaves_a_paid_order_stripe_will_not_revisit(self):
-        with mock.patch("main.models.send_mail",
-                        side_effect=OSError("SMTP is down")):
+        with broken_mail():
             with self.assertLogs("main.models", level="ERROR"):
                 response = self.deliver(self.event_body(self.order))
 
@@ -97,8 +113,7 @@ class WebhookGracefulFailureIsNeverRetriedTest(OrderTestBase):
         self.assertIsNone(self.order.notified_at)
 
     def test_the_sweeper_is_what_finally_finishes_it(self):
-        with mock.patch("main.models.send_mail",
-                        side_effect=OSError("SMTP is down")):
+        with broken_mail():
             with self.assertLogs("main.models", level="ERROR"):
                 self.deliver(self.event_body(self.order))
 
@@ -149,7 +164,7 @@ class SweepPaidOrdersTest(OrderTestBase):
         self.order.refresh_from_db()
         self.assertIsNotNone(self.order.receipt_sent_at)
         self.assertEqual(
-            len([m for m in mail.outbox if "Your receipt" in m.subject]), 1)
+            len(customer_mail("Your receipt")), 1)
 
     def test_an_unreconciled_order_is_reconciled(self):
         Order.objects.filter(pk=self.order.pk).update(reconciled_at=None)
@@ -201,8 +216,7 @@ class SweepPaidOrdersTest(OrderTestBase):
     def test_a_still_incomplete_order_is_reported_rather_than_hidden(self):
         Order.objects.filter(pk=self.order.pk).update(notified_at=None)
 
-        with mock.patch("main.models.send_mail",
-                        side_effect=OSError("still down")):
+        with broken_mail("still down"):
             with self.assertLogs("main.models", level="ERROR"):
                 output = sweep()
 
@@ -213,8 +227,7 @@ class SweepPaidOrdersTest(OrderTestBase):
     def test_fail_exits_non_zero_when_something_is_left(self):
         Order.objects.filter(pk=self.order.pk).update(notified_at=None)
 
-        with mock.patch("main.models.send_mail",
-                        side_effect=OSError("still down")):
+        with broken_mail("still down"):
             with self.assertLogs("main.models", level="ERROR"):
                 with self.assertRaises(SystemExit):
                     sweep(fail=True)
@@ -318,8 +331,7 @@ class SweepDigitalOrderTest(BookAssetRootMixin, OrderTestBase):
         self.order = self.place_order(product_pk=EBOOK_PK, quantity=1)
 
     def test_an_undelivered_download_is_delivered_by_the_sweep(self):
-        with mock.patch("main.models.send_mail",
-                        side_effect=OSError("SMTP is down")):
+        with broken_mail():
             with self.assertLogs("main.models", level="ERROR"):
                 self.deliver(self.event_body(self.order))
 
@@ -333,7 +345,7 @@ class SweepDigitalOrderTest(BookAssetRootMixin, OrderTestBase):
         self.order.refresh_from_db()
         self.assertIsNotNone(self.order.digital_delivery_sent_at)
         self.assertEqual(
-            len([m for m in mail.outbox if "Your download" in m.subject]), 1)
+            len(customer_mail("Your download")), 1)
 
     def test_a_physical_order_is_not_waiting_on_a_download(self):
         physical = self.place_order(

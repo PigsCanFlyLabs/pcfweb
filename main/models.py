@@ -20,7 +20,8 @@ from main.digital import (
     site_base_url)
 from main.payments import Payments
 from main.socials import follow_targets
-from main.utils import admin_recipients, normalize_email, smtp_connection
+from main.utils import (
+    admin_recipients, normalize_email, send_sales_email, smtp_connection)
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from easy_thumbnails.files import get_thumbnailer
@@ -2662,12 +2663,10 @@ class Order(models.Model):
             self._record_digital_delivery_failure("; ".join(problems))
             return False
         try:
-            send_mail(
+            send_sales_email(
                 self.digital_delivery_subject(),
                 self.digital_delivery_body(links),
-                settings.DEFAULT_FROM_EMAIL,
                 [self.customer_email],
-                fail_silently=False,
             )
         except Exception as e:
             logger.exception(
@@ -2842,12 +2841,10 @@ class Order(models.Model):
             self._record_receipt_failure(message)
             return False
         try:
-            send_mail(
+            send_sales_email(
                 self.receipt_subject(),
                 self.receipt_body(),
-                settings.DEFAULT_FROM_EMAIL,
                 [self.customer_email],
-                fail_silently=False,
             )
         except Exception as e:
             logger.exception(

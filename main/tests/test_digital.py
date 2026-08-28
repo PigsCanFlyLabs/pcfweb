@@ -23,6 +23,7 @@ from main.models import Cart, CartProduct, Order, OrderItem, Product
 from main.payments import Payments
 from main.tests.base import (
     assert_never_cache_response,
+    customer_mail,
     EBOOK_PK,
     EBOOK_STEM,
     SHIPPING_NOTICE_TEXT,
@@ -465,8 +466,7 @@ class DigitalDeliveryTest(BookAssetRootMixin, OrderTestBase):
     breaks it."""
 
     def customer_emails(self):
-        return [m for m in mail.outbox
-                if "Your download" in m.subject]
+        return customer_mail("Your download")
 
     def buy_the_ebook(self, session_id="cs_ebook"):
         return self.place_order(
@@ -587,7 +587,7 @@ class DigitalDeliveryTest(BookAssetRootMixin, OrderTestBase):
     def test_a_mail_failure_leaves_the_order_paid_and_records_why(self):
         order = self.buy_the_ebook()
 
-        with mock.patch("main.models.send_mail",
+        with mock.patch("main.models.send_sales_email",
                         side_effect=OSError("SMTP is down")):
             with self.assertLogs("main.models", level="ERROR"):
                 response = self.deliver(self.event_body(order))
@@ -668,7 +668,7 @@ class WithheldDigitalDeliveryTest(BookAssetRootMixin, OrderTestBase):
     """
 
     def customer_emails(self):
-        return [m for m in mail.outbox if "Your download" in m.subject]
+        return customer_mail("Your download")
 
     def withhold_the_ebook(self):
         # The mis-set-dropdown scenario: DIGITAL, but no distribution rights.
