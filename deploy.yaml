@@ -93,6 +93,16 @@ data:
   EMAIL_USE_TLS: "false"
   EMAIL_USE_SSL: "true"
   EMAIL_HOST_USER: "support"
+  #
+  # Who gets a copy of the two emails a sale sends the buyer -- the receipt
+  # and the download links. Comma-separated; "" copies nobody. Left unset so
+  # the code default in settings.py applies; write it out only to change it,
+  # which is an edit here plus a pod restart rather than a rebuild. Not
+  # covered by the relay pinning test, deliberately: whose inbox this is
+  # belongs to whoever runs the site. See docs/email.md for why the copy is
+  # its own message rather than a Bcc.
+  #
+  # SALES_COPY_EMAILS: ""
 ---
 apiVersion: apps/v1
 kind: Deployment
