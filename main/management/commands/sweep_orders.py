@@ -37,10 +37,11 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List
 
 import stripe
 from django.core.management.base import BaseCommand
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from main.models import Order
@@ -126,9 +127,9 @@ class Command(BaseCommand):
 
     def handle(self, *args: Any, **options: Any) -> None:
         self.dry_run: bool = options["dry_run"]
-        window_days: int = options["window_days"]
         self.limit: int = options["limit"]
 
+        window_days: int = options["window_days"]
         since = None
         if window_days > 0:
             since = timezone.now() - timedelta(days=window_days)
@@ -186,14 +187,25 @@ class Command(BaseCommand):
 
     def sweep_paid(self, since) -> Dict[str, Any]:
         """Resume fulfilment on paid orders with a marker still empty."""
-        self.start_phase()
         counts: Dict[str, Any] = {
             "found": 0, "fulfilled": 0, "still_incomplete": 0, "skipped": 0,
             "details": [],
         }
         orders = Order.needing_fulfilment()
         if since is not None:
-            orders = orders.filter(created_at__gte=since)
+            # Measured from when the money arrived, not from when the cart
+            # was snapshotted. A delayed payment method settles days after
+            # the order is created -- the async_payment_succeeded delivery is
+            # the whole reason PAID_EVENTS has two members -- so fulfilment
+            # has only been outstanding since paid_at. Windowing on
+            # created_at would put an order that was just paid, but placed a
+            # while ago, permanently outside every sweep: stranded exactly
+            # the way this command exists to prevent. Coalesce covers a row
+            # somehow PAID with no paid_at; needing_fulfilment() returns only
+            # PAID orders, so it should always be set.
+            orders = orders.annotate(
+                outstanding_since=Coalesce("paid_at", "created_at"),
+            ).filter(outstanding_since__gte=since)
 
         # Newest first, which matters only once --limit starts biting. Oldest
         # first spends every run's budget on the same lowest ids, so a pile of
@@ -207,17 +219,26 @@ class Command(BaseCommand):
         # digital_delivery_error and needs a human, not another retry. The old
         # tail still gets swept on the budget the (normally few) newer
         # incomplete orders leave behind.
-        for order in orders.order_by("-pk"):
-            counts["found"] += 1
+        orders = orders.order_by("-pk")
+
+        # Load at most this run's budget of rows, rather than walking the
+        # whole queryset and counting what it would have skipped. Walking it
+        # meant outstanding_fulfilment() -- which reads each order's items --
+        # ran once per matching row, so an SMTP outage with a large backlog
+        # turned a job capped at 200 retries into thousands of queries. The
+        # rest is one COUNT, and the next run picks them up.
+        #
+        # So --limit bounds orders *examined*, not orders retried: a row that
+        # turns out to owe nothing still spends a slot. That is the honest
+        # meaning of a bound on work, and the alternative is the unbounded
+        # scan this replaces.
+        for order in self.take_batch(orders, counts):
             outstanding = order.outstanding_fulfilment()
             if not outstanding:
                 # needing_fulfilment() is a coarser filter than the branch
                 # fulfil_order() actually takes -- an order with a deleted
                 # digital Product is the case in practice -- so the row is
                 # rechecked here rather than claimed and then done nothing to.
-                continue
-            if not self.take_slot():
-                counts["skipped"] += 1
                 continue
             counts["details"].append(
                 f"  order #{order.pk}: {', '.join(outstanding)}")
@@ -242,7 +263,6 @@ class Command(BaseCommand):
 
     def sweep_pending(self, since, after_minutes: int) -> Dict[str, Any]:
         """Ask Stripe about pending orders the webhook never reported on."""
-        self.start_phase()
         counts: Dict[str, Any] = {
             "found": 0, "paid": 0, "expired": 0, "open": 0, "stuck": 0,
             "skipped": 0, "details": [], "paid_order_pks": [],
@@ -254,22 +274,28 @@ class Command(BaseCommand):
         ).exclude(stripe_session_id__isnull=True).exclude(
             stripe_session_id="")
         if since is not None:
+            # created_at, not the Coalesce sweep_paid() uses: a PENDING order
+            # has no paid_at, and how long it has been waiting to be resolved
+            # is exactly how long ago it was placed.
             orders = orders.filter(created_at__gte=since)
 
         webhook = StripeWebhookView()
         # Newest first, for the reason sweep_paid() is: a session that cannot
         # be read at all stays pending forever, and an oldest-first capped run
         # would let a handful of those hide every unrecorded payment since.
-        for order in orders.order_by("-pk"):
-            counts["found"] += 1
+        #
+        # Bounded the same way too. take_batch() is also what gives this
+        # phase its own budget rather than sharing one with sweep_paid(): an
+        # unrecorded payment is the more urgent of the two, so a backlog of
+        # half-finished paid orders must neither spend this phase's budget
+        # nor delay it, which is why this one runs first as well.
+        orders = orders.order_by("-pk")
+        for order in self.take_batch(orders, counts):
             session_id = order.stripe_session_id
             if not session_id:
                 # Excluded by the query above; re-read here so the narrowing
                 # is local to the use, and so a later edit to that filter
                 # cannot quietly start asking Stripe about None.
-                continue
-            if not self.take_slot():
-                counts["skipped"] += 1
                 continue
             try:
                 session = stripe.checkout.Session.retrieve(session_id)
@@ -342,19 +368,16 @@ class Command(BaseCommand):
 
     # ---- bookkeeping ----
 
-    def start_phase(self) -> None:
-        """Give this phase its own --limit, independent of the other's."""
-        self.remaining: Optional[int] = (
-            self.limit if self.limit > 0 else None)
-
-    def take_slot(self) -> bool:
-        """Spend one of this phase's budget, or report it exhausted."""
-        if self.remaining is None:
-            return True
-        if self.remaining <= 0:
-            return False
-        self.remaining -= 1
-        return True
+    def take_batch(self, orders, counts: Dict[str, Any]) -> List[Order]:
+        """This run's slice of `orders`, recording what it did not reach."""
+        if self.limit <= 0:
+            batch = list(orders)
+            counts["found"] = len(batch)
+            return batch
+        batch = list(orders[:self.limit])
+        counts["found"] = orders.count()
+        counts["skipped"] = max(0, counts["found"] - len(batch))
+        return batch
 
     def report(self, paid: Dict[str, Any], pending: Dict[str, Any]) -> None:
         verb = "would resume" if self.dry_run else "resumed"
