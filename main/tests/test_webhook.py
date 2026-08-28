@@ -106,10 +106,14 @@ class WebhookRejectionDiagnosticsTest(OrderTestBase):
 
     The tests above prove a bad delivery is refused. These prove the refusal
     is legible afterwards, which is a different property and the one that
-    matters at 2am: all three causes mean the same thing operationally --
-    no order will ever be marked paid -- and they have completely different
-    fixes. A single "bad signature" line at WARNING was the one log entry
-    that could not answer the question being asked of it.
+    matters at 2am: the three causes have completely different fixes, and a
+    single "bad signature" line was the one log entry that could not answer
+    the question being asked of it.
+
+    All at WARNING. This endpoint is public and unauthenticated, so a
+    rejection is routine scanner traffic until something corroborates it;
+    the ERROR belongs to the order sweep, which can see that Stripe was paid
+    for orders no webhook recorded.
     """
 
     def setUp(self):
@@ -120,7 +124,7 @@ class WebhookRejectionDiagnosticsTest(OrderTestBase):
     def test_a_wrong_secret_names_the_signature_mismatch(self):
         # STRIPE_WEBHOOK_SECRET does not belong to the endpoint that is
         # sending: a rotation, or a test/live mix-up.
-        with self.assertLogs("main.views", level="ERROR") as log:
+        with self.assertLogs("main.views", level="WARNING") as log:
             response = self.deliver(self.body, secret="whsec_not_the_one")
 
         self.assertEqual(response.status_code, 400)
@@ -134,7 +138,7 @@ class WebhookRejectionDiagnosticsTest(OrderTestBase):
         stale = stripe_signature(
             self.body, timestamp=int(time.time()) - 3600)
 
-        with self.assertLogs("main.views", level="ERROR") as log:
+        with self.assertLogs("main.views", level="WARNING") as log:
             response = self.deliver(self.body, signature=stale)
 
         self.assertEqual(response.status_code, 400)
@@ -143,23 +147,31 @@ class WebhookRejectionDiagnosticsTest(OrderTestBase):
 
     def test_a_mangled_header_names_the_header(self):
         # Something between Stripe and here is rewriting Stripe-Signature.
-        with self.assertLogs("main.views", level="ERROR") as log:
+        with self.assertLogs("main.views", level="WARNING") as log:
             response = self.deliver(self.body, signature="not-a-signature")
 
         self.assertEqual(response.status_code, 400)
         self.assertTrue(any("Unable to extract timestamp" in m
                             for m in log.output))
 
-    def test_every_rejection_says_orders_will_not_be_paid(self):
-        # The consequence, spelled out, because the reason on its own does
-        # not say that the store has quietly stopped recording sales.
-        with self.assertLogs("main.views", level="ERROR") as log:
+    def test_a_rejection_never_advances_the_order(self):
+        with self.assertLogs("main.views", level="WARNING"):
             self.deliver(self.body, secret="whsec_not_the_one")
 
-        self.assertTrue(any("No order will be marked paid" in m
-                            for m in log.output))
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PENDING)
+
+    def test_scanner_traffic_cannot_raise_an_alarm(self):
+        """Anyone can POST junk here, so one rejection is not an incident.
+
+        Logging these at ERROR would let unauthenticated traffic fill the
+        error log and fake an outage while real deliveries kept succeeding.
+        """
+        with self.assertNoLogs("main.views", level="ERROR"):
+            for signature in (False, "", "not-a-signature",
+                              "t=1,v1=deadbeef"):
+                response = self.deliver(self.body, signature=signature)
+                self.assertEqual(response.status_code, 400)
 
 
 class WebhookPaymentTest(OrderTestBase):
