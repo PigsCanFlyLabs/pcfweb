@@ -1566,8 +1566,27 @@ class StripeWebhookView(View):
         try:
             event = stripe.Webhook.construct_event(
                 request.body, signature, secret)
-        except stripe.SignatureVerificationError:
-            logger.warning("Rejected a Stripe webhook: bad signature.")
+        except stripe.SignatureVerificationError as e:
+            # Logged at ERROR, with Stripe's own reason, because all three
+            # causes look identical from the outside and every one of them
+            # means orders are silently staying PENDING:
+            #
+            #   * no matching signature -- STRIPE_WEBHOOK_SECRET does not
+            #     belong to the endpoint that is actually sending, which is
+            #     what a rotated secret or a test/live mix-up looks like;
+            #   * timestamp outside the tolerance zone -- the pod clock has
+            #     drifted more than five minutes from Stripe's, so a
+            #     perfectly good secret rejects every delivery;
+            #   * unextractable header -- something between Stripe and here
+            #     is rewriting or stripping Stripe-Signature.
+            #
+            # A bare "bad signature" at WARNING sent all three to the same
+            # unreadable line, so the one question worth asking during an
+            # outage -- which of these is it -- could not be answered from
+            # the logs.
+            logger.error(
+                "Rejected a Stripe webhook: signature verification failed "
+                "(%s). No order will be marked paid until this is fixed.", e)
             return HttpResponseBadRequest("Invalid signature.")
         except ValueError:
             logger.warning("Rejected a Stripe webhook: malformed payload.")
