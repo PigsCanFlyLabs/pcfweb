@@ -2230,6 +2230,65 @@ class Order(models.Model):
     def notification_recipients(self) -> List[str]:
         return admin_recipients()
 
+    # ---- what is still owed on an order ----
+
+    def outstanding_fulfilment(self) -> List[str]:
+        """Which post-payment actions this order has still not completed.
+
+        One list, in the order ``StripeWebhookView.fulfil_order`` runs them,
+        naming exactly the branches that method would take on this row right
+        now. Keeping the answer here rather than re-deriving it at each call
+        site is what stops the sweeper from claiming an order it would then
+        do nothing to, or skipping one that still owes something.
+
+        Empty means the order is finished. It says nothing about whether the
+        finished actions succeeded -- a withheld download is recorded in
+        ``digital_delivery_error`` with the marker still null, so it stays on
+        this list and keeps being retried, which is the intent: somebody paid
+        and has not received.
+        """
+        outstanding = []
+        if self.reconciled_at is None:
+            outstanding.append("line items not reconciled against Stripe")
+        if self.digital_delivery_sent_at is None and self.digital_items():
+            outstanding.append("download not delivered")
+        if self.receipt_sent_at is None and self.customer_email:
+            outstanding.append("receipt not sent")
+        if self.notified_at is None:
+            outstanding.append("owner not notified")
+        return outstanding
+
+    @classmethod
+    def needing_fulfilment(cls) -> "models.QuerySet":
+        """Paid orders with at least one post-payment action still owed.
+
+        The database half of ``outstanding_fulfilment`` above, and it has to
+        stay in step with it: this is what the sweeper pages through, and the
+        method above is what decides whether each row it finds was worth
+        picking up.
+
+        Deliberately *not* filtered on ``fulfilment_claimed_at``. A claim is
+        a fifteen-minute lease held by whichever worker is mid-fulfilment,
+        and ``claim_fulfilment`` already refuses a second one; filtering here
+        as well would only hide live orders from the count the sweeper
+        reports.
+        """
+        has_digital = models.Exists(
+            OrderItem.objects.filter(
+                order=models.OuterRef("pk"),
+                product__delivery_type=Product.DeliveryTypes.DIGITAL))
+        # Not "has_digital_items": that name is already a property on this
+        # model, and Django assigns an annotation straight onto the instance,
+        # which a property with no setter refuses at fetch time.
+        return cls.objects.filter(status=cls.Status.PAID).annotate(
+            sweep_has_digital=has_digital,
+        ).filter(
+            Q(reconciled_at__isnull=True)
+            | Q(notified_at__isnull=True)
+            | Q(digital_delivery_sent_at__isnull=True,
+                sweep_has_digital=True)
+            | (Q(receipt_sent_at__isnull=True) & ~Q(customer_email="")))
+
     # One page is plenty: a line is a distinct product, and the store sells
     # nowhere near this many different things.
     LINE_ITEM_PAGE_SIZE = 100

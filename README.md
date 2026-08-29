@@ -107,6 +107,33 @@ retry for three days:
   `digital_delivery_sent_at` null, and the owner's email says **NOT DELIVERED**
   so it can be resent by hand.
 
+### What retries all that
+
+`StripeWebhookView.fulfil_order` resumes only the actions whose marker is
+still empty, so re-running it repairs a half-finished order without repeating
+what already went out. The thing that *runs* it again is
+`manage.py sweep_orders`, on the `order-sweep` CronJob in `deploy.yaml`
+(hourly).
+
+It has to be a sweeper rather than Stripe's own redelivery, and this is the
+part that is easy to get wrong: **Stripe redelivers a webhook only when the
+delivery failed** — a non-2xx, a timeout, a dropped connection. It does come
+back after a worker is killed mid-fulfilment, because the response never
+completes. It never comes back after any of the graceful failures above,
+because those are answered with a clean 200. Without the sweep the retry
+logic was correct and unreachable for exactly the failures it was written
+for, and an order sat PAID with a null marker until a human noticed.
+
+```sh
+./manage.py sweep_orders --dry-run   # report only
+./manage.py sweep_orders             # do it
+```
+
+`--window-days` bounds how far back it looks (default 30, `0` for all),
+`--limit` caps how many orders one run touches, and `--fail` exits non-zero
+when anything is left unfinished — off by default so one permanently broken
+order does not mark every hourly run red.
+
 A **zero-total** order counts as paid. Stripe creates no PaymentIntent for one,
 so the session reports `payment_status: "no_payment_required"` and can never
 report `"paid"`; the webhook accepts both. This is reachable in practice
