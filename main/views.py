@@ -1566,8 +1566,35 @@ class StripeWebhookView(View):
         try:
             event = stripe.Webhook.construct_event(
                 request.body, signature, secret)
-        except stripe.SignatureVerificationError:
-            logger.warning("Rejected a Stripe webhook: bad signature.")
+        except stripe.SignatureVerificationError as e:
+            # Stripe's own reason, because all three causes look identical
+            # from the outside and each has a completely different fix:
+            #
+            #   * no matching signature -- STRIPE_WEBHOOK_SECRET does not
+            #     belong to the endpoint that is actually sending, which is
+            #     what a rotated secret or a test/live mix-up looks like;
+            #   * timestamp outside the tolerance zone -- the pod clock has
+            #     drifted more than five minutes from Stripe's, so a
+            #     perfectly good secret rejects every delivery;
+            #   * unextractable header -- something between Stripe and here
+            #     is rewriting or stripping Stripe-Signature.
+            #
+            # A bare "bad signature" sent all three to the same unreadable
+            # line, so the one question worth asking during an outage --
+            # which of these is it -- could not be answered from the logs.
+            #
+            # WARNING and not ERROR, deliberately. This URL is public and
+            # unauthenticated by construction: any scanner can POST junk and
+            # land here, so one rejection is evidence of nothing on its own
+            # and must not raise an alarm or fill the error log. What tells
+            # you deliveries have actually stopped is the order sweep, which
+            # finds orders Stripe was paid for that no webhook recorded --
+            # a corroborated, endpoint-wide symptom rather than one bad
+            # request. That is where the ERROR and the mail to ADMINS live;
+            # see `manage.py sweep_orders`.
+            logger.warning(
+                "Rejected a Stripe webhook: signature verification failed "
+                "(%s).", e)
             return HttpResponseBadRequest("Invalid signature.")
         except ValueError:
             logger.warning("Rejected a Stripe webhook: malformed payload.")
