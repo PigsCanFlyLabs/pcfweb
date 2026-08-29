@@ -1259,29 +1259,8 @@ class CheckoutSuccessView(View, BaseCartView):
                 session_id, order.pk, payment_status)
             return
 
-        webhook = StripeWebhookView()
-        fields = webhook.paid_fields(session)
-        with transaction.atomic():
-            Order.objects.select_for_update().filter(pk=order.pk).first()
-            updated = Order.objects.filter(
-                pk=order.pk, status=Order.Status.PENDING).update(**fields)
-
-        if not updated:
-            order.refresh_from_db()
-            if order.status == Order.Status.PAID:
-                logger.info(
-                    "Checkout success page: order #%s was already PAID "
-                    "(likely raced with the webhook); running fulfilment.",
-                    order.pk)
-                webhook.fulfil_order(order)
-            else:
-                logger.info(
-                    "Checkout success page: order #%s is past PENDING; "
-                    "not overwriting.", order.pk)
-            return
-
-        order.refresh_from_db()
-        webhook.fulfil_order(order)
+        StripeWebhookView().pay_and_fulfil(
+            order, session, source="checkout success page")
 
 
 # How long after payment the checkout success page keeps offering the Google
@@ -1632,6 +1611,24 @@ class StripeWebhookView(View):
                 session.get("id"), session.get("client_reference_id"))
             return
 
+        self.pay_and_fulfil(order, session, source="webhook delivery")
+
+    def pay_and_fulfil(self, order: Order, session, source: str) -> None:
+        """Move a PENDING order to PAID from `session`, then fulfil it.
+
+        Two callers arrive here holding the same paid Stripe session -- a
+        webhook delivery and the checkout success page -- and either can be
+        looking at one order at the same moment as the other. The guarded
+        UPDATE below is what lets them race freely: both try to move
+        PENDING -> PAID, exactly one affects a row and goes on to fulfil,
+        and the loser falls through to the already-PAID branch, which
+        resumes whatever fulfilment is still incomplete rather than
+        repeating what is done.
+
+        `source` only ever reaches a log line. It is what answers "what
+        finally paid this order" when the owner goes looking, which matters
+        precisely because the webhook is not always the thing that did.
+        """
         fields = self.paid_fields(session)
         with transaction.atomic():
             # select_for_update serialises concurrent deliveries on Postgres;
@@ -1647,14 +1644,15 @@ class StripeWebhookView(View):
             order.refresh_from_db()
             if order.status == Order.Status.PAID:
                 logger.info(
-                    "Order #%s is already PAID; retrying incomplete "
-                    "fulfilment for Stripe session %s.",
-                    order.pk, session.get("id"))
+                    "Order #%s is already PAID (reached by %s); retrying "
+                    "incomplete fulfilment for Stripe session %s.",
+                    order.pk, source, session.get("id"))
                 self.fulfil_order(order)
                 return
             logger.info(
-                "Order #%s is already past PENDING; ignoring a duplicate "
-                "delivery of Stripe session %s.", order.pk, session.get("id"))
+                "Order #%s is already past PENDING (reached by %s); not "
+                "overwriting it from Stripe session %s.",
+                order.pk, source, session.get("id"))
             return
 
         order.refresh_from_db()
