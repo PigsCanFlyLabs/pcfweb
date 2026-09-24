@@ -35,4 +35,4 @@ python -m mypy -p main -p pigscanfly
 ./manage.py test main
 ./manage.py validate_templates --ignore-app newsletter
 # Kubernetes manifests parse.
-python3 -c "import yaml; list(yaml.safe_load_all(open('pg-bootstrap.yaml'))); list(yaml.safe_load_all(open('deploy.yaml')))"
+python3 -c "import yaml; [list(yaml.safe_load_all(open(f))) for f in ('pg-bootstrap.yaml', 'pg-alerts.yaml', 'deploy.yaml')]"

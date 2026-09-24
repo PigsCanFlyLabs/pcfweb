@@ -6,3 +6,8 @@ db.sqlite3-journal
 sent_emails
 .venv
 geoip
+# Not needed at runtime: the test suite, bytecode caches and repo metadata.
+main/tests
+**/__pycache__
+docs
+.github

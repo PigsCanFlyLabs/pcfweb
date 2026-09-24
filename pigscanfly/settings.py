@@ -9,7 +9,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 import os
 
-from typing import *
+from typing import List, Optional, Tuple
 
 from pathlib import Path
 
@@ -370,7 +370,7 @@ class Base(Configuration):
     # timeout: a hung Stripe connection would get the worker killed rather
     # than returning an error the view could handle. Keep this comfortably
     # under GUNICORN_TIMEOUT (see scripts/start-server.sh).
-    STRIPE_TIMEOUT = int(os.getenv("STRIPE_TIMEOUT", "15"))
+    STRIPE_TIMEOUT = parse_int(os.getenv("STRIPE_TIMEOUT"), 15)
 
     # Stripe Checkout shipping rates offered for physical goods, most
     # permissive first.
@@ -685,6 +685,33 @@ class Prod(Base):
     # planned pigscanfly.ca subdomain serves HTTPS; preload is effectively
     # irreversible.
     SECURE_HSTS_SECONDS = 3600
+
+    # Without a LOGGING setting nothing below WARNING reached the pod log at
+    # all -- the app's own logger.info lines (a held checkout, a blocked
+    # sale, a skipped fulfilment claim) went nowhere, and WARNING and up only
+    # arrived through Python's last-resort handler. One stdout handler on
+    # the root logger, so `kubectl logs` shows them; Django's defaults
+    # (including the ERROR mail to ADMINS) stay in place underneath.
+    LOGGING = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "plain": {
+                "format": "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            },
+        },
+        "handlers": {
+            "stdout": {
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+                "formatter": "plain",
+            },
+        },
+        "root": {
+            "handlers": ["stdout"],
+            "level": os.getenv("LOG_LEVEL", "INFO"),
+        },
+    }
     # www.pigscanfly.ca is the canonical host: it is what SITE_BASE_URL says,
     # what the sites-framework row says (migration 0024), and therefore what
     # every emailed link carries. The bare apex currently resolves to the old
@@ -795,7 +822,7 @@ class Prod(Base):
     # refuse AUTH. If the mail server turns out not to listen on 465, the
     # flip is port 587 with EMAIL_USE_TLS on and EMAIL_USE_SSL off
     # (STARTTLS submission) -- in the ConfigMap, not here.
-    EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465"))
+    EMAIL_PORT = parse_int(os.getenv("EMAIL_PORT"), 465)
     # STARTTLS on a plaintext port versus TLS from the first byte (SMTPS,
     # port 465). At most one may be on; pre_setup fails the rollout on the
     # pair rather than letting Django's backend raise at send time -- which
@@ -814,7 +841,7 @@ class Prod(Base):
     # (check_book_assets), where it would eat into build.sh's 300s rollout
     # budget. Mail that cannot be sent in ten seconds is mail that is not
     # getting sent; every caller already catches the failure and records it.
-    EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
+    EMAIL_TIMEOUT = parse_int(os.getenv("EMAIL_TIMEOUT"), 10)
     EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "support")
     # Empty disables SMTP AUTH altogether -- Django only authenticates when
     # both user and password are non-empty -- which is the right degradation

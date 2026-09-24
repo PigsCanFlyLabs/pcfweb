@@ -121,6 +121,9 @@ spec:
       labels:
         app: web-primary
     spec:
+      # The app never talks to the Kubernetes API, so it gets no token to
+      # talk to it with.
+      automountServiceAccountToken: false
       containers:
         - image: holdenk/pcfweb:v0.13.6
           name: pcfweb
@@ -141,6 +144,11 @@ spec:
           ports:
             - containerPort: 80
               name: web
+          # nginx and gunicorn still start as root (to bind :80 and then drop
+          # their workers to www-data), which setuid() allows without
+          # privilege escalation; nothing in the image needs a setuid binary.
+          securityContext:
+            allowPrivilegeEscalation: false
           resources:
             requests:
               cpu: 100m
@@ -152,7 +160,10 @@ spec:
           # plain-HTTP request with a 301 before any database access, and
           # Kubernetes counts a 3xx as success. The Host override is because
           # the kubelet otherwise sends the pod IP, which ALLOWED_HOSTS
-          # rejects. See main/middleware.py.
+          # rejects. See main/middleware.py. timeoutSeconds is 5 rather than
+          # the default 1 because the probe waits on that query, and the
+          # database's own connect_timeout (settings.py) is 5 -- a one-second
+          # probe flapped readiness whenever Postgres was merely slow.
           livenessProbe:
             httpGet:
               httpHeaders:
@@ -161,6 +172,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 180
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               httpHeaders:
@@ -169,6 +181,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 10
+            timeoutSeconds: 5
           startupProbe:
             httpGet:
               httpHeaders:
@@ -177,6 +190,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 30
 ---
 apiVersion: apps/v1
@@ -196,6 +210,7 @@ spec:
       labels:
         app: pcfweb
     spec:
+      automountServiceAccountToken: false
       # web-primary applies the migrations, but both Deployments roll at the
       # same time, so these pods would otherwise start serving new code
       # against the old schema until it caught up. Block here instead: the
@@ -251,6 +266,11 @@ spec:
           ports:
             - containerPort: 80
               name: web
+          # nginx and gunicorn still start as root (to bind :80 and then drop
+          # their workers to www-data), which setuid() allows without
+          # privilege escalation; nothing in the image needs a setuid binary.
+          securityContext:
+            allowPrivilegeEscalation: false
           resources:
             requests:
               cpu: 100m
@@ -267,6 +287,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 180
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               httpHeaders:
@@ -275,6 +296,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 10
+            timeoutSeconds: 5
           startupProbe:
             httpGet:
               httpHeaders:
@@ -283,6 +305,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 30
 ---
 apiVersion: v1
