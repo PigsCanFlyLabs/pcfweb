@@ -318,11 +318,11 @@ class PwywCheckoutShapeTest(TestCase):
             name="PWYW poster", external_product_id="prod_pwyw_poster",
             price=2500, is_pwyw=True)
 
-    def _checkout(self, cart, coupon=None):
+    def _checkout(self, cart):
         with mock.patch("main.payments.stripe.checkout.Session.create") as create:
             create.return_value = mock.Mock(
                 url="https://checkout.example/s", id="cs_x")
-            Payments.checkout(self.factory.get("/checkout"), cart, coupon=coupon)
+            Payments.checkout(self.factory.get("/checkout"), cart)
         return create.call_args.kwargs
 
     def test_a_pwyw_line_now_carries_adjustable_quantity(self):
@@ -385,14 +385,13 @@ class PwywCheckoutShapeTest(TestCase):
 
         self.assertEqual(len(params["line_items"]), 2)
 
-    def test_a_coupon_survives_to_stripe_on_a_pwyw_cart(self):
+    def test_promotion_codes_are_offered_on_a_pwyw_cart(self):
         # Was: "You cannot enable discounts when using a price with
         # `custom_unit_amount` configured." The coupon used to be stripped and
         # the buyer told why.
-        params = self._checkout(
-            self._cart((self._pwyw(), 1)), coupon="coupon_sale")
+        params = self._checkout(self._cart((self._pwyw(), 1)))
 
-        self.assertEqual(params["discounts"], [{"coupon": "coupon_sale"}])
+        self.assertIs(params["allow_promotion_codes"], True)
 
     def test_a_pwyw_product_may_ride_in_a_subscription_mode_session(self):
         # The session mode is a property of the whole cart, so one
@@ -1186,18 +1185,26 @@ class ZeroCheckoutFailsGracefullyTest(CartTestBase):
         self.assertFalse(
             Order.objects.filter(status=Order.Status.PENDING).exists())
 
-    def test_a_failed_paid_checkout_still_raises(self):
-        # CONTROL -- passes on 3090eab too. Unchanged, and deliberately
-        # so: a paid order failing is a payment problem the buyer can act
-        # on, and swallowing it would hide a real outage behind a
-        # friendly sentence. Only the zero-total path is made graceful.
+    def test_a_failed_paid_checkout_lands_on_the_cart_and_mails_admins(self):
+        # Was a 500, deliberately, so that a real outage could not hide
+        # behind a friendly sentence. It still cannot: the failure is mailed
+        # to ADMINS explicitly (what Django's 500 mail used to carry) and
+        # logged at ERROR. The buyer gets their cart back instead of a stack
+        # trace.
         self.client.post(
             f"/add-to-cart/{EBOOK_PK}/1", {"chosen_amount": "5.00"})
         with mock.patch("main.payments.stripe.checkout.Session.create",
                         side_effect=RuntimeError("Stripe is down")):
             with self.assertLogs("main.views", level="ERROR"):
-                with self.assertRaises(RuntimeError):
-                    self.client.post("/checkout")
+                response = self.client.post("/checkout", follow=True)
+
+        self.assertRedirects(response, "/cart")
+        self.assertContains(response, "could not start checkout")
+        self.assertNotContains(response, "would not set up this free order")
+        alerts = [m for m in mail.outbox
+                  if "Stripe checkout failed" in m.subject]
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("Stripe is down", alerts[0].body)
 
 
 class PwywAmountSurvivesACartMergeTest(CartTestBase):

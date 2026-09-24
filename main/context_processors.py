@@ -36,3 +36,8 @@ def free_shipping(request) -> Dict[str, Any]:
             f"{threshold // 100}" if threshold % 100 == 0
             else f"{threshold / 100:.2f}"),
     }
+
+
+def support_email(request) -> Dict[str, Any]:
+    """The customer-facing contact address, from settings.SUPPORT_EMAIL."""
+    return {"support_email": settings.SUPPORT_EMAIL}

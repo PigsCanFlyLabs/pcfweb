@@ -194,6 +194,7 @@ class Base(Configuration):
                     'django.contrib.auth.context_processors.auth',
                     'django.contrib.messages.context_processors.messages',
                     'main.context_processors.free_shipping',
+                    'main.context_processors.support_email',
                 ],
             },
         },
@@ -435,10 +436,15 @@ class Base(Configuration):
     DISCORD_INVITE_PART_TWO = parse_invite_half(
         os.getenv("DISCORD_INVITE_PART_TWO", "2HAmb"))
 
+    # The address the site tells customers to write to -- contact, returns,
+    # the policy pages, checkout trouble. One setting rather than a dozen
+    # copies typed into templates, reaching them through
+    # main.context_processors.support_email.
+    SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "support@pigscanfly.ca")
+
     # Where to write when the invite is broken, expired, or the halves are
     # misconfigured -- the fallback path off /discord.
-    DISCORD_SUPPORT_EMAIL = os.getenv(
-        "DISCORD_SUPPORT_EMAIL", "support@pigscanfly.ca")
+    DISCORD_SUPPORT_EMAIL = os.getenv("DISCORD_SUPPORT_EMAIL", SUPPORT_EMAIL)
 
     # SOCIAL ACCOUNTS
     # Where "follow along" points: one variable per account holder per

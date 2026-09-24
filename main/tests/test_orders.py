@@ -57,32 +57,22 @@ class CheckoutCreatesOrderTest(OrderTestBase):
         self.assertEqual(kwargs["client_reference_id"], str(order.pk))
         self.assertEqual(kwargs["metadata"], {"order_id": str(order.pk)})
 
-    def test_the_invalid_coupon_retry_differs_only_by_the_discount(self):
-        # The retry is a copy of the single parameter dict minus "discounts",
-        # so the order id rides along by construction. Pinned because a
-        # version that rebuilt the retry parameters separately would silently
-        # drop it -- and would also let the two paths drift apart on tax,
-        # which is what CheckoutTaxTest guards from the other side.
+    def test_promotion_codes_are_entered_on_stripe_not_posted_here(self):
+        # The cart used to post a free-text coupon that went straight to
+        # Stripe as discounts=[{"coupon": ...}], so any coupon id on the
+        # account -- internal ones included -- worked for anyone who guessed
+        # it. A posted value is now ignored, and Stripe's page takes
+        # customer-facing promotion codes instead.
         self.client.post("/add-to-cart/100/1")
         with mock.patch("main.payments.stripe.checkout.Session.create") as create:
-            create.side_effect = [
-                stripe.InvalidRequestError(
-                    "No such coupon", "discounts[0][coupon]"),
-                mock.Mock(url="https://checkout.example/session",
-                          id="cs_after_retry"),
-            ]
-            self.client.post("/checkout", {"coupon": "coupon_bad"})
+            create.return_value = mock.Mock(
+                url="https://checkout.example/session", id="cs_promo")
+            self.client.post("/checkout", {"coupon": "INTERNAL100"})
 
-        order = Order.objects.get()
-        first, retry = [call.kwargs for call in create.call_args_list]
-        self.assertEqual(first["discounts"], [{"coupon": "coupon_bad"}])
-        self.assertNotIn("discounts", retry)
-        self.assertEqual(
-            {k: v for k, v in first.items() if k != "discounts"}, retry)
-        for params in (first, retry):
-            self.assertEqual(params["client_reference_id"], str(order.pk))
-            self.assertEqual(params["metadata"], {"order_id": str(order.pk)})
-        self.assertEqual(order.stripe_session_id, "cs_after_retry")
+        params = create.call_args.kwargs
+        self.assertNotIn("discounts", params)
+        self.assertIs(params["allow_promotion_codes"], True)
+        self.assertEqual(create.call_count, 1)
 
     def test_an_empty_cart_checkout_lands_on_an_explanation(self):
         response = self.client.post("/checkout", follow=True)
@@ -150,26 +140,19 @@ class CheckoutCreatesOrderTest(OrderTestBase):
         order = Order.objects.get(stripe_session_id="cs_bundle")
         self.assertEqual(order.items.count(), 2)
 
-    def test_a_pwyw_coupon_reaches_stripe_instead_of_being_stripped(self):
-        # Was: the coupon was dropped and the buyer told why, because Stripe
-        # refuses discounts on a custom_unit_amount price. Verified against
-        # the live test API that a fixed price accepts one.
+    def test_a_pwyw_cart_still_offers_promotion_codes(self):
+        # Was: discounts were refused on a custom_unit_amount price. Verified
+        # against the live test API that a fixed price accepts one, so a
+        # pay-what-you-want cart gets the same promotion code field.
         self.client.post("/add-to-cart/106/1")
         with mock.patch("main.payments.stripe.checkout.Session.create") as create:
             create.return_value = mock.Mock(
                 url="https://checkout.stripe.com/c/pay/cs_coupon",
                 id="cs_coupon")
-            response = self.client.post("/checkout", {"coupon": "coupon_sale"})
+            response = self.client.post("/checkout")
 
         self.assertEqual(response.status_code, 302)
-        params = create.call_args.kwargs
-        self.assertEqual(params["discounts"], [{"coupon": "coupon_sale"}])
-        order = Order.objects.get(stripe_session_id="cs_coupon")
-        success = self.client.get(
-            f"/checkout/success?session_id={order.stripe_session_id}")
-        self.assertNotContains(
-            success,
-            "code was removed and checkout will continue without it")
+        self.assertIs(create.call_args.kwargs["allow_promotion_codes"], True)
 
     def test_the_checkout_pages_still_render_a_queued_message(self):
         """A message queued before the redirect to Stripe is shown on return.
@@ -210,8 +193,7 @@ class CheckoutCreatesOrderTest(OrderTestBase):
         with mock.patch("main.payments.stripe.checkout.Session.create",
                         side_effect=RuntimeError("Stripe is down")):
             with self.assertLogs("main.views", level="ERROR"):
-                with self.assertRaises(RuntimeError):
-                    self.client.post("/checkout")
+                self.client.post("/checkout")
 
         order = Order.objects.get()
         self.assertEqual(order.status, Order.Status.CANCELLED)
@@ -224,8 +206,7 @@ class CheckoutCreatesOrderTest(OrderTestBase):
         with mock.patch("main.payments.stripe.checkout.Session.create",
                         side_effect=RuntimeError("Stripe is down")):
             with self.assertLogs("main.views", level="ERROR"):
-                with self.assertRaises(RuntimeError):
-                    self.client.post("/checkout")
+                self.client.post("/checkout")
         order = Order.objects.get()
 
         response = self.deliver(self.event_body(order, id="cs_ghost"))
@@ -233,8 +214,8 @@ class CheckoutCreatesOrderTest(OrderTestBase):
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.CANCELLED)
-        # Not assertEqual(outbox, 0): configuring ADMINS also turns on
-        # Django's own 500 mail, and the failed checkout above sent one.
+        # Not assertEqual(outbox, 0): the failed checkout above mailed
+        # ADMINS about the Stripe outage.
         self.assertEqual(self.order_emails(), [])
 
     def test_multiple_cart_lines_are_all_snapshotted(self):

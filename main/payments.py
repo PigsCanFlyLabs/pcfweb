@@ -9,11 +9,6 @@ from django.urls import reverse
 logger = logging.getLogger(__name__)
 TaxBehavior = Literal["exclusive", "inclusive", "unspecified"]
 
-COUPON_ERROR_CODES = {
-    "coupon_expired",
-    "promotion_code_customer_missing_first_time",
-    "promotion_code_customer_not_first_time",
-}
 TAX_CONFIGURATION_ERROR = (
     "Stripe automatic tax checkout failed. Stripe Tax must be activated in "
     "the Stripe Dashboard with an origin address set, and tax behavior/codes "
@@ -188,11 +183,11 @@ class Payments:
     # custom_unit_amount. It no longer has one. Verified against the live test
     # API: a fixed Price at the buyer's chosen amount is accepted in a session
     # with a second line item, with quantity 3, with adjustable_quantity, with
-    # a coupon, and as a recurring price in subscription mode. The refusals
+    # a discount, and as a recurring price in subscription mode. The refusals
     # went with the constraint that caused them.
 
     @classmethod
-    def checkout(cls, request, cart, coupon=None, order=None):
+    def checkout(cls, request, cart, order=None):
         """Start a Stripe Checkout session; returns (url, session_id).
 
         `order` is the local PENDING order this session is paying for. Its id
@@ -210,9 +205,14 @@ class Payments:
                 'adjustable_quantity': {"enabled": True},
             }
             items.append(item)
-        extras = {}
-        if coupon is not None:
-            extras["discounts"] = [{"coupon": coupon}]
+        # Discounts are entered on Stripe's own page, as promotion codes.
+        # The cart used to take a free-text box and pass it straight through
+        # as `discounts=[{"coupon": ...}]`, which applied *any* coupon id on
+        # the account -- including internal ones never meant to be public --
+        # to anyone who guessed its name. A promotion code is the customer-
+        # facing handle Stripe built for exactly this, and each one can carry
+        # its own limits (first-time only, max redemptions, expiry).
+        extras = {"allow_promotion_codes": True}
         mode = "subscription"
         product_modes = [cart_product.product.mode for cart_product in products]
         if all(m == Product.Modes.PAYMENT for m in product_modes):
@@ -299,7 +299,6 @@ class Payments:
                 "billing_address_collection": "required",
             })
 
-        # Fall back for invalid coupons
         try:
             checkout = stripe.checkout.Session.create(**session_params)
             return checkout.url, checkout.id
@@ -331,23 +330,7 @@ class Payments:
                     json_body=error.json_body,
                     headers=error.headers,
                 ) from error
-            # Only retry when a coupon could have been the problem.
-            if "discounts" not in session_params or not cls._is_coupon_error(error):
-                raise
-            retry_params = {**session_params}
-            retry_params.pop("discounts", None)
-            checkout = stripe.checkout.Session.create(**retry_params)
-            return checkout.url, checkout.id
-
-    @staticmethod
-    def _is_coupon_error(error: stripe.InvalidRequestError) -> bool:
-        param = error.param or ""
-        code = error.code or ""
-        if "coupon" in param or "discount" in param:
-            return True
-        if code in COUPON_ERROR_CODES:
-            return True
-        return code == "resource_missing" and not param
+            raise
 
     @staticmethod
     def _is_tax_configuration_error(error: stripe.InvalidRequestError) -> bool:

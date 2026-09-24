@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import traceback
 from datetime import timedelta
 from urllib.parse import quote, urlparse
 
@@ -47,7 +48,8 @@ from main.models import (
 from main.payments import Payments
 from main.socials import LIBERATED_BREAD_URL, follow_targets
 from main.utils import (
-    generate_username, get_country_code, get_storable_client_ip)
+    email_admins, generate_username, get_country_code,
+    get_storable_client_ip)
 from pigscanfly.hostnames import ascii_lowercase
 
 logger = logging.getLogger(__name__)
@@ -1083,10 +1085,9 @@ class CheckoutView(View, BaseCartView):
     # side effect, which an <img> tag or a link prefetch could trigger
     # cross-site with no CSRF token involved. cart.html posts a real form.
     def post(self, request):
-        coupon = request.POST.get("coupon") or None
-        return self.start_checkout(request, coupon=coupon)
+        return self.start_checkout(request)
 
-    def start_checkout(self, request, coupon=None):
+    def start_checkout(self, request):
         """Record the order, then hand the customer to Stripe.
 
         The PENDING order has to exist *before* Session.create, because its id
@@ -1147,8 +1148,7 @@ class CheckoutView(View, BaseCartView):
         # and the session created.
         #
         # This is the security boundary for the whole feature. Nothing posted
-        # to this endpoint is consulted -- `request.POST` is read for the
-        # coupon and for nothing else -- so an amount injected at /checkout,
+        # to this endpoint is consulted -- so an amount injected at /checkout,
         # or a Price minted for an amount that has since been edited, cannot
         # decide what the buyer is charged. The database row does.
         for cart_product in cart.products.select_related("product"):
@@ -1157,7 +1157,7 @@ class CheckoutView(View, BaseCartView):
         order = Order.create_from_cart(cart, user=user)
         try:
             redirect_url, session_id = Payments.checkout(
-                request, cart, coupon=coupon, order=order)
+                request, cart, order=order)
         except Exception:
             # No session was ever created, so nothing will ever arrive for
             # this order -- not even checkout.session.expired. Close it out
@@ -1168,23 +1168,35 @@ class CheckoutView(View, BaseCartView):
             Order.objects.filter(
                 pk=order.pk, status=Order.Status.PENDING).update(
                     status=Order.Status.CANCELLED)
+            # Back to the cart with a sentence, never a 500. A stack trace
+            # gives the buyer nothing to act on, and the cart they were about
+            # to pay for is still there to retry. What the 500 used to carry
+            # -- Django's error mail to ADMINS -- is sent explicitly instead,
+            # because a failure here is almost always configuration (tax,
+            # shipping rates, a rotated key) that breaks every checkout until
+            # the owner fixes it.
+            email_admins(
+                f"Stripe checkout failed for order #{order.pk}",
+                traceback.format_exc(), logger,
+                f"Stripe checkout failed for order #{order.pk}")
             if order.amount_total == 0:
                 # "If Stripe is being difficult with $0" -- the owner's clause,
                 # and a requirement rather than a joke. A zero-total session is
                 # the one shape of this feature with no payment behind it, so a
                 # buyer who hits a Stripe problem here has nothing to retry and
-                # no other way through. A 500 would leave a kid staring at a
-                # stack trace with the book unbought; send them back to the
-                # cart, where the owner's notice carries the mailto, and say to
-                # use it. Every other failure still raises, because those are
-                # payment problems the buyer can act on.
+                # no other way through; say to use the e-mail instead.
                 messages.error(
                     request,
                     "Sorry -- Stripe would not set up this free order. "
                     "Please e-mail holden@pigscanfly.ca and we can send you a "
                     "copy directly.")
-                return redirect('cart')
-            raise
+            else:
+                messages.error(
+                    request,
+                    "Sorry -- we could not start checkout just now. Your cart "
+                    "is unchanged; please try again in a few minutes, or "
+                    f"e-mail {settings.SUPPORT_EMAIL} if it keeps happening.")
+            return redirect('cart')
         order.stripe_session_id = session_id
         order.save(update_fields=['stripe_session_id', 'updated_at'])
         return redirect(redirect_url)
