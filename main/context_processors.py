@@ -40,4 +40,4 @@ def free_shipping(request) -> Dict[str, Any]:
 
 def support_email(request) -> Dict[str, Any]:
     """The customer-facing contact address, from settings.SUPPORT_EMAIL."""
-    return {"support_email": settings.SUPPORT_EMAIL}
+    return {"support_email": settings.SUPPORT_EMAIL}  # type: ignore[misc]

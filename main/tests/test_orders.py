@@ -267,6 +267,27 @@ class CheckoutSuccessPageTest(OrderTestBase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(CartProduct.objects.exists())
 
+    def test_reloading_the_success_page_keeps_what_was_added_since(self):
+        order = self.place_order()
+        url = f"/checkout/success?session_id={order.stripe_session_id}"
+        self.client.get(url)
+        self.client.post("/add-to-cart/101/1")
+
+        self.client.get(url)
+
+        self.assertTrue(CartProduct.objects.filter(product_id=101).exists())
+
+    def test_someone_elses_session_id_does_not_clear_this_cart(self):
+        # A link carrying another buyer's session id used to empty the
+        # cart of whoever opened it.
+        order = self.place_order()
+        stranger = Client()
+        stranger.post("/add-to-cart/101/1")
+
+        stranger.get(f"/checkout/success?session_id={order.stripe_session_id}")
+
+        self.assertTrue(CartProduct.objects.filter(product_id=101).exists())
+
     def test_loading_the_success_page_does_not_pay_the_order(self):
         order = self.place_order()
 

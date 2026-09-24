@@ -2035,6 +2035,14 @@ class Order(models.Model):
         from, so the snapshot and the Stripe line items come from one list.
         """
         cart_products = list(cart.products.select_related('product'))
+        # One transaction, so a failure between the two inserts cannot leave
+        # a PENDING order with no line items -- an order the webhook would
+        # later mark paid with nothing to fulfil.
+        with transaction.atomic():
+            return cls._create_snapshot(cart_products, user)
+
+    @classmethod
+    def _create_snapshot(cls, cart_products, user) -> "Order":
         order = cls.objects.create(
             user=user,
             status=cls.Status.PENDING,

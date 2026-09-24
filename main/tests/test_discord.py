@@ -102,6 +102,13 @@ class DiscordJoinPageTest(TestCase):
         self.assertNotContains(response, PART_TWO)
         self.assertContains(response, "captcha_answer")
 
+    def test_a_superscript_digit_is_a_wrong_answer_not_a_500(self):
+        # "²".isdigit() is True but int("²") raises ValueError.
+        self.client.get("/discord")
+        response = self.client.post("/discord", {"captcha_answer": "²"})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, PART_TWO)
+
     def test_a_wrong_answer_gets_a_fresh_question(self):
         # The old one is spent; without a replacement the page would be a
         # dead end for anyone who mistyped.

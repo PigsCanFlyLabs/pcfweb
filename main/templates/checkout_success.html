@@ -38,7 +38,7 @@
                 {% else %}
                     {% if order.has_digital_items %}
                         Check your email for your download link. The link works
-                        for 7 days &mdash; save a copy.
+                        for {{ link_lifetime_days }} day{{ link_lifetime_days|pluralize }} &mdash; save a copy.
                     {% endif %}
                 {% endif %}
                 If you do not hear from us, write to

@@ -5,6 +5,7 @@ the interesting cases are all the ones a browser would normally prevent.
 """
 
 from django.contrib.auth.models import User
+from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from django.test import TestCase, override_settings
 from unittest import mock
@@ -177,3 +178,93 @@ class LoginValidationTest(TestCase):
             "/login", {"email": "nobody@example.com", "password": "x"})
 
         self.assertIn("valid=false", response["Location"])
+
+
+@override_settings(THUMBNAIL_DEBUG=False)
+class AccountHardeningTest(TestCase):
+    """Password rules, attempt throttles, ?next= and POST-only logout."""
+
+    def setUp(self):
+        # The throttles count in the cache, which outlives a test.
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+    def _user(self, email="person@example.com", password="hunter2hunter2"):
+        user = User.objects.create(username=email.split("@")[0], email=email)
+        user.set_password(password)
+        user.save()
+        return user
+
+    def test_signup_applies_the_configured_password_validators(self):
+        # AUTH_PASSWORD_VALIDATORS used to be configured and never called.
+        response = self.client.post(
+            "/signup", {"email": "a@example.com", "password": "12345"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "too short", status_code=400)
+        self.assertFalse(User.objects.filter(email="a@example.com").exists())
+        self.assertFalse(EmailIdentity.objects.exists())
+
+    def test_signup_is_throttled_per_source(self):
+        from main.views import SIGNUP_ATTEMPTS_PER_HOUR
+        for i in range(SIGNUP_ATTEMPTS_PER_HOUR):
+            self.client.post("/signup", {"email": f"x{i}@example.com"})
+
+        response = self.client.post(
+            "/signup", {"email": "late@example.com",
+                        "password": "hunter2hunter2"})
+
+        self.assertIn("invalid=throttled", response["Location"])
+        self.assertFalse(User.objects.filter(email="late@example.com").exists())
+
+    def test_login_is_throttled_per_email_even_with_the_right_password(self):
+        from main.views import LOGIN_ATTEMPTS_PER_HOUR_PER_EMAIL
+        self._user()
+        for _ in range(LOGIN_ATTEMPTS_PER_HOUR_PER_EMAIL):
+            self.client.post(
+                "/login", {"email": "person@example.com", "password": "nope"})
+
+        response = self.client.post(
+            "/login",
+            {"email": "person@example.com", "password": "hunter2hunter2"})
+
+        self.assertIn("valid=throttled", response["Location"])
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_login_follows_a_local_next(self):
+        self._user()
+        response = self.client.post(
+            "/login", {"email": "person@example.com",
+                       "password": "hunter2hunter2", "next": "/cart"})
+
+        self.assertRedirects(response, "/cart", fetch_redirect_response=False)
+
+    def test_login_ignores_an_offsite_next(self):
+        self._user()
+        response = self.client.post(
+            "/login", {"email": "person@example.com",
+                       "password": "hunter2hunter2",
+                       "next": "https://evil.example/"})
+
+        self.assertRedirects(response, "/")
+
+    def test_the_login_page_carries_next_into_the_form(self):
+        response = self.client.get("/login?next=/cart")
+
+        self.assertContains(response, 'name="next" value="/cart"')
+
+    def test_logout_by_get_does_not_log_out(self):
+        self.client.force_login(self._user())
+
+        response = self.client.get("/logout")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("_auth_user_id", self.client.session)
+
+    def test_logout_by_post_logs_out(self):
+        self.client.force_login(self._user())
+
+        response = self.client.post("/logout")
+
+        self.assertRedirects(response, "/login")
+        self.assertNotIn("_auth_user_id", self.client.session)

@@ -9,6 +9,7 @@ from typing import *
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.password_validation import validate_password
 from django.contrib.admin.views.decorators import staff_member_required
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
@@ -245,7 +246,7 @@ class TosView(View):
 
 class ReturnView(View):
     def get(self, request):
-        return render(request, 'return.html', context={'title': 'TOS'})
+        return render(request, 'return.html', context={'title': 'Returns'})
 
 class ContactView(View):
     def get(self, request):
@@ -343,7 +344,7 @@ class ProductsView(View):
         if "category" not in request.GET and category is None:
             return render(request, 'products.html', context={
                 'title': 'Products',
-                'type': 'producs',
+                'type': 'Products',
                 'products': (Product.objects.exclude(noorder=True)
                              .order_by_release_date()
                              .collapse_format_groups())
@@ -364,7 +365,9 @@ class ProductsView(View):
             extra_style = None
             bg_img_name = f"assets/images/{cat_name}.jpg".lower()
             if finders.find(f"{bg_img_name}"):
-                extra_style = f"background-image: url('/static/{bg_img_name}');"
+                extra_style = (
+                    "background-image: "
+                    f"url('{staticfiles_storage.url(bg_img_name)}');")
             return render(request, 'products.html', context={
                 'title': f'Products - {cat_name}',
                 'type': cat_name,
@@ -831,6 +834,18 @@ class BaseCartView():
                 "Merge repriced %s on cart %s; holding checkout until the "
                 "cart has been shown.", ", ".join(repriced), user_cart.pk)
 
+# Per-hour attempt ceilings for the account forms, per client address (and,
+# for login, per address being tried). Generous enough that a person who
+# forgets a password never meets them; low enough that a password list does.
+SIGNUP_ATTEMPTS_PER_HOUR = 20
+LOGIN_ATTEMPTS_PER_HOUR_PER_SOURCE = 30
+LOGIN_ATTEMPTS_PER_HOUR_PER_EMAIL = 10
+
+
+def _source_key(request) -> str:
+    return get_storable_client_ip(request) or "unparseable-source"
+
+
 class SignupView(View):
     def get(self, request):
         in_use = request.GET.get('in_use', 'false')
@@ -839,6 +854,9 @@ class SignupView(View):
             'title': 'Sign Up', 'in_use': in_use, 'invalid': invalid})
 
     def post(self, request):
+        if over_cache_limit(
+                f"signup:{_source_key(request)}", SIGNUP_ATTEMPTS_PER_HOUR):
+            return redirect(reverse('signup') + '?invalid=throttled')
         # Both are required. Missing values used to reach generate_username()
         # as None and 500 on the AttributeError, and a missing password
         # reached set_password(None), which silently creates an account with
@@ -851,6 +869,16 @@ class SignupView(View):
             validate_email(email)
         except ValidationError:
             return redirect(reverse('signup') + '?invalid=email')
+
+        # AUTH_PASSWORD_VALIDATORS were configured but never consulted, so
+        # "1" was an acceptable password. Checked against an unsaved User so
+        # the similarity validator can compare the password to the address.
+        try:
+            validate_password(password, user=User(email=email))
+        except ValidationError as error:
+            return render(request, 'signup.html', status=400, context={
+                'title': 'Sign Up', 'in_use': 'false',
+                'password_errors': error.messages})
 
         # email is not unique on auth.User, so this can legitimately match
         # more than one row; either way the address is taken.
@@ -1080,6 +1108,10 @@ class SetPwywAmountView(View, BaseCartView):
         return redirect('cart')
 
 
+# The pk of the order this browser last went to Stripe to pay for.
+CHECKOUT_ORDER_SESSION_KEY = "checkout_order_id"
+
+
 class CheckoutView(View, BaseCartView):
     # POST only. A GET here creates a PENDING order and a Stripe session as a
     # side effect, which an <img> tag or a link prefetch could trigger
@@ -1199,6 +1231,9 @@ class CheckoutView(View, BaseCartView):
             return redirect('cart')
         order.stripe_session_id = session_id
         order.save(update_fields=['stripe_session_id', 'updated_at'])
+        # Which order this browser went to pay for, so the success page
+        # empties the cart only for the buyer who actually checked out.
+        request.session[CHECKOUT_ORDER_SESSION_KEY] = order.pk
         return redirect(redirect_url)
 
 
@@ -1220,22 +1255,30 @@ class CheckoutSuccessView(View, BaseCartView):
     """
 
     def get(self, request):
-        # Only a session id that resolves to a real order empties the cart.
-        # Stripe substitutes it into success_url (see Payments.checkout), so
-        # the genuine redirect always carries one; a bare cross-site GET of
-        # this URL does not, and so can no longer clear a stranger's cart.
+        # Only the order this browser checked out empties its cart. A session
+        # id alone used to be enough, so reloading the page (or going back
+        # to it from history) wiped whatever had been added since, and a
+        # link carrying someone else's session id emptied the victim's cart.
+        # Stripe substitutes the id into success_url (see Payments.checkout);
+        # CheckoutView records which order this browser went to pay for.
         order = None
         session_id = request.GET.get("session_id")
         if session_id:
-            order = Order.objects.filter(
-                stripe_session_id=session_id).prefetch_related('items').first()
-        if order is not None:
+            order = (Order.objects.filter(stripe_session_id=session_id)
+                     .prefetch_related('items__product').first())
+        if (order is not None and request.session.get(
+                CHECKOUT_ORDER_SESSION_KEY) == order.pk):
+            del request.session[CHECKOUT_ORDER_SESSION_KEY]
             self.get_cart(request).clear()
+        if order is not None:
             if order.status == Order.Status.PENDING:
                 self._reconcile_with_stripe(order, session_id)
         context = {
             'title': 'Success! - Checkout',
             'order': order,
+            # The same figure the download email quotes, not a number typed
+            # into the template that outlives a change to the setting.
+            'link_lifetime_days': link_lifetime_days(),
         }
         context.update(post_purchase_context(request, order))
         context.update(google_customer_reviews_context(order))
@@ -1484,7 +1527,7 @@ class PurchaseFeedbackView(View):
         if not session_id:
             return None
         return Order.objects.filter(
-            stripe_session_id=session_id).prefetch_related('items').first()
+            stripe_session_id=session_id).prefetch_related('items__product').first()
 
     def render_result(self, request, order: Optional[Order], ok: bool = True,
                       message: Optional[str] = None, status: int = 200):
@@ -1942,14 +1985,39 @@ class CheckoutCancelView(View, BaseCartView):
 
 class LoginView(View):
     def get(self, request):
-        valid = request.GET.get('valid')
-        return render(request, 'login.html', context={'title': 'Log In', 'valid': valid})
+        return render(request, 'login.html', context={
+            'title': 'Log In',
+            'valid': request.GET.get('valid'),
+            # login_required sends people here with ?next=; carried through
+            # the form so they land back where they were going.
+            'next': request.GET.get('next', ''),
+        })
+
+    @staticmethod
+    def _failed(next_url: str, reason: str = 'false'):
+        url = reverse('login') + f'?valid={reason}'
+        if next_url:
+            url += '&next=' + quote(next_url, safe='')
+        return redirect(url)
 
     def post(self, request):
         email = normalize_email_identity(request.POST.get('email') or '')
         password = request.POST.get('password') or ''
+        next_url = request.POST.get('next') or ''
         if not email or not password:
-            return redirect(reverse('login') + '?valid=false')
+            return self._failed(next_url)
+
+        # Both buckets are counted on every attempt, so neither a spread of
+        # addresses from one source nor a spread of sources against one
+        # address gets unlimited guesses.
+        over_source = over_cache_limit(
+            f"login:source:{_source_key(request)}",
+            LOGIN_ATTEMPTS_PER_HOUR_PER_SOURCE)
+        over_email = over_cache_limit(
+            f"login:email:{email}", LOGIN_ATTEMPTS_PER_HOUR_PER_EMAIL)
+        if over_source or over_email:
+            logger.warning("Throttled a login attempt for %s.", email)
+            return self._failed(next_url, 'throttled')
 
         # email is not unique on auth.User, so .get() here could raise
         # MultipleObjectsReturned and 500 the login page. Try each match
@@ -1959,13 +2027,27 @@ class LoginView(View):
                                 username=candidate.username, password=password)
             if user is not None:
                 login(request, user)
+                if url_has_allowed_host_and_scheme(
+                        next_url, allowed_hosts={request.get_host()},
+                        require_https=request.is_secure()):
+                    return redirect(next_url)
                 return redirect('home')
-        return redirect(reverse('login') + '?valid=false')
+        return self._failed(next_url)
 
 
 @method_decorator(login_required, name='dispatch')
 class LogoutView(View):
+    """POST logs out; GET only offers the button.
+
+    Logging out on GET let any page on the internet sign a visitor out with
+    an <img> tag. The nav submits a POST form (templates/base.html); the GET
+    page is what a visitor without JavaScript sees after clicking the link.
+    """
+
     def get(self, request):
+        return render(request, 'logout.html', context={'title': 'Log Out'})
+
+    def post(self, request):
         logout(request)
         return redirect('login')
 

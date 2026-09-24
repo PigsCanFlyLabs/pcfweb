@@ -142,14 +142,9 @@
 		    {% comment %}
 		       The MSRP strikethrough, and it lives here rather than
 		       anywhere near the running-total script at the bottom of
-		       this file deliberately. That script parseFloats the
-		       rendered get_display_price, which already yields NaN on
-		       a pre-order row because get_display_price() returns
-		       "Pre-order: 30.00" -- a pre-existing bug.
-		       get_msrp_display() returns a bare number and is rendered
-		       as static markup only; nothing here goes into
-		       JavaScript, so the MSRP cannot become the second value
-		       that arrives at parseFloat as NaN.
+		       this file deliberately: get_msrp_display() is rendered
+		       as static markup only, and nothing here goes into
+		       JavaScript.
 
 		       show_msrp() is strictly-greater-than, so an MSRP equal to
 		       or below the price renders nothing at all. Inside the
@@ -399,13 +394,14 @@
 	}
 	// A pay-what-you-want page has an amount field, and what the buyer
 	// typed into it is the unit price -- so read that rather than the
-	// catalogue suggestion. Deliberately not through
-	// get_display_price(): it returns copy like "Pre-order: 30.00",
-	// which parseFloat already turns into NaN on preorder rows. This
-	// narrows that path rather than widening it, and an empty or
-	// half-typed amount falls back to 0 instead of showing NaN.
+	// catalogue suggestion. An empty or half-typed amount falls back to
+	// 0 instead of showing NaN.
+	//
+	// The catalogue price is read from the integer cents column, not
+	// parsed out of get_display_price(): that returns copy like
+	// "Pre-order: 30.00", which parseFloat turned into NaN.
 	const amountEl = document.querySelector('input#chosen_amount');
-	let unit = parseFloat("{{ product.get_display_price }}");
+	let unit = {{ product.price|default:0|stringformat:"d" }} / 100;
 	if (amountEl) {
 	    const typed = parseFloat(amountEl.value);
 	    unit = isNaN(typed) ? 0 : typed;

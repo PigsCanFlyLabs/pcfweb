@@ -201,8 +201,23 @@ def generate_username(email: str):
 
 
 def get_client_ip(request) -> Optional[str]:
-    # The in-pod nginx appends to X-Forwarded-For (see conf/nginx.default),
-    # so the first entry is the client as seen by the ingress.
+    """The visitor's address, as best the proxy chain can say.
+
+    The site sits behind Cloudflare, then the cluster ingress, then the
+    in-pod nginx (conf/nginx.default). By the time a request arrives here
+    the first X-Forwarded-For entry is whatever the ingress saw -- which is
+    a Cloudflare edge address shared by thousands of visitors, so every rate
+    limit keyed on it throttled strangers together. Cloudflare puts the real
+    visitor in CF-Connecting-IP, overwriting any value the client sent, so
+    it is preferred when present. It is no easier to forge than the
+    X-Forwarded-For fallback: both are only as trustworthy as the rule that
+    the origin is reachable through Cloudflare alone.
+    """
+    connecting_ip = request.META.get("HTTP_CF_CONNECTING_IP")
+    if connecting_ip:
+        return connecting_ip.strip()
+    # The in-pod nginx appends to X-Forwarded-For, so the first entry is
+    # the client as seen by the ingress.
     forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
     if forwarded_for:
         return forwarded_for.split(",")[0].strip()

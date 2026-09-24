@@ -14,6 +14,7 @@ from typing import *
 from pathlib import Path
 
 from configurations import Configuration
+from django.contrib.messages import constants as message_constants
 from django.core.exceptions import ImproperlyConfigured
 
 from pigscanfly.hostnames import ascii_lowercase
@@ -214,6 +215,10 @@ class Base(Configuration):
 
     # Password validation
     # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
+
+    # Bootstrap names the red alert "danger"; Django calls it "error".
+    # templates/base.html renders each message as alert-<tag>.
+    MESSAGE_TAGS = {message_constants.ERROR: "danger"}
 
     AUTH_PASSWORD_VALIDATORS = [
         {

@@ -29,7 +29,12 @@
                             <p class="error-msg text-danger">Please enter both an email address and a password.</p>
                         {% elif invalid == 'email' %}
                             <p class="error-msg text-danger">That does not look like a valid email address.</p>
+                        {% elif invalid == 'throttled' %}
+                            <p class="error-msg text-danger">Too many sign-up attempts. Please try again in an hour.</p>
                         {% endif %}
+                        {% for error in password_errors %}
+                            <p class="error-msg text-danger">{{ error }}</p>
+                        {% endfor %}
 
                         <div class="main-border-button">
                             <button type="submit">Sign Up</button>

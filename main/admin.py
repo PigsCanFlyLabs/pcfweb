@@ -4,8 +4,12 @@ from django.db.models import Count
 from django.urls import reverse
 from django.utils.html import format_html
 
-from main.models import *
-from django.apps import apps
+from django import forms
+
+from main.models import (
+    Cart, CartProduct, EmailIdentity, MailingListDelivery,
+    MailingListMessage, Order, OrderItem, Product, ProductGroup,
+    ProductImage, PurchaseFeedback, SuppressedAddress)
 
 # Register your models here.
 admin.site.register(Cart)
@@ -190,10 +194,46 @@ class OrderItemInline(admin.TabularInline):
         return False
 
 
+class OrderStatusForm(forms.ModelForm):
+    """Only the status moves an owner can make by hand.
+
+    status is list_editable so marking an order FULFILLED is one click, but
+    the same dropdown also offered PENDING -> PAID, which records a payment
+    Stripe never reported and skips every fulfilment side effect, and moves
+    back to PENDING, which nothing downstream expects. Payment is Stripe's
+    to declare; these are the owner's.
+    """
+
+    ALLOWED = {
+        Order.Status.PENDING: {Order.Status.CANCELLED},
+        Order.Status.PAID: {Order.Status.FULFILLED, Order.Status.CANCELLED},
+        # Undo an order marked fulfilled by mistake.
+        Order.Status.FULFILLED: {Order.Status.PAID},
+        Order.Status.CANCELLED: set(),
+    }
+
+    class Meta:
+        model = Order
+        fields = ("status",)
+
+    def clean_status(self):
+        new = self.cleaned_data["status"]
+        if self.instance.pk is None:
+            return new
+        old = Order.objects.values_list("status", flat=True).get(
+            pk=self.instance.pk)
+        if new != old and new not in self.ALLOWED.get(old, set()):
+            raise forms.ValidationError(
+                f"An order cannot go from {Order.Status(old).label} to "
+                f"{Order.Status(new).label} by hand.")
+        return new
+
+
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     """Marking an order FULFILLED here is the entire fulfilment workflow."""
 
+    form = OrderStatusForm
     inlines = [OrderItemInline]
     list_display = ("pk", "created_at", "status", "customer_email",
                     "total_display_price", "shipping_country", "notified_at",
@@ -211,6 +251,10 @@ class OrderAdmin(admin.ModelAdmin):
     # Everything else is Stripe's record of what happened, not ours to edit.
     readonly_fields = tuple(
         f.name for f in Order._meta.fields if f.name != "status")
+
+    def get_changelist_form(self, request, **kwargs):
+        kwargs.setdefault("form", OrderStatusForm)
+        return super().get_changelist_form(request, **kwargs)
 
 @admin.register(PurchaseFeedback)
 class PurchaseFeedbackAdmin(admin.ModelAdmin):
@@ -317,16 +361,39 @@ class MailingListMessageAdmin(admin.ModelAdmin):
             reverse("mailing-list-send", args=[obj.pk]))
 
 
-# Auto magic
-models = apps.get_models()
+class ReadOnlyRecordAdmin(admin.ModelAdmin):
+    """A record of something that happened: browsable, never edited.
 
-for model in models:
-    # A bit ugly but auto register everything which has not exploded when auto registering cauze I'm lazy
-    if ("django.contrib" not in model.__module__ and
-        "newsletter" not in model.__module__ and
-        "cookie_consent" not in model.__module__):
+    These used to be registered by a loop over every model, with the default
+    editable, deletable admin -- which undid the read-only inlines above.
+    Deleting a MailingListDelivery, for one, puts that address back in the
+    queue and sends it a second copy.
+    """
 
-        try:
-            admin.site.register(model)
-        except admin.sites.AlreadyRegistered:
-            pass
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(OrderItem)
+class OrderItemAdmin(ReadOnlyRecordAdmin):
+    list_display = ("order", "product_name", "quantity", "unit_amount")
+    search_fields = ("order__pk", "product_name")
+
+
+@admin.register(MailingListDelivery)
+class MailingListDeliveryAdmin(ReadOnlyRecordAdmin):
+    list_display = ("message", "email", "status", "created_at")
+    list_filter = ("status",)
+    search_fields = ("email",)
+
+
+@admin.register(EmailIdentity)
+class EmailIdentityAdmin(ReadOnlyRecordAdmin):
+    list_display = ("normalized_email", "user")
+    search_fields = ("normalized_email",)
