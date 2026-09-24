@@ -19,11 +19,10 @@ from django.test import TestCase, override_settings
 
 from main.management.commands.grab_book_images import candidates_for
 from main.models import Product, ProductImage
+from main.tests.base import REPO_ROOT
 
 
 G = "{http://base.google.com/ns/1.0}"
-
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def make_product(**fields):

@@ -337,6 +337,11 @@ class MailingListMessageAdmin(admin.ModelAdmin):
                        "send_started_at", "sent_at", "created_by")
     inlines = [MailingListDeliveryInline]
 
+    def get_queryset(self, request):
+        # The "going to" column reads each row's interests; one query for
+        # the whole page rather than one per mailing.
+        return super().get_queryset(request).prefetch_related("interests")
+
     def save_model(self, request, obj, form, change):
         if obj.created_by is None:
             obj.created_by = request.user

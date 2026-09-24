@@ -5,6 +5,7 @@ from unittest import mock
 
 import stripe
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import RequestFactory, TestCase, override_settings
 
 from main.models import Cart, CartProduct, Product
@@ -246,12 +247,14 @@ class BackfillStripeProductTaxCodesTest(TestCase):
         out = StringIO()
         err = StringIO()
 
-        call_command(
-            "backfill_stripe_product_tax_codes",
-            "--apply",
-            stdout=out,
-            stderr=err,
-        )
+        # Exits non-zero so a script notices, having still checked the rest.
+        with self.assertRaises(CommandError):
+            call_command(
+                "backfill_stripe_product_tax_codes",
+                "--apply",
+                stdout=out,
+                stderr=err,
+            )
 
         modify.assert_called_once_with(
             "prod_modify_fails",
@@ -261,7 +264,8 @@ class BackfillStripeProductTaxCodesTest(TestCase):
         self.assertIn("APPLY failed-change", err.getvalue())
         self.assertIn("ERROR stripe-product-tax-code", err.getvalue())
         logger.error.assert_called_once()
-        self.assertIn("SUMMARY examined=1 changed=1", out.getvalue())
+        # Counted once, as an error -- not also as a change that never landed.
+        self.assertIn("SUMMARY examined=1 changed=0", out.getvalue())
         self.assertIn("errored=1", out.getvalue())
 
     @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.modify")
@@ -277,12 +281,14 @@ class BackfillStripeProductTaxCodesTest(TestCase):
         out = StringIO()
         err = StringIO()
 
-        call_command(
-            "backfill_stripe_product_tax_codes",
-            "--apply",
-            stdout=out,
-            stderr=err,
-        )
+        # Exits non-zero so a script notices, having still checked the rest.
+        with self.assertRaises(CommandError):
+            call_command(
+                "backfill_stripe_product_tax_codes",
+                "--apply",
+                stdout=out,
+                stderr=err,
+            )
 
         modify.assert_called_once_with(
             "prod_checked",

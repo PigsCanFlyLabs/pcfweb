@@ -8,16 +8,14 @@ the joined link is not in the body" below is guarding that.
 
 import re
 import time
-from pathlib import Path
 
 import yaml
 from django.test import TestCase, override_settings
 
 from main import captcha
 from main.views import DiscordJoinView
+from main.tests.base import REPO_ROOT
 
-
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 PART_ONE = "https://discord.gg/testInv"
 PART_TWO = "iteCode"

@@ -5,8 +5,9 @@ from textwrap import dedent
 
 from django.test import SimpleTestCase
 
+from main.tests.base import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
 CHECK_SCRIPT = REPO_ROOT / "scripts" / "check-product-images.sh"
 
 

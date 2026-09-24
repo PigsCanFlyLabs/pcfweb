@@ -8,7 +8,6 @@ about.
 import os
 import subprocess
 import sys
-from pathlib import Path
 from unittest import mock
 
 import yaml
@@ -17,9 +16,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase, TestCase
 
 from pigscanfly.settings import Prod, _prod_required_env, parse_email_flag
-
-
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+from main.tests.base import REPO_ROOT
 
 
 class HealthzTest(TestCase):

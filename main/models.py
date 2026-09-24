@@ -271,7 +271,7 @@ class Product(models.Model):
 
     def generate_external_product_id(self):
         external_product_id = Payments.create_product(
-            self.name, self.description, self.price, currency="usd", tax_code=self.tax_code)
+            self.name, self.description, self.price, currency=DEFAULT_CURRENCY, tax_code=self.tax_code)
         return external_product_id
 
     def save(self, *args, **kwargs):
@@ -1718,10 +1718,10 @@ class CartProduct(models.Model):
         amount = self.effective_unit_amount()
         if self.product.mode == Product.Modes.PAYMENT:
             price_id = Payments.create_price(
-                external_product_id, amount, currency="usd")
+                external_product_id, amount, currency=DEFAULT_CURRENCY)
         else:
             price_id = Payments.create_price(
-                external_product_id, amount, currency="usd", interval="year")
+                external_product_id, amount, currency=DEFAULT_CURRENCY, interval="year")
         return price_id
 
     def refresh_pwyw_price(self) -> None:
