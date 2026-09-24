@@ -5,7 +5,7 @@ import traceback
 from datetime import timedelta
 from urllib.parse import quote, urlparse
 
-from typing import *
+from typing import Any, Dict, Optional, Tuple
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout

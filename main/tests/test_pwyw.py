@@ -1039,7 +1039,7 @@ class PwywReceiptTest(BookAssetRootMixin, OrderTestBase):
         self.assertNotIn(RECEIPT_NOTE, squashed(response))
 
     def test_the_owner_email_reports_the_amount_actually_paid(self):
-        order = self._paid_for_nothing()
+        self._paid_for_nothing()
 
         owner_email, = self.order_emails()
 

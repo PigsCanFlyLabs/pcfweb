@@ -50,11 +50,13 @@ class SeedProductsCommandTest(TestCase):
         """Second run changes nothing."""
         self._run_seed()
         before = list(
-            Product.objects.filter(pk__in=[100, 101, 102, 103]).values()
+            Product.objects.filter(pk__in=[100, 101, 102, 103])
+            .order_by("pk").values()
         )
         self._run_seed()
         after = list(
-            Product.objects.filter(pk__in=[100, 101, 102, 103]).values()
+            Product.objects.filter(pk__in=[100, 101, 102, 103])
+            .order_by("pk").values()
         )
 
         self.assertEqual(before, after)
@@ -156,7 +158,7 @@ class SeedProductsCommandTest(TestCase):
 
     def test_non_fixture_products_untouched(self):
         """Products with pk < 100 are unaffected by the seed."""
-        non_fixture = Product.objects.create(
+        Product.objects.create(
             pk=50,
             name="User-created product",
             price=5000,

@@ -604,6 +604,27 @@ class Dev(Base):
     EMAIL_FILE_PATH = os.path.join(BASE_DIR, "sent_emails")
 
 
+class PostgresTest(Dev):
+    """Dev, on Postgres: for running the test suite against the database
+    production actually uses.
+
+    sqlite makes select_for_update a no-op and serialises every write, so
+    the concurrency tests (the webhook's PENDING -> PAID race, the
+    fulfilment claim) prove much less there than they appear to. CI runs the
+    suite under this configuration too. Connection details come from the
+    standard libpq variables (PGHOST, PGPORT, PGUSER, PGPASSWORD); Django
+    creates and destroys its own test database.
+    """
+
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv("PGDATABASE", "pigscanfly"),
+            "ATOMIC_REQUESTS": False,
+        }
+    }
+
+
 # The environment variables Prod refuses to boot without, and the one-line
 # reason each is fatal (the properties below carry the long version). Held as
 # data so Prod.pre_setup can name every missing one in a single failure.

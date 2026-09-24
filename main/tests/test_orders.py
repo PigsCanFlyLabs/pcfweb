@@ -16,8 +16,7 @@ from main.models import Cart, CartProduct, Order, OrderItem, Product
 from main.tests.base import (
     customer_mail,
     ORDER_TEST_SETTINGS, OrderTestBase, OrderTestMixin,
-    OWNER_EMAIL, stripe_signature, WEBHOOK_URL,
-    assert_never_cache_response)
+    stripe_signature, assert_never_cache_response)
 from main.views import StripeWebhookView
 
 

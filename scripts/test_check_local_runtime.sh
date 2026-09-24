@@ -29,6 +29,20 @@ PY
 LOGO="$STATIC_ROOT/assets/logo-cropped.png"
 IMAGES="$STATIC_ROOT/assets/images"
 
+# Every file this script breaks on purpose is put back on the way out, however
+# it exits -- a Ctrl-C or a `set -e` abort between the break and the restore
+# used to leave a corrupt logo or a missing thumbnail in the real STATIC_ROOT.
+pending_restores=()
+restore_broken_files() {
+  local f
+  for f in "${pending_restores[@]}"; do
+    if [ -e "$f.backup" ]; then
+      mv "$f.backup" "$f"
+    fi
+  done
+}
+trap restore_broken_files EXIT
+
 echo "=== Non-vacuity test for scripts/check-local-runtime.sh ==="
 echo
 
@@ -52,6 +66,7 @@ echo
 if [ -f "$LOGO" ]; then
   echo "Test 2: Guard should FAIL and NAME logo-cropped.png when logo is corrupt"
   cp -p "$LOGO" "$LOGO.backup"
+  pending_restores+=("$LOGO")
   echo "not a PNG" > "$LOGO"
 
   set +e
@@ -85,6 +100,7 @@ if [ -d "$IMAGES" ]; then
     exit 1
   fi
   mv "$victim" "$victim.backup"
+  pending_restores+=("$victim")
 
   set +e
   output=$(./scripts/check-local-runtime.sh 2>&1)

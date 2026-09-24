@@ -5,7 +5,7 @@
 #
 # Called by build.sh before `docker buildx build`. Split out of it so the
 # guard can be tested without running a build (see BookAssetGuardTest in
-# main/tests.py) -- this is the one check standing between a customer and
+# main/tests/test_dc4k.py) -- this is the one check standing between a customer and
 # being emailed a 130-byte text file instead of a book.
 #
 # The failure it exists to stop: a build host that never ran `git lfs pull`,
