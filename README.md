@@ -11,9 +11,7 @@ Requires Python 3.13 (matching the Docker image; 3.10+ works).
 python3.13 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
 
-./manage.py migrate
-./manage.py loaddata initial_products
-./run_local.sh          # runserver_plus with TLS via mkcert
+./run_local.sh          # migrate + seed_products, then runserver_plus with TLS via mkcert
 ```
 
 `run_local.sh` needs the sibling `pcfweb-assets` checkout too — see [Image
@@ -22,11 +20,22 @@ checkout on **every** run and reports what it found, warning rather than
 refusing so an unrelated missing image cannot stop you getting a server.
 
 The `Dev` configuration (sqlite, file-based email in `sent_emails/`) is the
-default; set `ENVIRONMENT=Prod` (or `DJANGO_CONFIGURATION=Prod`) for the
-production settings class.
+default for `manage.py`; set `ENVIRONMENT=Prod` (or `DJANGO_CONFIGURATION=Prod`)
+for the production settings class. The WSGI/ASGI entrypoints default the other
+way, to `Prod`, because only an application server loads them.
+
+`PostgresTest` is `Dev` on Postgres, for running the suite against the
+database production uses (CI does both). It reads the standard libpq
+variables:
+
+```bash
+DJANGO_CONFIGURATION=PostgresTest PGHOST=localhost PGUSER=postgres \
+  PGPASSWORD=... ./manage.py test main
+```
 
 Checks — one script shared by local dev, `build.sh`, and GitHub Actions
-(`.github/workflows/ci.yml`):
+(`.github/workflows/ci.yml`). It runs mypy, ruff (pyflakes rules only, see
+`ruff.toml`), shellcheck, the migration check, the thumbnails and the tests:
 
 ```bash
 ./scripts/checks.sh
@@ -44,6 +53,8 @@ Checks — one script shared by local dev, `build.sh`, and GitHub Actions
 | `STRIPE_TIMEOUT` | all | Seconds allowed for a Stripe call (default 15). Must stay below `GUNICORN_TIMEOUT` or a slow Stripe kills the worker instead of returning an error. |
 | `GUNICORN_TIMEOUT` | Prod image | Worker timeout in seconds (default 60). |
 | `ORDER_NOTIFICATION_EMAIL` | all | Where the "new paid order" mail goes; becomes `ADMINS`. Defaults to `support@pigscanfly.ca`. |
+| `SUPPORT_EMAIL` | all | The address customer-facing pages tell people to write to (contact, returns, policies, checkout trouble). Defaults to `support@pigscanfly.ca`. |
+| `LOG_LEVEL` | Prod | Root log level for the stdout handler (default `INFO`). |
 | `DBHOST` / `DBNAME` / `DBUSER` / `DBPASSWORD` | Prod | Postgres connection; wired in `deploy.yaml` to the in-cluster DB. |
 | `EMAIL_HOST` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | Prod | SMTP. |
 | `DJANGO_SUPERUSER_USERNAME` / `DJANGO_SUPERUSER_PASSWORD` / `DJANGO_SUPERUSER_EMAIL` | primary pod (optional) | The admin account: `ensure_admin_account` creates it on a fresh database and converges it (rotated password, drifted flags) on every primary boot. Both core variables unset = clean skip; one without the other = loud failure. The names are the ones Django's own `createsuperuser --noinput` reads. See [Admin](#admin). |
@@ -71,8 +82,18 @@ customer is sent to Stripe. The order id travels with the Checkout session as
 the success page empties it, and an anonymous cart is session-scoped.
 
 `POST /stripe/webhook` is the only thing that marks an order PAID and emails
-the owner. `/checkout/success` clears the cart and nothing else; it is an
-unauthenticated GET and proves no payment.
+the owner. `/checkout/success` clears the cart of the browser that checked
+out that order and nothing else; it is an unauthenticated GET and proves no
+payment.
+
+Discounts are Stripe **promotion codes**, entered on Stripe's checkout page
+(sessions set `allow_promotion_codes`). The site no longer takes a code of
+its own: its old box passed raw coupon ids through, so any coupon on the
+account worked for anyone who guessed its name. To offer a discount, create
+a customer-facing promotion code for the coupon in the Stripe Dashboard.
+
+A Stripe failure while creating the session sends the buyer back to their
+cart with an explanation and mails `ADMINS` the traceback.
 
 **Two things must be set up or no order is ever recorded as paid:**
 
@@ -567,9 +588,11 @@ and skipped rather than sent to Google as a broken URL.
 and run the four asset guards over them (sibling checkout present, per-file
 size ceiling, LFS pointers, fixture references — see
 [Image assets](#image-assets)) → validate and stage the
-sibling `pcfweb-book-assets` archives → mypy → migration check → tests →
-template validation → collectstatic → LFS check over the collected static
-tree → multi-arch Docker build/push (`holdenk/pcfweb:<tag>`) →
+sibling `pcfweb-book-assets` archives → mypy → ruff → shellcheck → migration
+check → collectstatic → thumbnail pre-generation → tests → template
+validation → manifest YAML parse (the `scripts/checks.sh` order) → LFS check
+over the collected static tree →
+multi-arch Docker build/push (`holdenk/pcfweb:<tag>`) →
 `kubectl apply` → wait for both rollouts.
 
 ### Bump the image tag first
@@ -648,7 +671,9 @@ The Kubernetes objects:
   old, pg_wal growth on the 10Gi volume, replica loss.
 - `deploy.yaml` — the app: `web-primary` (1 replica; runs `migrate` +
   `ensure_admin_account` + `seed_products` + `check_book_assets` on start),
-  `web` (3 replicas), `web-svc`, and the ingress for `www.pigscanfly.ca`.
+  `web` (the pods behind `web-svc`; `web-primary` is not behind it), `web-svc`,
+  and the ingress for `www.pigscanfly.ca`. Replica counts are whatever
+  `deploy.yaml` says.
 
 The app reaches Postgres through the operator-created `pcfweb-pg-rw`
 Service; `DBHOST`/`DBNAME`/`DBUSER` are set directly in `deploy.yaml` and
@@ -661,8 +686,11 @@ when the database is unreachable. They deliberately do **not** target `/`:
 the kubelet dials the pod over plain HTTP and sends no `X-Forwarded-Proto`,
 so `SecurityMiddleware` answers with a 301 to https before any view or model
 code runs — and Kubernetes counts a 3xx as success. Probes against `/` pass
-on a completely broken app. `/healthz` is listed in `SECURE_REDIRECT_EXEMPT`
-for exactly this reason.
+on a completely broken app. `/healthz` is answered by
+`main.middleware.HealthCheckMiddleware`, first in `MIDDLEWARE`, which returns
+before `SecurityMiddleware`'s redirect, the `ALLOWED_HOSTS` check and the
+cookie-consent middleware can run. The probes allow 5 seconds, matching the
+database `connect_timeout` they wait on.
 
 `web`'s pods also run a `wait-for-migrations` initContainer that blocks on
 `manage.py migrate --check`. `web-primary` applies the migrations but both
@@ -689,8 +717,8 @@ the migration runbook: `docs/pg-backup-migration-2026-08.md`.
 
 `MEDIA_ROOT` is `/opt/app/media` inside the container, with no volume behind
 it. Anything uploaded through the admin's `Product.image` field lands on
-whichever of the 4 pods served that request, 404s on the other three, and is
-gone on restart. Use `image_name` (a file committed to `pcfweb-assets` and
+whichever pod served that request, 404s on every other pod, and is gone on
+restart. Use `image_name` (a file committed to `pcfweb-assets` and
 served from `static/`) instead — that is what every fixture product does.
 Fixing this properly needs a `ReadWriteMany` volume or object storage, and
 the cluster's `encrypted-local-path` StorageClass is `ReadWriteOnce`.
