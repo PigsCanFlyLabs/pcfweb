@@ -128,6 +128,53 @@ retry for three days:
   `digital_delivery_sent_at` null, and the owner's email says **NOT DELIVERED**
   so it can be resent by hand.
 
+### What retries all that
+
+`StripeWebhookView.fulfil_order` resumes only the actions whose marker is
+still empty, so re-running it repairs a half-finished order without repeating
+what already went out. The thing that *runs* it again is
+`manage.py sweep_orders`, on the `order-sweep` CronJob in `deploy.yaml`
+(hourly).
+
+It has to be a sweeper rather than Stripe's own redelivery, and this is the
+part that is easy to get wrong: **Stripe redelivers a webhook only when the
+delivery failed** — a non-2xx, a timeout, a dropped connection. It does come
+back after a worker is killed mid-fulfilment, because the response never
+completes. It never comes back after any of the graceful failures above,
+because those are answered with a clean 200. Without the sweep the retry
+logic was correct and unreachable for exactly the failures it was written
+for, and an order sat PAID with a null marker until a human noticed.
+
+The sweep does two things, and both are safe to run repeatedly and alongside
+a live webhook (same guarded transition, same fulfilment lease):
+
+1. **PAID orders with a marker still empty** → run fulfilment again.
+2. **PENDING orders past a grace period** (default 30 minutes) → ask Stripe
+   what actually became of the session. Paid → record and fulfil it, logging
+   at ERROR **and mailing `ADMINS` once per run**, because an order reaching
+   that branch means a real payment went unrecorded: checkout still works and
+   the buyer still pays, so this is invisible from the site itself. Expired →
+   cancel it. Still open, or a delayed payment that has not settled → leave
+   it.
+
+```sh
+./manage.py sweep_orders --dry-run   # report only; still reads from Stripe
+./manage.py sweep_orders             # do it
+```
+
+`--window-days` bounds how far back it looks (default 30, `0` for all),
+`--limit` caps how many orders each of the two phases touches (they get
+separate budgets, and the pending phase runs first, so a backlog of
+half-finished paid orders cannot starve the unrecorded-payment check), and
+`--fail` exits non-zero when anything is left unfinished — off by default so
+one permanently broken order does not mark every hourly run red.
+
+If deliveries are being **rejected** rather than mishandled, the endpoint logs
+which of the three causes it was at ERROR: a signature that does not match
+(wrong or rotated `STRIPE_WEBHOOK_SECRET`, or a test/live mix-up), a timestamp
+outside Stripe's five-minute tolerance (pod clock drift), or a
+`Stripe-Signature` header something in front of Django has mangled.
+
 A **zero-total** order counts as paid. Stripe creates no PaymentIntent for one,
 so the session reports `payment_status: "no_payment_required"` and can never
 report `"paid"`; the webhook accepts both. This is reachable in practice
