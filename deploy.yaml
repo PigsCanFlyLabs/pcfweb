@@ -393,9 +393,14 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          # Same as the Deployments: no Kubernetes API access, no privilege
+          # escalation.
+          automountServiceAccountToken: false
           containers:
             - image: holdenk/pcfweb:v0.13.6
               name: order-sweep
+              securityContext:
+                allowPrivilegeEscalation: false
               command: ["/bin/bash", "-c"]
               args:
                 - |

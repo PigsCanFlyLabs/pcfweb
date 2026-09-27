@@ -2,7 +2,7 @@ import json
 import logging
 import re
 import traceback
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import quote, urlparse
 
 from typing import Any, Dict, Optional, Tuple
@@ -1721,7 +1721,8 @@ class StripeWebhookView(View):
         repaired by Stripe's next delivery rather than turning PAID into a
         terminal, unfulfilled state.
         """
-        if not self.claim_fulfilment(order):
+        claimed_at = self.claim_fulfilment(order)
+        if claimed_at is None:
             logger.info(
                 "Order #%s fulfilment is already claimed by another worker; "
                 "leaving it to them.", order.pk)
@@ -1776,9 +1777,9 @@ class StripeWebhookView(View):
             if order.notified_at is None:
                 order.notify_owner()
         finally:
-            self.release_fulfilment(order)
+            self.release_fulfilment(order, claimed_at)
 
-    def claim_fulfilment(self, order: Order) -> bool:
+    def claim_fulfilment(self, order: Order) -> Optional[datetime]:
         """Take the exclusive right to fulfil this order, or report defeat.
 
         One conditional UPDATE, which both Postgres and SQLite apply
@@ -1787,24 +1788,35 @@ class StripeWebhookView(View):
         in handle_paid is released with its transaction, and each completion
         marker is only written once its side effect has already happened, so
         without this both workers would read null markers and both would send.
+
+        Returns the claim's timestamp, which is the token release needs, or
+        None when another worker holds a live claim.
         """
         now = timezone.now()
-        return bool(
-            Order.objects.filter(pk=order.pk).filter(
-                Q(fulfilment_claimed_at__isnull=True)
-                | Q(fulfilment_claimed_at__lt=now - self.FULFILMENT_LEASE)
-            ).update(fulfilment_claimed_at=now))
+        won = Order.objects.filter(pk=order.pk).filter(
+            Q(fulfilment_claimed_at__isnull=True)
+            | Q(fulfilment_claimed_at__lt=now - self.FULFILMENT_LEASE)
+        ).update(fulfilment_claimed_at=now)
+        return now if won else None
 
     @staticmethod
-    def release_fulfilment(order: Order) -> None:
-        """Drop the claim so the next delivery can pick up anything left.
+    def release_fulfilment(order: Order, claimed_at: datetime) -> None:
+        """Drop *this worker's* claim so the next attempt can pick up the rest.
 
         Released rather than left to expire because a run that finished with
         an action still incomplete -- a bounced owner email, say -- should be
         retried by Stripe's next delivery immediately, not after the lease
         runs out.
+
+        Only while the claim is still the one this worker took. A run that
+        outlived FULFILMENT_LEASE may have been superseded -- another
+        delivery, or the order sweep, re-claimed the order once the lease
+        expired -- and clearing the column unconditionally would drop that
+        worker's live claim and let a third one start alongside it.
         """
-        Order.objects.filter(pk=order.pk).update(fulfilment_claimed_at=None)
+        Order.objects.filter(
+            pk=order.pk, fulfilment_claimed_at=claimed_at,
+        ).update(fulfilment_claimed_at=None)
         order.fulfilment_claimed_at = None
 
     def handle_cancelled(self, session, reason: str) -> None:
