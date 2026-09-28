@@ -834,12 +834,18 @@ class BaseCartView():
                 "Merge repriced %s on cart %s; holding checkout until the "
                 "cart has been shown.", ", ".join(repriced), user_cart.pk)
 
-# Per-hour attempt ceilings for the account forms, per client address (and,
-# for login, per address being tried). Generous enough that a person who
-# forgets a password never meets them; low enough that a password list does.
+# Per-hour ceilings for the account forms, per client address. Generous
+# enough that a person who forgets a password never meets them; low enough
+# that a password list does.
+#
+# Login counts failures only, and only per source. A bucket keyed on the
+# address being tried was a lockout anyone could impose on an account whose
+# email they knew -- including the staff account -- by sending wrong
+# passwords, since the correct one was then refused too. Guessing spread over
+# many sources is bounded by this limit times the number of sources, against
+# passwords the signup validators now require to be non-trivial.
 SIGNUP_ATTEMPTS_PER_HOUR = 20
-LOGIN_ATTEMPTS_PER_HOUR_PER_SOURCE = 30
-LOGIN_ATTEMPTS_PER_HOUR_PER_EMAIL = 10
+LOGIN_FAILURES_PER_HOUR_PER_SOURCE = 30
 
 
 def _source_key(request) -> str:
@@ -2017,15 +2023,10 @@ class LoginView(View):
         if not email or not password:
             return self._failed(next_url)
 
-        # Both buckets are counted on every attempt, so neither a spread of
-        # addresses from one source nor a spread of sources against one
-        # address gets unlimited guesses.
-        over_source = over_cache_limit(
-            f"login:source:{_source_key(request)}",
-            LOGIN_ATTEMPTS_PER_HOUR_PER_SOURCE)
-        over_email = over_cache_limit(
-            f"login:email:{email}", LOGIN_ATTEMPTS_PER_HOUR_PER_EMAIL)
-        if over_source or over_email:
+        # Peek, don't count: only a failure below adds to the bucket, so a
+        # person's own successful logins never use it up.
+        failures_key = f"login:failures:{_source_key(request)}"
+        if (cache.get(failures_key) or 0) >= LOGIN_FAILURES_PER_HOUR_PER_SOURCE:
             logger.warning("Throttled a login attempt for %s.", email)
             return self._failed(next_url, 'throttled')
 
@@ -2042,6 +2043,7 @@ class LoginView(View):
                         require_https=request.is_secure()):
                     return redirect(next_url)
                 return redirect('home')
+        over_cache_limit(failures_key, LOGIN_FAILURES_PER_HOUR_PER_SOURCE)
         return self._failed(next_url)
 
 

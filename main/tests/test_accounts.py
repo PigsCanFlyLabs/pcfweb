@@ -217,10 +217,28 @@ class AccountHardeningTest(TestCase):
         self.assertIn("invalid=throttled", response["Location"])
         self.assertFalse(User.objects.filter(email="late@example.com").exists())
 
-    def test_login_is_throttled_per_email_even_with_the_right_password(self):
-        from main.views import LOGIN_ATTEMPTS_PER_HOUR_PER_EMAIL
+    def test_bad_passwords_cannot_lock_the_owner_out(self):
+        # A lockout keyed on the address is a denial of service on anyone
+        # whose address is known: a stranger's wrong guesses must never
+        # refuse the owner's right password.
         self._user()
-        for _ in range(LOGIN_ATTEMPTS_PER_HOUR_PER_EMAIL):
+        for _ in range(15):
+            self.client.post(
+                "/login", {"email": "person@example.com", "password": "nope"},
+                HTTP_CF_CONNECTING_IP="198.51.100.66")
+
+        response = self.client.post(
+            "/login",
+            {"email": "person@example.com", "password": "hunter2hunter2"},
+            HTTP_CF_CONNECTING_IP="203.0.113.5")
+
+        self.assertRedirects(response, "/")
+        self.assertIn("_auth_user_id", self.client.session)
+
+    def test_login_is_throttled_per_source_after_failures(self):
+        from main.views import LOGIN_FAILURES_PER_HOUR_PER_SOURCE
+        self._user()
+        for _ in range(LOGIN_FAILURES_PER_HOUR_PER_SOURCE):
             self.client.post(
                 "/login", {"email": "person@example.com", "password": "nope"})
 
@@ -230,6 +248,15 @@ class AccountHardeningTest(TestCase):
 
         self.assertIn("valid=throttled", response["Location"])
         self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_successful_logins_do_not_count(self):
+        from main.views import LOGIN_FAILURES_PER_HOUR_PER_SOURCE
+        self._user()
+        for _ in range(LOGIN_FAILURES_PER_HOUR_PER_SOURCE + 5):
+            response = self.client.post(
+                "/login",
+                {"email": "person@example.com", "password": "hunter2hunter2"})
+            self.assertRedirects(response, "/")
 
     def test_login_follows_a_local_next(self):
         self._user()
