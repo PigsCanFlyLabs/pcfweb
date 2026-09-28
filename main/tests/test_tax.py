@@ -5,6 +5,7 @@ from unittest import mock
 
 import stripe
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import RequestFactory, TestCase, override_settings
 
 from main.models import Cart, CartProduct, Product
@@ -33,10 +34,10 @@ class CheckoutTaxTest(TestCase):
         cart.products.add(cart_product)
         return cart
 
-    def _checkout(self, mode=Product.Modes.PAYMENT, coupon=None):
+    def _checkout(self, mode=Product.Modes.PAYMENT):
         request = self.factory.get("/checkout")
         cart = self._cart_with_product(mode)
-        return Payments.checkout(request, cart, coupon=coupon)
+        return Payments.checkout(request, cart)
 
     @mock.patch("main.payments.stripe.checkout.Session.create")
     def test_normal_checkout_enables_automatic_tax(self, create_session):
@@ -48,34 +49,6 @@ class CheckoutTaxTest(TestCase):
         self.assertEqual(params["automatic_tax"], {"enabled": True})
         self.assertEqual(params["billing_address_collection"], "required")
         self.assertNotIn("discounts", params)
-
-    @mock.patch("main.payments.stripe.checkout.Session.create")
-    def test_valid_coupon_keeps_discount_and_enables_tax(self, create_session):
-        create_session.return_value.url = "https://checkout.example/session"
-
-        self._checkout(coupon="coupon_valid")
-
-        params = create_session.call_args.kwargs
-        self.assertEqual(params["automatic_tax"], {"enabled": True})
-        self.assertEqual(params["billing_address_collection"], "required")
-        self.assertEqual(params["discounts"], [{"coupon": "coupon_valid"}])
-
-    @mock.patch("main.payments.stripe.checkout.Session.create")
-    def test_invalid_coupon_retry_drops_discount_but_keeps_tax(self, create_session):
-        create_session.side_effect = [
-            stripe.InvalidRequestError(
-                "No such coupon", "discounts[0][coupon]"),
-            mock.Mock(url="https://checkout.example/session"),
-        ]
-
-        self._checkout(coupon="coupon_bad")
-
-        first_params = create_session.call_args_list[0].kwargs
-        retry_params = create_session.call_args_list[1].kwargs
-        self.assertEqual(first_params["discounts"], [{"coupon": "coupon_bad"}])
-        self.assertNotIn("discounts", retry_params)
-        self.assertEqual(retry_params["automatic_tax"], {"enabled": True})
-        self.assertEqual(retry_params["billing_address_collection"], "required")
 
     @mock.patch("main.payments.stripe.checkout.Session.create")
     def test_payment_and_subscription_modes_collect_address_for_tax(self, create_session):
@@ -96,41 +69,14 @@ class CheckoutTaxTest(TestCase):
                 self.assertEqual(params["billing_address_collection"], "required")
 
     @mock.patch("main.payments.stripe.checkout.Session.create")
-    def test_coupon_checkout_does_not_retry_non_coupon_stripe_errors(self, create_session):
+    def test_stripe_errors_are_not_retried(self, create_session):
         create_session.side_effect = stripe.InvalidRequestError(
             "No such price", "line_items[0][price]")
 
         with self.assertRaises(stripe.InvalidRequestError):
-            self._checkout(coupon="coupon_valid")
+            self._checkout()
 
         create_session.assert_called_once()
-
-    def test_coupon_error_detection_uses_param_and_documented_codes(self):
-        cases = [
-            (stripe.InvalidRequestError("plain error", None), False),
-            (stripe.InvalidRequestError("plain error", ""), False),
-            (stripe.InvalidRequestError(
-                "No such coupon", "discounts[0][coupon]"), True),
-            (stripe.InvalidRequestError(
-                "Stripe Tax is not enabled", "automatic_tax"), False),
-            (stripe.InvalidRequestError(
-                "Coupon expired", None, code="coupon_expired"), True),
-            (stripe.InvalidRequestError(
-                "Missing resource", None, code="resource_missing"), True),
-            (stripe.InvalidRequestError(
-                "Missing price", "line_items[0][price]",
-                code="resource_missing"), False),
-            (stripe.InvalidRequestError(
-                "First-time customer required", None,
-                code="promotion_code_customer_missing_first_time"), True),
-            (stripe.InvalidRequestError(
-                "Customer is not first-time", None,
-                code="promotion_code_customer_not_first_time"), True),
-        ]
-
-        for error, expected in cases:
-            with self.subTest(param=error.param, code=error.code):
-                self.assertEqual(Payments._is_coupon_error(error), expected)
 
     @mock.patch("main.payments.stripe.checkout.Session.create")
     def test_tax_configuration_error_is_diagnosable_and_not_retried(self, create_session):
@@ -142,7 +88,7 @@ class CheckoutTaxTest(TestCase):
 
         with mock.patch("main.payments.logger.error") as log_error:
             with self.assertRaises(stripe.InvalidRequestError) as error:
-                self._checkout(coupon="coupon_valid")
+                self._checkout()
 
         self.assertIn("Stripe Tax must be activated", str(error.exception))
         self.assertIn("STRIPE_AUTOMATIC_TAX=false", str(error.exception))
@@ -188,7 +134,6 @@ class CheckoutTaxTest(TestCase):
         log_error.assert_called_once()
         # The logged message should help diagnose the problem
         self.assertIn("tax", log_error.call_args.args[0].lower())
-        # Should not retry (not a coupon error)
         create_session.assert_called_once()
 
     @mock.patch("main.payments.stripe.Price.create")
@@ -302,12 +247,14 @@ class BackfillStripeProductTaxCodesTest(TestCase):
         out = StringIO()
         err = StringIO()
 
-        call_command(
-            "backfill_stripe_product_tax_codes",
-            "--apply",
-            stdout=out,
-            stderr=err,
-        )
+        # Exits non-zero so a script notices, having still checked the rest.
+        with self.assertRaises(CommandError):
+            call_command(
+                "backfill_stripe_product_tax_codes",
+                "--apply",
+                stdout=out,
+                stderr=err,
+            )
 
         modify.assert_called_once_with(
             "prod_modify_fails",
@@ -317,7 +264,8 @@ class BackfillStripeProductTaxCodesTest(TestCase):
         self.assertIn("APPLY failed-change", err.getvalue())
         self.assertIn("ERROR stripe-product-tax-code", err.getvalue())
         logger.error.assert_called_once()
-        self.assertIn("SUMMARY examined=1 changed=1", out.getvalue())
+        # Counted once, as an error -- not also as a change that never landed.
+        self.assertIn("SUMMARY examined=1 changed=0", out.getvalue())
         self.assertIn("errored=1", out.getvalue())
 
     @mock.patch("main.management.commands.backfill_stripe_product_tax_codes.stripe.Product.modify")
@@ -333,12 +281,14 @@ class BackfillStripeProductTaxCodesTest(TestCase):
         out = StringIO()
         err = StringIO()
 
-        call_command(
-            "backfill_stripe_product_tax_codes",
-            "--apply",
-            stdout=out,
-            stderr=err,
-        )
+        # Exits non-zero so a script notices, having still checked the rest.
+        with self.assertRaises(CommandError):
+            call_command(
+                "backfill_stripe_product_tax_codes",
+                "--apply",
+                stdout=out,
+                stderr=err,
+            )
 
         modify.assert_called_once_with(
             "prod_checked",

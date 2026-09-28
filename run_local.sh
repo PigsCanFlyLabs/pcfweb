@@ -1,5 +1,5 @@
 #!/bin/bash
-set -ex
+set -euxo pipefail
 
 # ---------------------------------------------------------------------------
 # Refuse to run against anything that looks like production, before touching

@@ -121,6 +121,9 @@ spec:
       labels:
         app: web-primary
     spec:
+      # The app never talks to the Kubernetes API, so it gets no token to
+      # talk to it with.
+      automountServiceAccountToken: false
       containers:
         - image: holdenk/pcfweb:v0.13.6
           name: pcfweb
@@ -141,6 +144,11 @@ spec:
           ports:
             - containerPort: 80
               name: web
+          # nginx and gunicorn still start as root (to bind :80 and then drop
+          # their workers to www-data), which setuid() allows without
+          # privilege escalation; nothing in the image needs a setuid binary.
+          securityContext:
+            allowPrivilegeEscalation: false
           resources:
             requests:
               cpu: 100m
@@ -152,7 +160,10 @@ spec:
           # plain-HTTP request with a 301 before any database access, and
           # Kubernetes counts a 3xx as success. The Host override is because
           # the kubelet otherwise sends the pod IP, which ALLOWED_HOSTS
-          # rejects. See main/middleware.py.
+          # rejects. See main/middleware.py. timeoutSeconds is 5 rather than
+          # the default 1 because the probe waits on that query, and the
+          # database's own connect_timeout (settings.py) is 5 -- a one-second
+          # probe flapped readiness whenever Postgres was merely slow.
           livenessProbe:
             httpGet:
               httpHeaders:
@@ -161,6 +172,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 180
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               httpHeaders:
@@ -169,6 +181,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 10
+            timeoutSeconds: 5
           startupProbe:
             httpGet:
               httpHeaders:
@@ -177,6 +190,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 30
 ---
 apiVersion: apps/v1
@@ -196,6 +210,7 @@ spec:
       labels:
         app: pcfweb
     spec:
+      automountServiceAccountToken: false
       # web-primary applies the migrations, but both Deployments roll at the
       # same time, so these pods would otherwise start serving new code
       # against the old schema until it caught up. Block here instead: the
@@ -251,6 +266,11 @@ spec:
           ports:
             - containerPort: 80
               name: web
+          # nginx and gunicorn still start as root (to bind :80 and then drop
+          # their workers to www-data), which setuid() allows without
+          # privilege escalation; nothing in the image needs a setuid binary.
+          securityContext:
+            allowPrivilegeEscalation: false
           resources:
             requests:
               cpu: 100m
@@ -267,6 +287,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 180
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               httpHeaders:
@@ -275,6 +296,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 10
+            timeoutSeconds: 5
           startupProbe:
             httpGet:
               httpHeaders:
@@ -283,6 +305,7 @@ spec:
               path: /healthz
               port: 80
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 30
 ---
 apiVersion: v1
@@ -329,3 +352,83 @@ spec:
                 name:  web-svc
                 port:
                   number: 80
+---
+# The order sweeper. Stripe redelivers a webhook only when the *delivery*
+# failed, so a fulfilment step that fails gracefully -- an SMTP blip, a slow
+# line-item lookup, a missing book archive -- answers 200, and nothing ever
+# comes back to retry it. This is what comes back. It also asks Stripe about
+# orders still PENDING past the grace period, which is the only thing that
+# notices a webhook that has stopped arriving at all (rotated secret,
+# unregistered endpoint, pod clock drift).
+#
+# Hourly rather than every few minutes: the webhook is still the primary path
+# and handles the overwhelming majority within seconds, so this is the repair
+# pass, not the mechanism. A buyer waiting on a download after an SMTP outage
+# waits at most an hour; the Stripe API cost is one lookup per genuinely
+# stuck order.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: order-sweep
+  namespace: pcfweb
+  labels:
+    app: pcfweb
+spec:
+  schedule: "17 * * * *"
+  # Never two sweeps at once. The fulfilment lease would make an overlap safe
+  # anyway, but a backlog of queued sweeps racing each other for the same
+  # orders is noise nobody needs to read.
+  concurrencyPolicy: Forbid
+  # A missed window (a cluster upgrade, a paused node) is not worth catching
+  # up on: the next hour's run covers everything the missed one would have.
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # One attempt. Anything the sweep could not finish is still recorded on
+      # the order and picked up by the next hourly run, so a retry here would
+      # only duplicate log noise.
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          # Same as the Deployments: no Kubernetes API access, no privilege
+          # escalation.
+          automountServiceAccountToken: false
+          containers:
+            - image: holdenk/pcfweb:v0.13.6
+              name: order-sweep
+              securityContext:
+                allowPrivilegeEscalation: false
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  export DJANGO_CONFIGURATION=${DJANGO_CONFIGURATION:-Prod}
+                  export DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE:-pigscanfly.settings}
+                  cd /opt/app
+                  # No --fail: a permanently broken order (a withheld
+                  # download, an address Stripe never reported) would
+                  # otherwise mark every run failed forever, and a red
+                  # CronJob nobody can make green is a red CronJob nobody
+                  # reads. The counts in the log are the signal.
+                  ./manage.py sweep_orders
+              env:
+              - name: DBPASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: pcfweb-internal-pg-secret
+                    key: password
+              envFrom:
+              - secretRef:
+                  name: pcfweb-secret
+              - configMapRef:
+                  name: pcfweb-db-config
+              imagePullPolicy: Always
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi

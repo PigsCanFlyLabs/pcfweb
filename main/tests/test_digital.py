@@ -12,7 +12,6 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-from django.core import mail
 from django.test import RequestFactory, TestCase, override_settings
 
 from main import digital
@@ -382,7 +381,10 @@ class DigitalDownloadViewTest(BookAssetRootMixin, TestCase):
 
         self.assertEqual(response.status_code, 200)
         assert_never_cache_response(self, response)
-        response.close()
+        # Drain rather than close(): closing an unconsumed streaming response
+        # fires request_finished outside the test client's wrapper, which
+        # closes the real database connection on Postgres.
+        b"".join(response.streaming_content)
 
     def test_a_tampered_token_gets_nothing(self):
         token = self._valid_token()

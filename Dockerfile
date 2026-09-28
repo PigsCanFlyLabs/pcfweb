@@ -52,8 +52,9 @@ RUN pip install --no-cache-dir --upgrade pip \
 ENV GEOIP_PATH=/opt/app/geoip
 COPY --from=geoip --chown=www-data:www-data /geoip /opt/app/geoip
 
-# copy source (www-data owns it; thumbnails are generated into static/ at
-# request time)
+# copy source (www-data owns it). Thumbnails are pre-generated into static/
+# at build time by scripts/checks.sh and verified by build.sh, not written
+# at request time -- see THUMBNAIL_MEDIA_ROOT in pigscanfly/settings.py.
 COPY --chown=www-data:www-data main /opt/app/main
 COPY --chown=www-data:www-data static /opt/app/static
 COPY --chown=www-data:www-data pigscanfly /opt/app/pigscanfly

@@ -375,7 +375,10 @@ class SiteDomainMigrationTest(TestCase):
         # canonical row and keeps its newsletter attachments reachable.
         Site.objects.filter(pk=settings.SITE_ID).update(
             domain="example.com", name="example.com")
+        # An explicit pk: the default row was inserted with pk=1 without
+        # advancing Postgres's sequence, so an automatic pk collides there.
         duplicate = Site.objects.create(
+            pk=Site.objects.order_by("-pk").first().pk + 1,
             domain="www.pigscanfly.ca", name="Added by hand")
         moved = Newsletter.objects.get(slug="dc4k")
         moved.site.set([duplicate])
@@ -546,7 +549,7 @@ class NextRedirectTest(MailingListTestBase):
 
     @override_settings(MAILING_LIST_ALLOWED_NEXT_HOSTS=["kexample.org"])
     def test_a_kelvin_sign_host_does_not_match_an_ascii_k_allowlist_entry(self):
-        response = self.assert_ignored("https://\u212Aexample.org/phish")
+        self.assert_ignored("https://\u212Aexample.org/phish")
         self.assertTrue(Subscription.objects.exists())
 
     def test_a_json_caller_is_told_the_next_url_instead_of_being_redirected(self):
@@ -562,7 +565,7 @@ class NextRedirectTest(MailingListTestBase):
         self.assertTrue(response.json()["ok"])
 
     def test_an_off_allowlist_absolute_url_is_ignored(self):
-        response = self.assert_ignored("https://evil.example/landing")
+        self.assert_ignored("https://evil.example/landing")
         self.assertTrue(Subscription.objects.exists())
 
     def test_a_protocol_relative_next_is_ignored(self):

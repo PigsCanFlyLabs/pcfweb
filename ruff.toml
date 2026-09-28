@@ -1,0 +1,7 @@
+# Deliberately narrow: pyflakes' checks (unused and undefined names, star
+# imports) and nothing stylistic. The point is catching mistakes, not
+# reformatting a codebase that has its own long-established style.
+extend-exclude = ["main/migrations"]
+
+[lint]
+select = ["F"]

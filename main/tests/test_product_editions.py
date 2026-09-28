@@ -283,13 +283,11 @@ class MsrpRenderingTest(ProductFactoryMixin, TestCase):
 
 
 class MsrpStaysOutOfTheJavascriptTotalTest(ProductFactoryMixin, TestCase):
-    """The landmine, pinned so a later edit cannot step on it.
+    """The running total reads the price's integer cents, never the MSRP.
 
-    single-product.html computes its running total with
-    parseFloat("{{ product.get_display_price }}"), which already yields NaN
-    on a pre-order row because get_display_price() returns "Pre-order: 30.00".
-    That bug predates this branch and is untouched by it. What this test
-    guarantees is that MSRP did not become a second value on that path.
+    It used to be parseFloat("{{ product.get_display_price }}"), which was
+    NaN on a pre-order row because get_display_price() returns
+    "Pre-order: 30.00". It now reads the cents column directly.
     """
 
     def test_the_total_script_reads_the_price_and_not_the_msrp(self):
@@ -299,25 +297,19 @@ class MsrpStaysOutOfTheJavascriptTotalTest(ProductFactoryMixin, TestCase):
 
         body = self.client.get(product.get_absolute_url()).content.decode()
 
-        self.assertIn('parseFloat("39.99")', body)
-        self.assertNotIn('parseFloat("49.99")', body)
-        # And exactly one parseFloat of a rendered price, not two.
-        self.assertEqual(body.count("parseFloat(\""), 1)
+        self.assertIn("let unit = 3999 / 100;", body)
+        self.assertNotIn("4999 / 100", body)
+        self.assertNotIn('parseFloat("', body)
 
-    def test_a_preorder_row_with_an_msrp_is_no_worse_than_before(self):
-        """Explicitly documents the pre-existing NaN rather than pretending
-        it is fixed: the point is that adding an MSRP does not add a second
-        unparseable value, and does not make the MSRP itself reachable."""
+    def test_a_preorder_row_totals_a_number_not_nan(self):
         product = self.make_product(
             pk=312, name="Preorder book", price=3000, msrp=4000,
             preorder_only=True, cat=Product.Categories.BOOKS)
 
         body = self.client.get(product.get_absolute_url()).content.decode()
 
-        # Unchanged pre-existing behaviour: the price string is still the
-        # human one, and still the only thing parseFloat sees.
-        self.assertIn('parseFloat("Pre-order: 30.00")', body)
-        self.assertEqual(body.count("parseFloat(\""), 1)
+        self.assertIn("let unit = 3000 / 100;", body)
+        self.assertNotIn('parseFloat("Pre-order', body)
         # The MSRP rendered as markup, nowhere near the script.
         self.assertIn("<s>40.00</s>", body)
 

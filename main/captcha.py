@@ -62,7 +62,9 @@ def _parse(raw: str) -> Optional[int]:
     cleaned = raw.strip().lower()
     if not cleaned:
         return None
-    if cleaned.isdigit():
+    # isdecimal, not isdigit: "²".isdigit() is True but int("²") raises,
+    # which turned a superscript answer into a 500.
+    if cleaned.isdecimal():
         return int(cleaned)
     if cleaned in NUMBER_WORDS:
         return NUMBER_WORDS.index(cleaned)

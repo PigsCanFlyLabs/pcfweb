@@ -164,13 +164,12 @@
 		    <form method="POST" action="{% url 'checkout' %}">
                       {% csrf_token %}
                       {% comment %}
-                          The coupon box used to be hidden on a
-                          pay-what-you-want cart, because Stripe refuses
-                          discounts on a custom_unit_amount price. These are
-                          ordinary fixed prices now, so a discount is accepted
-                          like anywhere else and the box comes back.
+                          No coupon box here: promotion codes are entered on
+                          Stripe's checkout page (allow_promotion_codes in
+                          Payments.checkout). A box on this page passed raw
+                          Stripe coupon ids straight through, so any internal
+                          coupon worked for anyone who guessed its name.
                       {% endcomment %}
-		      Coupon (optional): <input type="text" name="coupon" />
                       <button type="submit" class="proceed-btn">Proceed to Checkout</button>
 		    </form>
                     {% comment %}

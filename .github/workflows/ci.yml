@@ -5,9 +5,19 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only token: nothing here writes to the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the older run moot.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -18,3 +28,45 @@ jobs:
         run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Checks
         run: ./scripts/checks.sh
+
+  # The same suite on the database production runs. sqlite makes
+  # select_for_update a no-op and serialises every write, so the concurrency
+  # tests (the webhook's PENDING -> PAID race, the fulfilment claim) only
+  # really exercise their locking here. See PostgresTest in
+  # pigscanfly/settings.py.
+  test-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_CONFIGURATION: PostgresTest
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Tests
+        # collectstatic and the thumbnails first, for the same reason as in
+        # scripts/checks.sh: the page tests read them off disk.
+        run: |
+          ./manage.py collectstatic --no-input
+          ./manage.py pregenerate_thumbnails --allow-absent-asset-tree
+          ./manage.py test main

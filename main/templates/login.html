@@ -19,8 +19,11 @@
 		  </div>
 		  <input type="email" placeholder="Email" name="email" required />
 		  <input type="password" placeholder="Password" name="password" required />
+		  {% if next %}<input type="hidden" name="next" value="{{ next }}" />{% endif %}
 		  {% if valid == 'false' %}
 		  <p class="text-danger error-msg">Invalid credentials.</p>
+		  {% elif valid == 'throttled' %}
+		  <p class="text-danger error-msg">Too many sign-in attempts. Please try again in an hour, or reset your password.</p>
 		  {% endif %}
 		  <div class="main-border-button">
 		    <button type="submit">Sign In</button>

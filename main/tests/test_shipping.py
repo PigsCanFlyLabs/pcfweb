@@ -74,8 +74,7 @@ class ShippingRateConfigTest(TestCase):
                 self._checkout()
 
         self.assertIn(SHIPPING_RATE_ERROR, str(caught.exception))
-        # Not mistaken for a bad coupon, which would silently retry without
-        # the discount and fail the same way a second time.
+        # Not retried: it would fail the same way a second time.
         self.assertEqual(create_session.call_count, 1)
 
     def test_ids_are_stripped_not_merely_tested_for_blankness(self):

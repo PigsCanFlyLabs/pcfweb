@@ -57,6 +57,26 @@ class StaticPagesTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "tos.html")
 
+    def test_a_guest_can_find_the_cart_from_the_nav(self):
+        # Guests have carts too, and could once reach theirs only through
+        # the add-to-cart redirect.
+        response = self.client.get("/privacy")
+        self.assertContains(response, 'href="/cart"')
+
+    def test_the_contact_address_comes_from_settings(self):
+        with self.settings(SUPPORT_EMAIL="help@example.org"):
+            response = self.client.get("/contact")
+        self.assertContains(response, "mailto:help@example.org")
+        self.assertNotContains(response, "support@pigscanfly.ca")
+
+    def test_the_returns_page_is_titled_returns(self):
+        response = self.client.get("/returns")
+        self.assertEqual(response.context["title"], "Returns")
+
+    def test_the_products_page_spells_products(self):
+        response = self.client.get("/products")
+        self.assertNotContains(response, "producs")
+
     def test_queued_messages_clear_the_header_by_token(self):
         root = self.main_css_declarations_for(":root")
         messages = self.main_css_declarations_for(".site-messages")

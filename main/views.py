@@ -1,13 +1,15 @@
 import json
 import logging
 import re
-from datetime import timedelta
+import traceback
+from datetime import datetime, timedelta
 from urllib.parse import quote, urlparse
 
-from typing import *
+from typing import Any, Dict, Optional, Tuple
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.password_validation import validate_password
 from django.contrib.admin.views.decorators import staff_member_required
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
@@ -47,7 +49,8 @@ from main.models import (
 from main.payments import Payments
 from main.socials import LIBERATED_BREAD_URL, follow_targets
 from main.utils import (
-    generate_username, get_country_code, get_storable_client_ip)
+    email_admins, generate_username, get_country_code,
+    get_storable_client_ip)
 from pigscanfly.hostnames import ascii_lowercase
 
 logger = logging.getLogger(__name__)
@@ -243,7 +246,7 @@ class TosView(View):
 
 class ReturnView(View):
     def get(self, request):
-        return render(request, 'return.html', context={'title': 'TOS'})
+        return render(request, 'return.html', context={'title': 'Returns'})
 
 class ContactView(View):
     def get(self, request):
@@ -341,7 +344,7 @@ class ProductsView(View):
         if "category" not in request.GET and category is None:
             return render(request, 'products.html', context={
                 'title': 'Products',
-                'type': 'producs',
+                'type': 'Products',
                 'products': (Product.objects.exclude(noorder=True)
                              .order_by_release_date()
                              .collapse_format_groups())
@@ -362,7 +365,9 @@ class ProductsView(View):
             extra_style = None
             bg_img_name = f"assets/images/{cat_name}.jpg".lower()
             if finders.find(f"{bg_img_name}"):
-                extra_style = f"background-image: url('/static/{bg_img_name}');"
+                extra_style = (
+                    "background-image: "
+                    f"url('{staticfiles_storage.url(bg_img_name)}');")
             return render(request, 'products.html', context={
                 'title': f'Products - {cat_name}',
                 'type': cat_name,
@@ -829,6 +834,24 @@ class BaseCartView():
                 "Merge repriced %s on cart %s; holding checkout until the "
                 "cart has been shown.", ", ".join(repriced), user_cart.pk)
 
+# Per-hour ceilings for the account forms, per client address. Generous
+# enough that a person who forgets a password never meets them; low enough
+# that a password list does.
+#
+# Login counts failures only, and only per source. A bucket keyed on the
+# address being tried was a lockout anyone could impose on an account whose
+# email they knew -- including the staff account -- by sending wrong
+# passwords, since the correct one was then refused too. Guessing spread over
+# many sources is bounded by this limit times the number of sources, against
+# passwords the signup validators now require to be non-trivial.
+SIGNUP_ATTEMPTS_PER_HOUR = 20
+LOGIN_FAILURES_PER_HOUR_PER_SOURCE = 30
+
+
+def _source_key(request) -> str:
+    return get_storable_client_ip(request) or "unparseable-source"
+
+
 class SignupView(View):
     def get(self, request):
         in_use = request.GET.get('in_use', 'false')
@@ -837,6 +860,9 @@ class SignupView(View):
             'title': 'Sign Up', 'in_use': in_use, 'invalid': invalid})
 
     def post(self, request):
+        if over_cache_limit(
+                f"signup:{_source_key(request)}", SIGNUP_ATTEMPTS_PER_HOUR):
+            return redirect(reverse('signup') + '?invalid=throttled')
         # Both are required. Missing values used to reach generate_username()
         # as None and 500 on the AttributeError, and a missing password
         # reached set_password(None), which silently creates an account with
@@ -849,6 +875,16 @@ class SignupView(View):
             validate_email(email)
         except ValidationError:
             return redirect(reverse('signup') + '?invalid=email')
+
+        # AUTH_PASSWORD_VALIDATORS were configured but never consulted, so
+        # "1" was an acceptable password. Checked against an unsaved User so
+        # the similarity validator can compare the password to the address.
+        try:
+            validate_password(password, user=User(email=email))
+        except ValidationError as error:
+            return render(request, 'signup.html', status=400, context={
+                'title': 'Sign Up', 'in_use': 'false',
+                'password_errors': error.messages})
 
         # email is not unique on auth.User, so this can legitimately match
         # more than one row; either way the address is taken.
@@ -1078,15 +1114,18 @@ class SetPwywAmountView(View, BaseCartView):
         return redirect('cart')
 
 
+# The pk of the order this browser last went to Stripe to pay for.
+CHECKOUT_ORDER_SESSION_KEY = "checkout_order_id"
+
+
 class CheckoutView(View, BaseCartView):
     # POST only. A GET here creates a PENDING order and a Stripe session as a
     # side effect, which an <img> tag or a link prefetch could trigger
     # cross-site with no CSRF token involved. cart.html posts a real form.
     def post(self, request):
-        coupon = request.POST.get("coupon") or None
-        return self.start_checkout(request, coupon=coupon)
+        return self.start_checkout(request)
 
-    def start_checkout(self, request, coupon=None):
+    def start_checkout(self, request):
         """Record the order, then hand the customer to Stripe.
 
         The PENDING order has to exist *before* Session.create, because its id
@@ -1147,8 +1186,7 @@ class CheckoutView(View, BaseCartView):
         # and the session created.
         #
         # This is the security boundary for the whole feature. Nothing posted
-        # to this endpoint is consulted -- `request.POST` is read for the
-        # coupon and for nothing else -- so an amount injected at /checkout,
+        # to this endpoint is consulted -- so an amount injected at /checkout,
         # or a Price minted for an amount that has since been edited, cannot
         # decide what the buyer is charged. The database row does.
         for cart_product in cart.products.select_related("product"):
@@ -1157,7 +1195,7 @@ class CheckoutView(View, BaseCartView):
         order = Order.create_from_cart(cart, user=user)
         try:
             redirect_url, session_id = Payments.checkout(
-                request, cart, coupon=coupon, order=order)
+                request, cart, order=order)
         except Exception:
             # No session was ever created, so nothing will ever arrive for
             # this order -- not even checkout.session.expired. Close it out
@@ -1168,25 +1206,40 @@ class CheckoutView(View, BaseCartView):
             Order.objects.filter(
                 pk=order.pk, status=Order.Status.PENDING).update(
                     status=Order.Status.CANCELLED)
+            # Back to the cart with a sentence, never a 500. A stack trace
+            # gives the buyer nothing to act on, and the cart they were about
+            # to pay for is still there to retry. What the 500 used to carry
+            # -- Django's error mail to ADMINS -- is sent explicitly instead,
+            # because a failure here is almost always configuration (tax,
+            # shipping rates, a rotated key) that breaks every checkout until
+            # the owner fixes it.
+            email_admins(
+                f"Stripe checkout failed for order #{order.pk}",
+                traceback.format_exc(), logger,
+                f"Stripe checkout failed for order #{order.pk}")
             if order.amount_total == 0:
                 # "If Stripe is being difficult with $0" -- the owner's clause,
                 # and a requirement rather than a joke. A zero-total session is
                 # the one shape of this feature with no payment behind it, so a
                 # buyer who hits a Stripe problem here has nothing to retry and
-                # no other way through. A 500 would leave a kid staring at a
-                # stack trace with the book unbought; send them back to the
-                # cart, where the owner's notice carries the mailto, and say to
-                # use it. Every other failure still raises, because those are
-                # payment problems the buyer can act on.
+                # no other way through; say to use the e-mail instead.
                 messages.error(
                     request,
                     "Sorry -- Stripe would not set up this free order. "
                     "Please e-mail holden@pigscanfly.ca and we can send you a "
                     "copy directly.")
-                return redirect('cart')
-            raise
+            else:
+                messages.error(
+                    request,
+                    "Sorry -- we could not start checkout just now. Your cart "
+                    "is unchanged; please try again in a few minutes, or "
+                    f"e-mail {settings.SUPPORT_EMAIL} if it keeps happening.")
+            return redirect('cart')
         order.stripe_session_id = session_id
         order.save(update_fields=['stripe_session_id', 'updated_at'])
+        # Which order this browser went to pay for, so the success page
+        # empties the cart only for the buyer who actually checked out.
+        request.session[CHECKOUT_ORDER_SESSION_KEY] = order.pk
         return redirect(redirect_url)
 
 
@@ -1208,22 +1261,30 @@ class CheckoutSuccessView(View, BaseCartView):
     """
 
     def get(self, request):
-        # Only a session id that resolves to a real order empties the cart.
-        # Stripe substitutes it into success_url (see Payments.checkout), so
-        # the genuine redirect always carries one; a bare cross-site GET of
-        # this URL does not, and so can no longer clear a stranger's cart.
+        # Only the order this browser checked out empties its cart. A session
+        # id alone used to be enough, so reloading the page (or going back
+        # to it from history) wiped whatever had been added since, and a
+        # link carrying someone else's session id emptied the victim's cart.
+        # Stripe substitutes the id into success_url (see Payments.checkout);
+        # CheckoutView records which order this browser went to pay for.
         order = None
         session_id = request.GET.get("session_id")
         if session_id:
-            order = Order.objects.filter(
-                stripe_session_id=session_id).prefetch_related('items').first()
-        if order is not None:
+            order = (Order.objects.filter(stripe_session_id=session_id)
+                     .prefetch_related('items__product').first())
+        if (order is not None and request.session.get(
+                CHECKOUT_ORDER_SESSION_KEY) == order.pk):
+            del request.session[CHECKOUT_ORDER_SESSION_KEY]
             self.get_cart(request).clear()
+        if order is not None:
             if order.status == Order.Status.PENDING:
                 self._reconcile_with_stripe(order, session_id)
         context = {
             'title': 'Success! - Checkout',
             'order': order,
+            # The same figure the download email quotes, not a number typed
+            # into the template that outlives a change to the setting.
+            'link_lifetime_days': link_lifetime_days(),
         }
         context.update(post_purchase_context(request, order))
         context.update(google_customer_reviews_context(order))
@@ -1259,29 +1320,8 @@ class CheckoutSuccessView(View, BaseCartView):
                 session_id, order.pk, payment_status)
             return
 
-        webhook = StripeWebhookView()
-        fields = webhook.paid_fields(session)
-        with transaction.atomic():
-            Order.objects.select_for_update().filter(pk=order.pk).first()
-            updated = Order.objects.filter(
-                pk=order.pk, status=Order.Status.PENDING).update(**fields)
-
-        if not updated:
-            order.refresh_from_db()
-            if order.status == Order.Status.PAID:
-                logger.info(
-                    "Checkout success page: order #%s was already PAID "
-                    "(likely raced with the webhook); running fulfilment.",
-                    order.pk)
-                webhook.fulfil_order(order)
-            else:
-                logger.info(
-                    "Checkout success page: order #%s is past PENDING; "
-                    "not overwriting.", order.pk)
-            return
-
-        order.refresh_from_db()
-        webhook.fulfil_order(order)
+        StripeWebhookView().pay_and_fulfil(
+            order, session, source="checkout success page")
 
 
 # How long after payment the checkout success page keeps offering the Google
@@ -1472,7 +1512,7 @@ class PurchaseFeedbackView(View):
         if not session_id:
             return None
         return Order.objects.filter(
-            stripe_session_id=session_id).prefetch_related('items').first()
+            stripe_session_id=session_id).prefetch_related('items__product').first()
 
     def render_result(self, request, order: Optional[Order], ok: bool = True,
                       message: Optional[str] = None, status: int = 200):
@@ -1632,6 +1672,24 @@ class StripeWebhookView(View):
                 session.get("id"), session.get("client_reference_id"))
             return
 
+        self.pay_and_fulfil(order, session, source="webhook delivery")
+
+    def pay_and_fulfil(self, order: Order, session, source: str) -> None:
+        """Move a PENDING order to PAID from `session`, then fulfil it.
+
+        Two callers arrive here holding the same paid Stripe session -- a
+        webhook delivery and the checkout success page -- and either can be
+        looking at one order at the same moment as the other. The guarded
+        UPDATE below is what lets them race freely: both try to move
+        PENDING -> PAID, exactly one affects a row and goes on to fulfil,
+        and the loser falls through to the already-PAID branch, which
+        resumes whatever fulfilment is still incomplete rather than
+        repeating what is done.
+
+        `source` only ever reaches a log line. It is what answers "what
+        finally paid this order" when the owner goes looking, which matters
+        precisely because the webhook is not always the thing that did.
+        """
         fields = self.paid_fields(session)
         with transaction.atomic():
             # select_for_update serialises concurrent deliveries on Postgres;
@@ -1647,14 +1705,15 @@ class StripeWebhookView(View):
             order.refresh_from_db()
             if order.status == Order.Status.PAID:
                 logger.info(
-                    "Order #%s is already PAID; retrying incomplete "
-                    "fulfilment for Stripe session %s.",
-                    order.pk, session.get("id"))
+                    "Order #%s is already PAID (reached by %s); retrying "
+                    "incomplete fulfilment for Stripe session %s.",
+                    order.pk, source, session.get("id"))
                 self.fulfil_order(order)
                 return
             logger.info(
-                "Order #%s is already past PENDING; ignoring a duplicate "
-                "delivery of Stripe session %s.", order.pk, session.get("id"))
+                "Order #%s is already past PENDING (reached by %s); not "
+                "overwriting it from Stripe session %s.",
+                order.pk, source, session.get("id"))
             return
 
         order.refresh_from_db()
@@ -1668,7 +1727,8 @@ class StripeWebhookView(View):
         repaired by Stripe's next delivery rather than turning PAID into a
         terminal, unfulfilled state.
         """
-        if not self.claim_fulfilment(order):
+        claimed_at = self.claim_fulfilment(order)
+        if claimed_at is None:
             logger.info(
                 "Order #%s fulfilment is already claimed by another worker; "
                 "leaving it to them.", order.pk)
@@ -1723,9 +1783,9 @@ class StripeWebhookView(View):
             if order.notified_at is None:
                 order.notify_owner()
         finally:
-            self.release_fulfilment(order)
+            self.release_fulfilment(order, claimed_at)
 
-    def claim_fulfilment(self, order: Order) -> bool:
+    def claim_fulfilment(self, order: Order) -> Optional[datetime]:
         """Take the exclusive right to fulfil this order, or report defeat.
 
         One conditional UPDATE, which both Postgres and SQLite apply
@@ -1734,24 +1794,35 @@ class StripeWebhookView(View):
         in handle_paid is released with its transaction, and each completion
         marker is only written once its side effect has already happened, so
         without this both workers would read null markers and both would send.
+
+        Returns the claim's timestamp, which is the token release needs, or
+        None when another worker holds a live claim.
         """
         now = timezone.now()
-        return bool(
-            Order.objects.filter(pk=order.pk).filter(
-                Q(fulfilment_claimed_at__isnull=True)
-                | Q(fulfilment_claimed_at__lt=now - self.FULFILMENT_LEASE)
-            ).update(fulfilment_claimed_at=now))
+        won = Order.objects.filter(pk=order.pk).filter(
+            Q(fulfilment_claimed_at__isnull=True)
+            | Q(fulfilment_claimed_at__lt=now - self.FULFILMENT_LEASE)
+        ).update(fulfilment_claimed_at=now)
+        return now if won else None
 
     @staticmethod
-    def release_fulfilment(order: Order) -> None:
-        """Drop the claim so the next delivery can pick up anything left.
+    def release_fulfilment(order: Order, claimed_at: datetime) -> None:
+        """Drop *this worker's* claim so the next attempt can pick up the rest.
 
         Released rather than left to expire because a run that finished with
         an action still incomplete -- a bounced owner email, say -- should be
         retried by Stripe's next delivery immediately, not after the lease
         runs out.
+
+        Only while the claim is still the one this worker took. A run that
+        outlived FULFILMENT_LEASE may have been superseded -- another
+        delivery, or the order sweep, re-claimed the order once the lease
+        expired -- and clearing the column unconditionally would drop that
+        worker's live claim and let a third one start alongside it.
         """
-        Order.objects.filter(pk=order.pk).update(fulfilment_claimed_at=None)
+        Order.objects.filter(
+            pk=order.pk, fulfilment_claimed_at=claimed_at,
+        ).update(fulfilment_claimed_at=None)
         order.fulfilment_claimed_at = None
 
     def handle_cancelled(self, session, reason: str) -> None:
@@ -1930,14 +2001,34 @@ class CheckoutCancelView(View, BaseCartView):
 
 class LoginView(View):
     def get(self, request):
-        valid = request.GET.get('valid')
-        return render(request, 'login.html', context={'title': 'Log In', 'valid': valid})
+        return render(request, 'login.html', context={
+            'title': 'Log In',
+            'valid': request.GET.get('valid'),
+            # login_required sends people here with ?next=; carried through
+            # the form so they land back where they were going.
+            'next': request.GET.get('next', ''),
+        })
+
+    @staticmethod
+    def _failed(next_url: str, reason: str = 'false'):
+        url = reverse('login') + f'?valid={reason}'
+        if next_url:
+            url += '&next=' + quote(next_url, safe='')
+        return redirect(url)
 
     def post(self, request):
         email = normalize_email_identity(request.POST.get('email') or '')
         password = request.POST.get('password') or ''
+        next_url = request.POST.get('next') or ''
         if not email or not password:
-            return redirect(reverse('login') + '?valid=false')
+            return self._failed(next_url)
+
+        # Peek, don't count: only a failure below adds to the bucket, so a
+        # person's own successful logins never use it up.
+        failures_key = f"login:failures:{_source_key(request)}"
+        if (cache.get(failures_key) or 0) >= LOGIN_FAILURES_PER_HOUR_PER_SOURCE:
+            logger.warning("Throttled a login attempt for %s.", email)
+            return self._failed(next_url, 'throttled')
 
         # email is not unique on auth.User, so .get() here could raise
         # MultipleObjectsReturned and 500 the login page. Try each match
@@ -1947,13 +2038,28 @@ class LoginView(View):
                                 username=candidate.username, password=password)
             if user is not None:
                 login(request, user)
+                if url_has_allowed_host_and_scheme(
+                        next_url, allowed_hosts={request.get_host()},
+                        require_https=request.is_secure()):
+                    return redirect(next_url)
                 return redirect('home')
-        return redirect(reverse('login') + '?valid=false')
+        over_cache_limit(failures_key, LOGIN_FAILURES_PER_HOUR_PER_SOURCE)
+        return self._failed(next_url)
 
 
 @method_decorator(login_required, name='dispatch')
 class LogoutView(View):
+    """POST logs out; GET only offers the button.
+
+    Logging out on GET let any page on the internet sign a visitor out with
+    an <img> tag. The nav submits a POST form (templates/base.html); the GET
+    page is what a visitor without JavaScript sees after clicking the link.
+    """
+
     def get(self, request):
+        return render(request, 'logout.html', context={'title': 'Log Out'})
+
+    def post(self, request):
         logout(request)
         return redirect('login')
 

@@ -690,7 +690,7 @@ class CartNotSoldHereTest(CartTestBase):
     def test_a_mixed_pwyw_cart_is_no_longer_blocked(self):
         # Was blocked because Stripe refuses a second line item beside a
         # custom_unit_amount price. The e-book carries an ordinary fixed price
-        # now, so the cart checks out and the coupon box comes back with it.
+        # now, so the cart checks out.
         client = Client()
         cart = Cart.objects.create()
         session = client.session
@@ -706,7 +706,7 @@ class CartNotSoldHereTest(CartTestBase):
 
         self.assertNotIn("pwyw-checkout-blocker", html)
         self.assertNotIn("only line in its checkout", html)
-        self.assertIn('name="coupon"', html)
+        self.assertIn('class="proceed-btn"', html)
         # Still both in the cart, and still named.
         self.assertIn("Distributed Computing 4 Kids", html)
 
@@ -720,7 +720,7 @@ class CartNotSoldHereTest(CartTestBase):
 
         self.assertIn("pwyw-notice", html)
         self.assertNotIn("pwyw-checkout-blocker", html)
-        self.assertIn('name="coupon"', html)
+        self.assertIn('class="proceed-btn"', html)
 
     def test_a_pwyw_item_can_join_a_non_empty_cart(self):
         self.client.post("/add-to-cart/104/1")

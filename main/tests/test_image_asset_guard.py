@@ -4,8 +4,9 @@ from pathlib import Path
 
 from django.test import SimpleTestCase
 
+from main.tests.base import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
 SCRIPT = REPO_ROOT / "scripts" / "check-image-assets.sh"
 
 

@@ -1,7 +1,7 @@
 import logging
 
 import stripe
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from main.models import Product
 
@@ -73,13 +73,15 @@ class Command(BaseCommand):
                     )
                     continue
 
-                counts[changed_label] += 1
                 if apply:
                     attempted_change = True
                     stripe.Product.modify(
                         product.external_product_id,
                         tax_code=local_tax_code,
                     )
+                # Counted after the write, so a failed modify() is reported
+                # once, as an error, rather than as both a change and one.
+                counts[changed_label] += 1
                 self.stdout.write(
                     f"{mode} {changed_label} "
                     f"product_pk={product.pk} stripe_product={product.external_product_id} "
@@ -114,3 +116,9 @@ class Command(BaseCommand):
             f"skipped-no-local-code={counts['skipped-no-local-code']} "
             f"errored={counts['errored']}"
         )
+        if counts["errored"]:
+            # Non-zero so a script or an operator's `&&` notices; the
+            # per-product lines above say which ones.
+            raise CommandError(
+                f"{counts['errored']} product(s) could not be reconciled "
+                "with Stripe; see the ERROR lines above.")

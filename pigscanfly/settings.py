@@ -9,11 +9,12 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 import os
 
-from typing import *
+from typing import List, Optional, Tuple
 
 from pathlib import Path
 
 from configurations import Configuration
+from django.contrib.messages import constants as message_constants
 from django.core.exceptions import ImproperlyConfigured
 
 from pigscanfly.hostnames import ascii_lowercase
@@ -194,6 +195,7 @@ class Base(Configuration):
                     'django.contrib.auth.context_processors.auth',
                     'django.contrib.messages.context_processors.messages',
                     'main.context_processors.free_shipping',
+                    'main.context_processors.support_email',
                 ],
             },
         },
@@ -213,6 +215,10 @@ class Base(Configuration):
 
     # Password validation
     # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
+
+    # Bootstrap names the red alert "danger"; Django calls it "error".
+    # templates/base.html renders each message as alert-<tag>.
+    MESSAGE_TAGS = {message_constants.ERROR: "danger"}
 
     AUTH_PASSWORD_VALIDATORS = [
         {
@@ -364,7 +370,7 @@ class Base(Configuration):
     # timeout: a hung Stripe connection would get the worker killed rather
     # than returning an error the view could handle. Keep this comfortably
     # under GUNICORN_TIMEOUT (see scripts/start-server.sh).
-    STRIPE_TIMEOUT = int(os.getenv("STRIPE_TIMEOUT", "15"))
+    STRIPE_TIMEOUT = parse_int(os.getenv("STRIPE_TIMEOUT"), 15)
 
     # Stripe Checkout shipping rates offered for physical goods, most
     # permissive first.
@@ -435,10 +441,15 @@ class Base(Configuration):
     DISCORD_INVITE_PART_TWO = parse_invite_half(
         os.getenv("DISCORD_INVITE_PART_TWO", "2HAmb"))
 
+    # The address the site tells customers to write to -- contact, returns,
+    # the policy pages, checkout trouble. One setting rather than a dozen
+    # copies typed into templates, reaching them through
+    # main.context_processors.support_email.
+    SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "support@pigscanfly.ca")
+
     # Where to write when the invite is broken, expired, or the halves are
     # misconfigured -- the fallback path off /discord.
-    DISCORD_SUPPORT_EMAIL = os.getenv(
-        "DISCORD_SUPPORT_EMAIL", "support@pigscanfly.ca")
+    DISCORD_SUPPORT_EMAIL = os.getenv("DISCORD_SUPPORT_EMAIL", SUPPORT_EMAIL)
 
     # SOCIAL ACCOUNTS
     # Where "follow along" points: one variable per account holder per
@@ -593,6 +604,27 @@ class Dev(Base):
     EMAIL_FILE_PATH = os.path.join(BASE_DIR, "sent_emails")
 
 
+class PostgresTest(Dev):
+    """Dev, on Postgres: for running the test suite against the database
+    production actually uses.
+
+    sqlite makes select_for_update a no-op and serialises every write, so
+    the concurrency tests (the webhook's PENDING -> PAID race, the
+    fulfilment claim) prove much less there than they appear to. CI runs the
+    suite under this configuration too. Connection details come from the
+    standard libpq variables (PGHOST, PGPORT, PGUSER, PGPASSWORD); Django
+    creates and destroys its own test database.
+    """
+
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv("PGDATABASE", "pigscanfly"),
+            "ATOMIC_REQUESTS": False,
+        }
+    }
+
+
 # The environment variables Prod refuses to boot without, and the one-line
 # reason each is fatal (the properties below carry the long version). Held as
 # data so Prod.pre_setup can name every missing one in a single failure.
@@ -674,6 +706,33 @@ class Prod(Base):
     # planned pigscanfly.ca subdomain serves HTTPS; preload is effectively
     # irreversible.
     SECURE_HSTS_SECONDS = 3600
+
+    # Without a LOGGING setting nothing below WARNING reached the pod log at
+    # all -- the app's own logger.info lines (a held checkout, a blocked
+    # sale, a skipped fulfilment claim) went nowhere, and WARNING and up only
+    # arrived through Python's last-resort handler. One stdout handler on
+    # the root logger, so `kubectl logs` shows them; Django's defaults
+    # (including the ERROR mail to ADMINS) stay in place underneath.
+    LOGGING = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "plain": {
+                "format": "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            },
+        },
+        "handlers": {
+            "stdout": {
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+                "formatter": "plain",
+            },
+        },
+        "root": {
+            "handlers": ["stdout"],
+            "level": os.getenv("LOG_LEVEL", "INFO"),
+        },
+    }
     # www.pigscanfly.ca is the canonical host: it is what SITE_BASE_URL says,
     # what the sites-framework row says (migration 0024), and therefore what
     # every emailed link carries. The bare apex currently resolves to the old
@@ -784,7 +843,7 @@ class Prod(Base):
     # refuse AUTH. If the mail server turns out not to listen on 465, the
     # flip is port 587 with EMAIL_USE_TLS on and EMAIL_USE_SSL off
     # (STARTTLS submission) -- in the ConfigMap, not here.
-    EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465"))
+    EMAIL_PORT = parse_int(os.getenv("EMAIL_PORT"), 465)
     # STARTTLS on a plaintext port versus TLS from the first byte (SMTPS,
     # port 465). At most one may be on; pre_setup fails the rollout on the
     # pair rather than letting Django's backend raise at send time -- which
@@ -803,7 +862,7 @@ class Prod(Base):
     # (check_book_assets), where it would eat into build.sh's 300s rollout
     # budget. Mail that cannot be sent in ten seconds is mail that is not
     # getting sent; every caller already catches the failure and records it.
-    EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
+    EMAIL_TIMEOUT = parse_int(os.getenv("EMAIL_TIMEOUT"), 10)
     EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "support")
     # Empty disables SMTP AUTH altogether -- Django only authenticates when
     # both user and password are non-empty -- which is the right degradation
