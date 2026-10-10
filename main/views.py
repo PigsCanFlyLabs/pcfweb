@@ -60,14 +60,28 @@ class CartQuantityOverflow(ValueError):
     """Combining valid cart quantities would exceed the storage column."""
 
 
+def source_key(request) -> str:
+    """The client address a rate limit counts against."""
+    return get_storable_client_ip(request) or "unparseable-source"
+
+
+def at_cache_limit(key: str, limit: int) -> bool:
+    """Whether an over_cache_limit bucket is already full, without counting.
+
+    For a limit that counts only some outcomes -- login failures -- and so
+    has to look before it knows whether this request will count.
+    """
+    return (cache.get(key) or 0) >= limit
+
+
 def over_cache_limit(key: str, limit: int) -> bool:
     """Count one hit against an hourly bucket and say whether it is over.
 
     The rate-limiting primitive behind every open endpoint here (the mailing
-    list signup, the post-checkout feedback form). Deliberately crude: the
-    cache is per worker process, so the real ceiling is this times the worker
-    count. That bounds a flood without needing a shared cache the site does
-    not otherwise run.
+    list signup, the post-checkout feedback form, signup and login).
+    Deliberately crude: the cache is per worker process, so the real ceiling
+    is this times the worker count. That bounds a flood without needing a
+    shared cache the site does not otherwise run.
     """
     try:
         count = cache.get_or_set(key, 0, 3600)
@@ -848,10 +862,6 @@ SIGNUP_ATTEMPTS_PER_HOUR = 20
 LOGIN_FAILURES_PER_HOUR_PER_SOURCE = 30
 
 
-def _source_key(request) -> str:
-    return get_storable_client_ip(request) or "unparseable-source"
-
-
 class SignupView(View):
     def get(self, request):
         in_use = request.GET.get('in_use', 'false')
@@ -861,7 +871,7 @@ class SignupView(View):
 
     def post(self, request):
         if over_cache_limit(
-                f"signup:{_source_key(request)}", SIGNUP_ATTEMPTS_PER_HOUR):
+                f"signup:{source_key(request)}", SIGNUP_ATTEMPTS_PER_HOUR):
             return redirect(reverse('signup') + '?invalid=throttled')
         # Both are required. Missing values used to reach generate_username()
         # as None and 500 on the AttributeError, and a missing password
@@ -1118,14 +1128,19 @@ class SetPwywAmountView(View, BaseCartView):
 CHECKOUT_ORDER_SESSION_KEY = "checkout_order_id"
 
 
+def order_for_session(session_id: Optional[str]) -> Optional[Order]:
+    """The order a Stripe Checkout session id belongs to, items prefetched."""
+    if not session_id:
+        return None
+    return (Order.objects.filter(stripe_session_id=session_id)
+            .prefetch_related('items__product').first())
+
+
 class CheckoutView(View, BaseCartView):
     # POST only. A GET here creates a PENDING order and a Stripe session as a
     # side effect, which an <img> tag or a link prefetch could trigger
     # cross-site with no CSRF token involved. cart.html posts a real form.
     def post(self, request):
-        return self.start_checkout(request)
-
-    def start_checkout(self, request):
         """Record the order, then hand the customer to Stripe.
 
         The PENDING order has to exist *before* Session.create, because its id
@@ -1213,27 +1228,20 @@ class CheckoutView(View, BaseCartView):
             # because a failure here is almost always configuration (tax,
             # shipping rates, a rotated key) that breaks every checkout until
             # the owner fixes it.
-            email_admins(
-                f"Stripe checkout failed for order #{order.pk}",
-                traceback.format_exc(), logger,
-                f"Stripe checkout failed for order #{order.pk}")
-            if order.amount_total == 0:
-                # "If Stripe is being difficult with $0" -- the owner's clause,
-                # and a requirement rather than a joke. A zero-total session is
-                # the one shape of this feature with no payment behind it, so a
-                # buyer who hits a Stripe problem here has nothing to retry and
-                # no other way through; say to use the e-mail instead.
-                messages.error(
-                    request,
-                    "Sorry -- Stripe would not set up this free order. "
-                    "Please e-mail holden@pigscanfly.ca and we can send you a "
-                    "copy directly.")
-            else:
-                messages.error(
-                    request,
-                    "Sorry -- we could not start checkout just now. Your cart "
-                    "is unchanged; please try again in a few minutes, or "
-                    f"e-mail {settings.SUPPORT_EMAIL} if it keeps happening.")
+            subject = f"Stripe checkout failed for order #{order.pk}"
+            email_admins(subject, traceback.format_exc(), logger, subject)
+            # "If Stripe is being difficult with $0" -- the owner's clause, and
+            # a requirement rather than a joke. A zero-total session is the one
+            # shape of this feature with no payment behind it, so a buyer who
+            # hits a Stripe problem there has nothing to retry and no other way
+            # through; they are told to write to the owner instead.
+            messages.error(request, (
+                "Sorry -- Stripe would not set up this free order. Please "
+                "e-mail holden@pigscanfly.ca and we can send you a copy "
+                "directly." if order.amount_total == 0 else
+                "Sorry -- we could not start checkout just now. Your cart is "
+                "unchanged; please try again in a few minutes, or e-mail "
+                f"{settings.SUPPORT_EMAIL} if it keeps happening."))
             return redirect('cart')
         order.stripe_session_id = session_id
         order.save(update_fields=['stripe_session_id', 'updated_at'])
@@ -1267,16 +1275,12 @@ class CheckoutSuccessView(View, BaseCartView):
         # link carrying someone else's session id emptied the victim's cart.
         # Stripe substitutes the id into success_url (see Payments.checkout);
         # CheckoutView records which order this browser went to pay for.
-        order = None
         session_id = request.GET.get("session_id")
-        if session_id:
-            order = (Order.objects.filter(stripe_session_id=session_id)
-                     .prefetch_related('items__product').first())
-        if (order is not None and request.session.get(
-                CHECKOUT_ORDER_SESSION_KEY) == order.pk):
-            del request.session[CHECKOUT_ORDER_SESSION_KEY]
-            self.get_cart(request).clear()
+        order = order_for_session(session_id)
         if order is not None:
+            if request.session.get(CHECKOUT_ORDER_SESSION_KEY) == order.pk:
+                del request.session[CHECKOUT_ORDER_SESSION_KEY]
+                self.get_cart(request).clear()
             if order.status == Order.Status.PENDING:
                 self._reconcile_with_stripe(order, session_id)
         context = {
@@ -1443,10 +1447,10 @@ class PurchaseFeedbackView(View):
             # The only way here is an empty answer: every other field is
             # optional and the long ones truncate rather than reject.
             return self.render_result(
-                request, order=self.order_for(request.POST.get("session_id")),
+                request, order=order_for_session(request.POST.get("session_id")),
                 ok=False, message=self.EMPTY, status=400)
 
-        order = self.order_for(form.cleaned_data["session_id"])
+        order = order_for_session(form.cleaned_data["session_id"])
 
         if form.is_bot():
             # Answered exactly like a real submission, minus the writing.
@@ -1507,13 +1511,6 @@ class PurchaseFeedbackView(View):
                 quote_name=form.cleaned_data["quote_name"],
             )
 
-    @staticmethod
-    def order_for(session_id: Optional[str]) -> Optional[Order]:
-        if not session_id:
-            return None
-        return Order.objects.filter(
-            stripe_session_id=session_id).prefetch_related('items__product').first()
-
     def render_result(self, request, order: Optional[Order], ok: bool = True,
                       message: Optional[str] = None, status: int = 200):
         """The page that answers a submission.
@@ -1545,7 +1542,7 @@ class PurchaseFeedbackView(View):
         limit = getattr(settings, "PURCHASE_FEEDBACK_RATE_LIMIT", 10)
         if not limit:
             return False
-        source = get_storable_client_ip(request) or "unparseable-source"
+        source = source_key(request)
         return over_cache_limit(f"purchase-feedback:{source}", limit)
 
 
@@ -2025,8 +2022,8 @@ class LoginView(View):
 
         # Peek, don't count: only a failure below adds to the bucket, so a
         # person's own successful logins never use it up.
-        failures_key = f"login:failures:{_source_key(request)}"
-        if (cache.get(failures_key) or 0) >= LOGIN_FAILURES_PER_HOUR_PER_SOURCE:
+        failures_key = f"login:failures:{source_key(request)}"
+        if at_cache_limit(failures_key, LOGIN_FAILURES_PER_HOUR_PER_SOURCE):
             logger.warning("Throttled a login attempt for %s.", email)
             return self._failed(next_url, 'throttled')
 
@@ -2270,7 +2267,7 @@ class MailingListSubscribeView(View):
             return False
         # An unusable X-Forwarded-For shares one bucket rather than escaping
         # the count: junk in that header must not be a way out of the limit.
-        source = get_storable_client_ip(request) or "unparseable-source"
+        source = source_key(request)
         return (self._over(f"mailing-list-signups:{source}", limit)
                 or self._over(f"mailing-list-address:{email}",
                               self.PER_ADDRESS_LIMIT))

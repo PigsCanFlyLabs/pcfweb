@@ -209,7 +209,6 @@ class OrderStatusForm(forms.ModelForm):
         Order.Status.PAID: {Order.Status.FULFILLED, Order.Status.CANCELLED},
         # Undo an order marked fulfilled by mistake.
         Order.Status.FULFILLED: {Order.Status.PAID},
-        Order.Status.CANCELLED: set(),
     }
 
     class Meta:
@@ -218,11 +217,12 @@ class OrderStatusForm(forms.ModelForm):
 
     def clean_status(self):
         new = self.cleaned_data["status"]
-        if self.instance.pk is None:
+        # The instance still holds the stored status here: a ModelForm copies
+        # cleaned data onto it only after the clean_* methods have run.
+        old = self.instance.status
+        if self.instance.pk is None or new == old:
             return new
-        old = Order.objects.values_list("status", flat=True).get(
-            pk=self.instance.pk)
-        if new != old and new not in self.ALLOWED.get(old, set()):
+        if new not in self.ALLOWED.get(old, set()):
             raise forms.ValidationError(
                 f"An order cannot go from {Order.Status(old).label} to "
                 f"{Order.Status(new).label} by hand.")
@@ -401,4 +401,6 @@ class MailingListDeliveryAdmin(ReadOnlyRecordAdmin):
 @admin.register(EmailIdentity)
 class EmailIdentityAdmin(ReadOnlyRecordAdmin):
     list_display = ("normalized_email", "user")
+    # user is a nullable OneToOne, which the admin's automatic join skips.
+    list_select_related = ("user",)
     search_fields = ("normalized_email",)

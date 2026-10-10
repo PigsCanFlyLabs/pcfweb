@@ -34,8 +34,9 @@ DJANGO_CONFIGURATION=PostgresTest PGHOST=localhost PGUSER=postgres \
 ```
 
 Checks — one script shared by local dev, `build.sh`, and GitHub Actions
-(`.github/workflows/ci.yml`). It runs mypy, ruff (pyflakes rules only, see
-`ruff.toml`), shellcheck, the migration check, the thumbnails and the tests:
+(`.github/workflows/ci.yml`, once per configuration, `Dev` and `PostgresTest`).
+It runs ruff (pyflakes rules only, see `ruff.toml`), shellcheck, the
+manifest YAML parse, mypy, the migration check, the thumbnails and the tests:
 
 ```bash
 ./scripts/checks.sh
@@ -635,10 +636,10 @@ and skipped rather than sent to Google as a broken URL.
 and run the four asset guards over them (sibling checkout present, per-file
 size ceiling, LFS pointers, fixture references — see
 [Image assets](#image-assets)) → validate and stage the
-sibling `pcfweb-book-assets` archives → mypy → ruff → shellcheck → migration
-check → collectstatic → thumbnail pre-generation → tests → template
-validation → manifest YAML parse (the `scripts/checks.sh` order) → LFS check
-over the collected static tree →
+sibling `pcfweb-book-assets` archives → ruff → shellcheck → manifest YAML
+parse → mypy → migration check → collectstatic → thumbnail pre-generation →
+tests → template validation (the `scripts/checks.sh` order) → LFS check over
+the collected static tree →
 multi-arch Docker build/push (`holdenk/pcfweb:<tag>`) →
 `kubectl apply` → wait for both rollouts.
 

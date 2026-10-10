@@ -11,6 +11,8 @@ from django.test import TestCase, override_settings
 from unittest import mock
 
 from main.models import EmailIdentity
+from main.views import (
+    LOGIN_FAILURES_PER_HOUR_PER_SOURCE, SIGNUP_ATTEMPTS_PER_HOUR)
 
 
 # Both classes follow a redirect into the home page, which thumbnails static
@@ -180,7 +182,11 @@ class LoginValidationTest(TestCase):
         self.assertIn("valid=false", response["Location"])
 
 
-@override_settings(THUMBNAIL_DEBUG=False)
+# The throttle tests make dozens of logins; at the production hasher's
+# million PBKDF2 iterations that was most of half a minute per run.
+@override_settings(
+    THUMBNAIL_DEBUG=False,
+    PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
 class AccountHardeningTest(TestCase):
     """Password rules, attempt throttles, ?next= and POST-only logout."""
 
@@ -190,10 +196,7 @@ class AccountHardeningTest(TestCase):
         self.addCleanup(cache.clear)
 
     def _user(self, email="person@example.com", password="hunter2hunter2"):
-        user = User.objects.create(username=email.split("@")[0], email=email)
-        user.set_password(password)
-        user.save()
-        return user
+        return User.objects.create_user(email.split("@")[0], email, password)
 
     def test_signup_applies_the_configured_password_validators(self):
         # AUTH_PASSWORD_VALIDATORS used to be configured and never called.
@@ -206,7 +209,6 @@ class AccountHardeningTest(TestCase):
         self.assertFalse(EmailIdentity.objects.exists())
 
     def test_signup_is_throttled_per_source(self):
-        from main.views import SIGNUP_ATTEMPTS_PER_HOUR
         for i in range(SIGNUP_ATTEMPTS_PER_HOUR):
             self.client.post("/signup", {"email": f"x{i}@example.com"})
 
@@ -222,7 +224,7 @@ class AccountHardeningTest(TestCase):
         # whose address is known: a stranger's wrong guesses must never
         # refuse the owner's right password.
         self._user()
-        for _ in range(15):
+        for _ in range(LOGIN_FAILURES_PER_HOUR_PER_SOURCE + 1):
             self.client.post(
                 "/login", {"email": "person@example.com", "password": "nope"},
                 HTTP_CF_CONNECTING_IP="198.51.100.66")
@@ -236,7 +238,6 @@ class AccountHardeningTest(TestCase):
         self.assertIn("_auth_user_id", self.client.session)
 
     def test_login_is_throttled_per_source_after_failures(self):
-        from main.views import LOGIN_FAILURES_PER_HOUR_PER_SOURCE
         self._user()
         for _ in range(LOGIN_FAILURES_PER_HOUR_PER_SOURCE):
             self.client.post(
@@ -250,7 +251,6 @@ class AccountHardeningTest(TestCase):
         self.assertNotIn("_auth_user_id", self.client.session)
 
     def test_successful_logins_do_not_count(self):
-        from main.views import LOGIN_FAILURES_PER_HOUR_PER_SOURCE
         self._user()
         for _ in range(LOGIN_FAILURES_PER_HOUR_PER_SOURCE + 5):
             response = self.client.post(

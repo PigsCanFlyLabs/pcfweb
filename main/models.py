@@ -2028,21 +2028,18 @@ class Order(models.Model):
         return f'<Order: #{self.pk} {self.status}>'
 
     @classmethod
+    @transaction.atomic
     def create_from_cart(cls, cart: Cart, user: Optional[User] = None) -> "Order":
         """Snapshot a cart into a new PENDING order.
 
         Reads the cart through the same M2M that Payments.checkout() bills
         from, so the snapshot and the Stripe line items come from one list.
+
+        Atomic, so a failure between the two inserts cannot leave a PENDING
+        order with no line items -- an order the webhook would later mark
+        paid with nothing to fulfil.
         """
         cart_products = list(cart.products.select_related('product'))
-        # One transaction, so a failure between the two inserts cannot leave
-        # a PENDING order with no line items -- an order the webhook would
-        # later mark paid with nothing to fulfil.
-        with transaction.atomic():
-            return cls._create_snapshot(cart_products, user)
-
-    @classmethod
-    def _create_snapshot(cls, cart_products, user) -> "Order":
         order = cls.objects.create(
             user=user,
             status=cls.Status.PENDING,

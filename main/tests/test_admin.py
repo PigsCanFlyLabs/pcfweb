@@ -4,7 +4,7 @@ which models are records that the admin shows but never edits."""
 from django.contrib.auth.models import User
 from django.test import override_settings
 
-from main.models import MailingListDelivery, Order, OrderItem
+from main.models import Order, OrderItem
 from main.tests.base import OrderTestBase
 
 
@@ -70,10 +70,8 @@ class OrderStatusGuardTest(OrderTestBase):
         self.assertEqual(response.status_code, 403)
         self.assertTrue(OrderItem.objects.filter(pk=item.pk).exists())
 
-    def test_a_delivery_record_cannot_be_deleted(self):
-        # Deleting one would queue that address for a second copy.
+    def test_a_delivery_record_cannot_be_added_by_hand(self):
         self.assertEqual(
             self.client.get(
                 "/timbit/admin/main/mailinglistdelivery/add/").status_code,
             403)
-        self.assertFalse(MailingListDelivery.objects.exists())

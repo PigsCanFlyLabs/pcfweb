@@ -266,9 +266,7 @@ spec:
           ports:
             - containerPort: 80
               name: web
-          # nginx and gunicorn still start as root (to bind :80 and then drop
-          # their workers to www-data), which setuid() allows without
-          # privilege escalation; nothing in the image needs a setuid binary.
+          # Same as web-primary.
           securityContext:
             allowPrivilegeEscalation: false
           resources:

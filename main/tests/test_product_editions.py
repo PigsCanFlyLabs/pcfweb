@@ -283,11 +283,11 @@ class MsrpRenderingTest(ProductFactoryMixin, TestCase):
 
 
 class MsrpStaysOutOfTheJavascriptTotalTest(ProductFactoryMixin, TestCase):
-    """The running total reads the price's integer cents, never the MSRP.
+    """The running total reads the bare price, never the MSRP.
 
     It used to be parseFloat("{{ product.get_display_price }}"), which was
     NaN on a pre-order row because get_display_price() returns
-    "Pre-order: 30.00". It now reads the cents column directly.
+    "Pre-order: 30.00". It now renders the bare get_feed_price() number.
     """
 
     def test_the_total_script_reads_the_price_and_not_the_msrp(self):
@@ -297,8 +297,8 @@ class MsrpStaysOutOfTheJavascriptTotalTest(ProductFactoryMixin, TestCase):
 
         body = self.client.get(product.get_absolute_url()).content.decode()
 
-        self.assertIn("let unit = 3999 / 100;", body)
-        self.assertNotIn("4999 / 100", body)
+        self.assertIn("let unit = 39.99;", body)
+        self.assertNotIn("49.99;", body)
         self.assertNotIn('parseFloat("', body)
 
     def test_a_preorder_row_totals_a_number_not_nan(self):
@@ -308,7 +308,7 @@ class MsrpStaysOutOfTheJavascriptTotalTest(ProductFactoryMixin, TestCase):
 
         body = self.client.get(product.get_absolute_url()).content.decode()
 
-        self.assertIn("let unit = 3000 / 100;", body)
+        self.assertIn("let unit = 30.00;", body)
         self.assertNotIn('parseFloat("Pre-order', body)
         # The MSRP rendered as markup, nowhere near the script.
         self.assertIn("<s>40.00</s>", body)

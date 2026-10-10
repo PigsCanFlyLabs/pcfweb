@@ -242,16 +242,25 @@ def _load_fixture(path: str) -> list[dict[str, Any]]:
     return data
 
 
-def _differs(product: Product, fields: Dict[str, Any]) -> bool:
-    """Whether writing `fields` would change anything stored on `product`."""
-    for name, value in fields.items():
-        field = Product._meta.get_field(name)
-        # Only concrete columns reach here: M2M keys are held aside and FKs
-        # were rewritten to their attname.
+# Off BASE_DIR rather than the working directory, so the command works from
+# anywhere. pregenerate_thumbnails reads covers from the same file.
+FIXTURE_PATH = os.path.join(
+    settings.BASE_DIR, "main", "fixtures", "initial_products.yaml")
+
+
+def _differs(row: models.Model, fields: Dict[str, Any]) -> bool:
+    """Whether writing `fields` would change anything stored on `row`.
+
+    Values go through to_python, so a fixture's "2024-05-01" compares equal
+    to the date the column holds. Only concrete columns reach here: M2M keys
+    are held aside and FKs were rewritten to their attname.
+    """
+    def stored_differs(name: str, value: Any) -> bool:
+        field = row._meta.get_field(name)
         assert isinstance(field, models.Field)
-        if getattr(product, field.attname) != field.to_python(value):
-            return True
-    return False
+        return getattr(row, field.attname) != field.to_python(value)
+
+    return any(stored_differs(name, value) for name, value in fields.items())
 
 
 def _reset_sequences() -> None:
@@ -262,12 +271,10 @@ def _reset_sequences() -> None:
     admin's 100th new product (or 200th format group) would have collided
     with a seeded row. Harmless on sqlite, which has no sequences to reset.
     """
-    statements = connection.ops.sequence_reset_sql(
-        no_style(), [Product, ProductGroup])
-    if statements:
-        with connection.cursor() as cursor:
-            for sql in statements:
-                cursor.execute(sql)
+    with connection.cursor() as cursor:
+        for sql in connection.ops.sequence_reset_sql(
+                no_style(), [Product, ProductGroup]):
+            cursor.execute(sql)
 
 
 class Command(BaseCommand):
@@ -316,19 +323,14 @@ class Command(BaseCommand):
                 ProductGroup.objects.create(pk=pk, **fields)
                 self.stdout.write(f"Created product group pk={pk}")
                 created += 1
-            elif any(getattr(existing, name) != value
-                     for name, value in fields.items()):
+            elif _differs(existing, fields):
                 ProductGroup.objects.filter(pk=pk).update(**fields)
                 self.stdout.write(f"Updated product group pk={pk}")
                 updated += 1
         return created, updated
 
     def handle(self, **options: Any) -> None:
-        # Off BASE_DIR rather than the working directory, like
-        # pregenerate_thumbnails, so the command works from anywhere.
-        fixture_path = os.path.join(
-            settings.BASE_DIR, "main", "fixtures", "initial_products.yaml")
-        loaded = _load_fixture(fixture_path)
+        loaded = _load_fixture(FIXTURE_PATH)
         entries = [
             entry
             for entry in loaded
@@ -345,7 +347,7 @@ class Command(BaseCommand):
         # from coming up with no products rather than silently serving none.
         if not entries:
             raise CommandError(
-                f"{fixture_path} contains no main.product entries; "
+                f"{FIXTURE_PATH} contains no main.product entries; "
                 "refusing to report a successful seed."
             )
 
@@ -432,9 +434,7 @@ class Command(BaseCommand):
                     # And only when something differs, for the reason the
                     # group pass gives: .update() returns rows MATCHED, so
                     # counting off it reported every row "Updated" on every
-                    # deploy and "unchanged" could never happen. Values go
-                    # through to_python so a fixture's "2024-05-01" compares
-                    # equal to the date the column holds.
+                    # deploy and "unchanged" could never happen.
                     if _differs(existing, fixture_fields):
                         Product.objects.filter(pk=pk).update(**fixture_fields)
                         updated += 1

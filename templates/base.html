@@ -100,12 +100,11 @@
 
 				Log Out is a POST (LogoutView), so a cross-site link or
 				image cannot sign anybody out. The link keeps the nav
-				styling; the script below submits the form instead of
-				following it, and without JavaScript the link lands on a
-				page with the same button.
+				styling and submits the hidden form beside it; without
+				JavaScript it lands on a page with the same button.
 			    {% endcomment %}
 			    {% if request.user.is_authenticated %}
-				<li><a href="{% url 'logout' %}" data-logout-link>Log Out</a></li>
+				<li><a href="{% url 'logout' %}" onclick="event.preventDefault(); this.nextElementSibling.submit();">Log Out</a><form method="post" action="{% url 'logout' %}" hidden>{% csrf_token %}</form></li>
 			    {% else %}
 				<li><a href="{% url 'signup' %}">Sign Up</a></li>
 				<li><a href="{% url 'login' %}">Log In</a></li>
@@ -215,18 +214,6 @@
 
     <!-- Global Init -->
     <script src="{% static 'assets/js/custom.js' %}"></script>
-
-    {% if request.user.is_authenticated %}
-    <form method="post" action="{% url 'logout' %}" id="logout-form" hidden>{% csrf_token %}</form>
-    <script>
-      document.querySelectorAll("[data-logout-link]").forEach(function (link) {
-        link.addEventListener("click", function (event) {
-          event.preventDefault();
-          document.getElementById("logout-form").submit();
-        });
-      });
-    </script>
-    {% endif %}
 
     {% if request|cookie_consent_enabled %}
       {% not_accepted_or_declined_cookie_groups request as undecided_cookie_groups %}

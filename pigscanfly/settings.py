@@ -620,7 +620,6 @@ class PostgresTest(Dev):
         "default": {
             "ENGINE": "django.db.backends.postgresql",
             "NAME": os.getenv("PGDATABASE", "pigscanfly"),
-            "ATOMIC_REQUESTS": False,
         }
     }
 

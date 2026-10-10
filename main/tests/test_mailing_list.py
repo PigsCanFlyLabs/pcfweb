@@ -375,10 +375,7 @@ class SiteDomainMigrationTest(TestCase):
         # canonical row and keeps its newsletter attachments reachable.
         Site.objects.filter(pk=settings.SITE_ID).update(
             domain="example.com", name="example.com")
-        # An explicit pk: the default row was inserted with pk=1 without
-        # advancing Postgres's sequence, so an automatic pk collides there.
         duplicate = Site.objects.create(
-            pk=Site.objects.order_by("-pk").first().pk + 1,
             domain="www.pigscanfly.ca", name="Added by hand")
         moved = Newsletter.objects.get(slug="dc4k")
         moved.site.set([duplicate])

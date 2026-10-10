@@ -397,11 +397,11 @@
 	// catalogue suggestion. An empty or half-typed amount falls back to
 	// 0 instead of showing NaN.
 	//
-	// The catalogue price is read from the integer cents column, not
-	// parsed out of get_display_price(): that returns copy like
-	// "Pre-order: 30.00", which parseFloat turned into NaN.
+	// The catalogue price is the bare number get_feed_price() renders,
+	// not get_display_price(): that returns copy like "Pre-order: 30.00",
+	// which parseFloat turned into NaN.
 	const amountEl = document.querySelector('input#chosen_amount');
-	let unit = {{ product.price|default:0|stringformat:"d" }} / 100;
+	let unit = {{ product.get_feed_price }};
 	if (amountEl) {
 	    const typed = parseFloat(amountEl.value);
 	    unit = isNaN(typed) ? 0 : typed;
