@@ -6,7 +6,7 @@ from django import forms
 
 from newsletter.models import Newsletter
 
-from main.mailing import parse_addresses
+from main import mailing
 from main.models import PurchaseFeedback
 from main.utils import normalize_email
 
@@ -170,10 +170,28 @@ class MailingListImportForm(forms.Form):
         help_text="Only for suppression: why these addresses are here, for "
                   "whoever reads the list later.")
 
+    def clean_address_file(self):
+        # parse_addresses reads only the first MAX_UPLOAD_BYTES, and nginx
+        # lets bigger bodies through because the admin's image uploads need
+        # them. A larger CSV would import its head, drop its tail, and
+        # possibly cut the last row mid-address into one that still looks
+        # real -- so refuse it here, where the whole size is known. Read via
+        # the module at call time so this and parse_addresses cannot disagree.
+        upload = self.cleaned_data["address_file"]
+        limit = mailing.MAX_UPLOAD_BYTES
+        if upload.size > limit:
+            # Raising here drops address_file from cleaned_data, so clean()
+            # below never parses or imports any of it.
+            raise forms.ValidationError(
+                f"That file is larger than {limit / (1024 * 1024):g} MB, which "
+                "is as much of a file as an import reads. Split it into "
+                "smaller files and import each one.")
+        return upload
+
     def clean(self):
         upload = self.cleaned_data.get("address_file")
         if upload is not None:
-            self.addresses = parse_addresses(upload)
+            self.addresses = mailing.parse_addresses(upload)
             if not self.addresses:
                 raise forms.ValidationError(
                     "No email addresses found in that file.")

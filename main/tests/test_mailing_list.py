@@ -1579,6 +1579,27 @@ class ImportTest(ImportTestBase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No email addresses found")
 
+    def test_a_file_over_the_size_limit_is_refused_not_cut_short(self):
+        # Only the first MAX_UPLOAD_BYTES of a file are read, and nginx lets
+        # bigger bodies through for the admin's image uploads. One byte over
+        # cuts the last address to grace@example.co, which still looks like
+        # an address -- so a quiet truncation imports somebody who does not
+        # exist and drops somebody who does.
+        text = "ada@example.com\ngrace@example.com"
+        with mock.patch.object(mailing, "MAX_UPLOAD_BYTES", len(text) - 1):
+            response = self.do_import(text)
+
+        self.assertContains(response, "larger than")
+        self.assertFalse(Subscription.objects.exists())
+
+    def test_a_file_exactly_at_the_size_limit_imports_all_of_it(self):
+        text = "ada@example.com\ngrace@example.com"
+        with mock.patch.object(mailing, "MAX_UPLOAD_BYTES", len(text)):
+            self.do_import(text, notify="")
+
+        self.assertEqual(self.subscribers(),
+                         ["ada@example.com", "grace@example.com"])
+
     def test_a_subscriber_import_has_to_say_which_list(self):
         # Importing into the wrong list is the mistake to be afraid of here.
         response = self.client.post(self.IMPORT_URL, {
@@ -1649,6 +1670,17 @@ class SuppressionTest(ImportTestBase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(SuppressedAddress.objects.count(), 2)
+
+    def test_an_oversized_file_suppresses_nothing_and_names_the_limit(self):
+        # The real limit, unpatched: big enough that Django spools the upload
+        # to disk, and the message has to name a number staff can act on.
+        row = "ada@example.com\n"
+        text = row * (mailing.MAX_UPLOAD_BYTES // len(row) + 1)
+
+        response = self.suppress(text)
+
+        self.assertContains(response, "larger than 5 MB")
+        self.assertFalse(SuppressedAddress.objects.exists())
 
     def test_addresses_are_stored_lower_cased(self):
         SuppressedAddress.objects.create(email="  Loud@Example.COM ")

@@ -223,19 +223,39 @@ class AccountHardeningTest(TestCase):
         # A lockout keyed on the address is a denial of service on anyone
         # whose address is known: a stranger's wrong guesses must never
         # refuse the owner's right password.
+        # The sources differ in X-Forwarded-For, the address the ingress saw,
+        # which is what the throttle counts for a peer outside Cloudflare.
         self._user()
         for _ in range(LOGIN_FAILURES_PER_HOUR_PER_SOURCE + 1):
             self.client.post(
                 "/login", {"email": "person@example.com", "password": "nope"},
-                HTTP_CF_CONNECTING_IP="198.51.100.66")
+                HTTP_X_FORWARDED_FOR="198.51.100.66")
+
+        response = self.client.post(
+            "/login",
+            {"email": "person@example.com", "password": "hunter2hunter2"},
+            HTTP_X_FORWARDED_FOR="203.0.113.5")
+
+        self.assertRedirects(response, "/")
+        self.assertIn("_auth_user_id", self.client.session)
+
+    def test_forged_connecting_ip_does_not_escape_the_throttle(self):
+        # A client that reaches the ingress directly can write any
+        # CF-Connecting-IP it likes; a fresh value per guess must not mean a
+        # fresh bucket per guess.
+        self._user()
+        for i in range(LOGIN_FAILURES_PER_HOUR_PER_SOURCE):
+            self.client.post(
+                "/login", {"email": "person@example.com", "password": "nope"},
+                HTTP_CF_CONNECTING_IP=f"198.51.100.{i + 1}")
 
         response = self.client.post(
             "/login",
             {"email": "person@example.com", "password": "hunter2hunter2"},
             HTTP_CF_CONNECTING_IP="203.0.113.5")
 
-        self.assertRedirects(response, "/")
-        self.assertIn("_auth_user_id", self.client.session)
+        self.assertIn("valid=throttled", response["Location"])
+        self.assertNotIn("_auth_user_id", self.client.session)
 
     def test_login_is_throttled_per_source_after_failures(self):
         self._user()

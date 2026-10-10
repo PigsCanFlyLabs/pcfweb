@@ -56,6 +56,7 @@ manifest YAML parse, mypy, the migration check, the thumbnails and the tests:
 | `ORDER_NOTIFICATION_EMAIL` | all | Where the "new paid order" mail goes; becomes `ADMINS`. Defaults to `support@pigscanfly.ca`. |
 | `SUPPORT_EMAIL` | all | The address customer-facing pages tell people to write to (contact, returns, policies, checkout trouble). Defaults to `support@pigscanfly.ca`. |
 | `LOG_LEVEL` | Prod | Root log level for the stdout handler (default `INFO`). |
+| `CLOUDFLARE_IP_RANGES` | all | Comma-separated CIDRs whose requests may name the visitor in `CF-Connecting-IP`; rate limits key on that address. Unset uses Cloudflare's published list in `settings.py`. A request from anywhere else is keyed on the address that reached the ingress, so a missing range only means coarser buckets, never a trusted forged header. |
 | `DBHOST` / `DBNAME` / `DBUSER` / `DBPASSWORD` | Prod | Postgres connection; wired in `deploy.yaml` to the in-cluster DB. |
 | `EMAIL_HOST` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | Prod | SMTP. |
 | `DJANGO_SUPERUSER_USERNAME` / `DJANGO_SUPERUSER_PASSWORD` / `DJANGO_SUPERUSER_EMAIL` | primary pod (optional) | The admin account: `ensure_admin_account` creates it on a fresh database and converges it (rotated password, drifted flags) on every primary boot. Both core variables unset = clean skip; one without the other = loud failure. The names are the ones Django's own `createsuperuser --noinput` reads. See [Admin](#admin). |

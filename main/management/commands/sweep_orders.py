@@ -27,7 +27,8 @@ answer, so a webhook outage becomes a delay rather than a lost sale.
 Safe to run repeatedly and safe to run concurrently with a live webhook:
 every write goes through the same guarded transition and the same fulfilment
 lease the webhook uses, so a sweep racing a delivery loses the race
-harmlessly rather than sending anything twice.
+harmlessly rather than sending anything twice -- or reporting an outage over
+a payment the webhook did record.
 
     ./manage.py sweep_orders --dry-run     # what would it do
     ./manage.py sweep_orders               # do it
@@ -264,8 +265,8 @@ class Command(BaseCommand):
     def sweep_pending(self, since, after_minutes: int) -> Dict[str, Any]:
         """Ask Stripe about pending orders the webhook never reported on."""
         counts: Dict[str, Any] = {
-            "found": 0, "paid": 0, "expired": 0, "open": 0, "stuck": 0,
-            "skipped": 0, "details": [], "paid_order_pks": [],
+            "found": 0, "paid": 0, "raced": 0, "expired": 0, "open": 0,
+            "stuck": 0, "skipped": 0, "details": [], "paid_order_pks": [],
         }
         cutoff = timezone.now() - timedelta(minutes=after_minutes)
         orders = Order.objects.filter(
@@ -331,23 +332,42 @@ class Command(BaseCommand):
 
             payment_status = session.get("payment_status")
             if payment_status in webhook.PAID_PAYMENT_STATUSES:
+                if self.dry_run:
+                    counts["paid"] += 1
+                    counts["paid_order_pks"].append(order.pk)
+                    counts["details"].append(
+                        f"  order #{order.pk}: Stripe says "
+                        f"{payment_status!r} -- paying and fulfilling it")
+                    continue
+                # Pay first, and only then decide what it means. The PENDING
+                # this loop is acting on was read by the query above, a Stripe
+                # round trip ago, and a live delivery or a cancellation can
+                # land in between. pay_and_fulfil() is safe against that --
+                # its guarded UPDATE lets exactly one caller win -- but when
+                # the sweep loses, something else recorded the order in time,
+                # and an alert claiming the webhook is down would send the
+                # owner hunting for an outage that is not there.
+                if not webhook.pay_and_fulfil(
+                        order, session, source="order sweep"):
+                    counts["raced"] += 1
+                    counts["details"].append(
+                        f"  order #{order.pk}: settled by another path while "
+                        "the sweep looked")
+                    continue
                 counts["paid"] += 1
                 counts["paid_order_pks"].append(order.pk)
                 counts["details"].append(
                     f"  order #{order.pk}: Stripe says {payment_status!r} -- "
-                    "paying and fulfilling it")
-                if self.dry_run:
-                    continue
+                    "paid and fulfilled it")
                 # The loudest line this command writes. An order reaching here
-                # means a real payment went unrecorded until now, which is a
-                # webhook problem worth going and looking at rather than a
-                # thing the sweep quietly cleaned up.
+                # means a real payment went unrecorded until the sweep itself
+                # recorded it, which is a webhook problem worth going and
+                # looking at rather than a thing the sweep quietly cleaned up.
                 logger.error(
                     "Order #%s was paid on Stripe (%s) but no webhook ever "
-                    "recorded it; the sweep is paying and fulfilling it now. "
+                    "recorded it; the sweep has now paid and fulfilled it. "
                     "Check the Stripe Dashboard's webhook delivery log.",
                     order.pk, payment_status)
-                webhook.pay_and_fulfil(order, session, source="order sweep")
                 continue
 
             if session.get("status") == self.EXPIRED_SESSION_STATUS:
@@ -395,6 +415,7 @@ class Command(BaseCommand):
         self.stdout.write(
             f"Pending orders past the grace period: {pending['found']} "
             f"found ({pending['paid']} paid on Stripe, "
+            f"{pending['raced']} settled elsewhere mid-sweep, "
             f"{pending['expired']} expired, {pending['open']} still open, "
             f"{pending['stuck']} unreadable).")
         for line in pending["details"]:

@@ -1671,21 +1671,29 @@ class StripeWebhookView(View):
 
         self.pay_and_fulfil(order, session, source="webhook delivery")
 
-    def pay_and_fulfil(self, order: Order, session, source: str) -> None:
+    def pay_and_fulfil(self, order: Order, session, source: str) -> bool:
         """Move a PENDING order to PAID from `session`, then fulfil it.
 
-        Two callers arrive here holding the same paid Stripe session -- a
-        webhook delivery and the checkout success page -- and either can be
-        looking at one order at the same moment as the other. The guarded
-        UPDATE below is what lets them race freely: both try to move
-        PENDING -> PAID, exactly one affects a row and goes on to fulfil,
-        and the loser falls through to the already-PAID branch, which
-        resumes whatever fulfilment is still incomplete rather than
-        repeating what is done.
+        Three callers arrive here holding the same paid Stripe session -- a
+        webhook delivery, the checkout success page and the order sweep --
+        and any of them can be looking at one order at the same moment as
+        another. The guarded UPDATE below is what lets them race freely:
+        each tries to move PENDING -> PAID, exactly one affects a row and
+        goes on to fulfil, and the losers fall through to the already-PAID
+        branch, which resumes whatever fulfilment is still incomplete rather
+        than repeating what is done.
 
         `source` only ever reaches a log line. It is what answers "what
         finally paid this order" when the owner goes looking, which matters
         precisely because the webhook is not always the thing that did.
+
+        Returns True only when this call made the PENDING -> PAID transition,
+        False when it found the order already PAID or past PENDING. Whatever
+        status the caller read beforehand can be stale by the time the
+        guarded UPDATE runs, so this is the only reliable answer to "was it
+        this caller that recorded the payment" -- the order sweep alerts
+        the owner on it, and must not when a live delivery won the race.
+        It says nothing about fulfilment, which is best-effort either way.
         """
         fields = self.paid_fields(session)
         with transaction.atomic():
@@ -1706,15 +1714,16 @@ class StripeWebhookView(View):
                     "incomplete fulfilment for Stripe session %s.",
                     order.pk, source, session.get("id"))
                 self.fulfil_order(order)
-                return
+                return False
             logger.info(
                 "Order #%s is already past PENDING (reached by %s); not "
                 "overwriting it from Stripe session %s.",
                 order.pk, source, session.get("id"))
-            return
+            return False
 
         order.refresh_from_db()
         self.fulfil_order(order)
+        return True
 
     def fulfil_order(self, order: Order) -> None:
         """Run only the paid order actions that have not completed yet.

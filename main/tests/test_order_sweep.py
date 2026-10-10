@@ -24,6 +24,7 @@ from django.core.management import call_command
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
+from main.management.commands.sweep_orders import Command
 from main.models import Order, Product
 from main.tests.base import (
     EBOOK_PK, REPO_ROOT, BookAssetRootMixin, OrderTestBase, customer_mail,
@@ -460,6 +461,8 @@ class SweepPendingOrdersTest(OrderTestBase):
         self.assertTrue(any("no webhook ever recorded it" in m
                             for m in log.output))
         self.assertIn("Check STRIPE_WEBHOOK_SECRET", output)
+        self.assertIn("1 paid on Stripe, 0 settled elsewhere mid-sweep",
+                      output)
 
     def test_a_free_order_stripe_never_charges_for_is_also_paid(self):
         with self.retrieve(status="complete",
@@ -718,6 +721,68 @@ class SweepPendingOrdersTest(OrderTestBase):
 
         self.assertEqual(len(self.order_emails()), emails_after_webhook,
                          "the sweep must not re-notify a finished order")
+
+    def sweep_racing(self, settle):
+        """Sweep while `settle` resolves the order behind the sweep's back.
+
+        `settle` runs inside the Stripe lookup: after the sweep's query has
+        read the order as PENDING, before its own pay_and_fulfil() reaches
+        the guarded UPDATE -- the window a live delivery can land in. Returns
+        the printed output, the pending phase's counts and every log line
+        under main.
+        """
+        def retrieve(session_id, *args, **kwargs):
+            settle()
+            return self.session_payload(self.order, status="complete")
+
+        counted = []
+        real_sweep_pending = Command.sweep_pending
+
+        def sweep_pending(command, *args, **kwargs):
+            counts = real_sweep_pending(command, *args, **kwargs)
+            counted.append(counts)
+            return counts
+
+        with mock.patch("stripe.checkout.Session.retrieve",
+                        side_effect=retrieve):
+            with mock.patch.object(Command, "sweep_pending", sweep_pending):
+                with self.assertLogs("main", level="INFO") as log:
+                    output = sweep()
+        (pending,) = counted
+        return output, pending, log.output
+
+    def assert_no_outage_reported(self, output, pending, logged):
+        self.assertEqual(
+            [m for m in mail.outbox if "no webhook recorded" in m.subject], [],
+            "another path settled this order, so it is no evidence that the "
+            "webhook is down")
+        self.assertEqual(pending["paid"], 0)
+        self.assertEqual(pending["raced"], 1)
+        self.assertFalse(
+            [m for m in logged if "no webhook ever recorded it" in m])
+        self.assertNotIn("Check STRIPE_WEBHOOK_SECRET", output)
+        self.assertIn("settled by another path", output)
+
+    def test_a_webhook_landing_mid_sweep_is_not_reported_as_an_outage(self):
+        output, pending, logged = self.sweep_racing(
+            lambda: self.deliver(self.event_body(self.order)))
+
+        self.assert_no_outage_reported(output, pending, logged)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertEqual(len(self.order_emails()), 1,
+                         "paid and notified once, by the webhook")
+
+    def test_an_order_cancelled_mid_sweep_is_not_reported_as_an_outage(self):
+        output, pending, logged = self.sweep_racing(
+            lambda: Order.objects.filter(pk=self.order.pk).update(
+                status=Order.Status.CANCELLED))
+
+        self.assert_no_outage_reported(output, pending, logged)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.CANCELLED,
+                         "past PENDING is never overwritten from Stripe")
+        self.assertEqual(self.order_emails(), [])
 
 
 class OrderSweepIsScheduledTest(SimpleTestCase):
