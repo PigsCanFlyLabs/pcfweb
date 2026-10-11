@@ -516,6 +516,11 @@ def _heading_columns(row: List[str]) -> Optional[Dict[str, int]]:
     return columns if "email" in columns else None
 
 
+class UnreadableCSV(ValueError):
+    """The csv module could not read the file at all, so there are no rows to
+    be forgiving about. The message is the csv module's own reason."""
+
+
 def parse_addresses(upload) -> Dict[str, str]:
     """Read {address: name} out of an uploaded CSV.
 
@@ -523,6 +528,10 @@ def parse_addresses(upload) -> Dict[str, str]:
     a row this cannot make sense of is skipped rather than failing the upload:
     one bad line in a 900-line export should not mean importing nothing. What
     it will not do is guess at something that is not an email address.
+
+    That forgiveness is about rows, not the file. One the csv module cannot
+    read raises UnreadableCSV instead: the reader stops where it fails, so
+    the only rows to hand back would be the head of the file.
 
     Nothing is filtered here -- not addresses already subscribed, not
     suppressed ones. Those decisions belong to the caller, because the
@@ -536,7 +545,18 @@ def parse_addresses(upload) -> Dict[str, str]:
     except csv.Error:
         # One column and no delimiter in sight; comma is as good as anything.
         dialect = csv.get_dialect("excel")
-    rows = list(csv.reader(io.StringIO(text), dialect))
+    try:
+        # newline="" is the csv module's own requirement for file-like input:
+        # without it a bare-CR line ending -- a "CSV (Macintosh)" export --
+        # is a csv.Error rather than a row break.
+        rows = list(csv.reader(io.StringIO(text, newline=""), dialect))
+    except csv.Error as error:
+        # In practice a field over csv.field_size_limit() (128 KB): a file
+        # with no line breaks, a blob pasted into a notes column, or an
+        # unclosed quote mark that swallows the rest of the file. Not raising
+        # that limit instead: it is process-global, so it would change every
+        # CSV read in this worker, not just this one.
+        raise UnreadableCSV(str(error)) from error
     if not rows:
         return {}
 

@@ -191,7 +191,17 @@ class MailingListImportForm(forms.Form):
     def clean(self):
         upload = self.cleaned_data.get("address_file")
         if upload is not None:
-            self.addresses = mailing.parse_addresses(upload)
+            try:
+                self.addresses = mailing.parse_addresses(upload)
+            except mailing.UnreadableCSV as error:
+                # A form error rather than a 500. Raising leaves
+                # self.addresses unset and the form invalid, so the view
+                # neither imports nor suppresses any of the file.
+                raise forms.ValidationError(
+                    f"That file could not be read as a CSV ({error}). The "
+                    "usual cause is a very long pasted block of text, or a "
+                    "quote mark that is never closed. Fix that, or export "
+                    "it again as CSV, and try again.") from error
             if not self.addresses:
                 raise forms.ValidationError(
                     "No email addresses found in that file.")
