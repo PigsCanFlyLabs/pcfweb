@@ -73,9 +73,13 @@ trap terminate TERM INT
 # No --access-logfile: nginx already logs every request to stdout, and the
 # probes hit /healthz every few seconds on every pod (nginx drops those, see
 # conf/nginx.default).
+#
+# Loopback only: nginx is the one client, over 127.0.0.1. Bound to 0.0.0.0,
+# anything that could reach the pod IP could skip nginx and hand gunicorn
+# whatever X-Forwarded-Proto and X-Forwarded-For it liked.
 gunicorn pigscanfly.wsgi \
   --user www-data \
-  --bind 0.0.0.0:8010 \
+  --bind 127.0.0.1:8010 \
   --workers 4 \
   --timeout "$GUNICORN_TIMEOUT" \
   --error-logfile - &

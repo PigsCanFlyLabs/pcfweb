@@ -2,7 +2,13 @@
 # Shared check pipeline, run by both CI (.github/workflows/ci.yml) and the
 # deploy script (build.sh) so the two can't drift. Assumes dependencies are
 # installed; run from the repo root.
-set -ex
+set -euxo pipefail
+# The seconds-long checks first, so a typo fails before mypy and the suite.
+# Unused and undefined names (ruff.toml), the shell scripts, and the
+# Kubernetes manifests parse.
+python -m ruff check .
+shellcheck -S warning ./*.sh scripts/*.sh
+python3 -c "import yaml; [list(yaml.safe_load_all(open(f))) for f in ('pg-bootstrap.yaml', 'pg-alerts.yaml', 'deploy.yaml')]"
 # Invoke mypy through the active interpreter, not a bare `mypy` that may resolve
 # to a separate pipx/uv/--user install. mypy loads plugins under its own
 # interpreter, and configurations_mypy_django_plugin imports django (and every
@@ -34,5 +40,3 @@ python -m mypy -p main -p pigscanfly
 ./manage.py pregenerate_thumbnails --allow-absent-asset-tree
 ./manage.py test main
 ./manage.py validate_templates --ignore-app newsletter
-# Kubernetes manifests parse.
-python3 -c "import yaml; list(yaml.safe_load_all(open('pg-bootstrap.yaml'))); list(yaml.safe_load_all(open('deploy.yaml')))"

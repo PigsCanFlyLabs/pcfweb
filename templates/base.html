@@ -93,13 +93,23 @@
 			    <li><a href="{% url 'products' %}">Products</a></li>
 			    <li><a href="{% url 'subscribe' %}">Subscribe</a></li>
 
+			    {% comment %}
+				The cart is for everyone: anonymous visitors have one
+				too (get_cart), and used to be able to reach it only
+				through the add-to-cart redirect.
+
+				Log Out is a POST (LogoutView), so a cross-site link or
+				image cannot sign anybody out. The link keeps the nav
+				styling and submits the hidden form beside it; without
+				JavaScript it lands on a page with the same button.
+			    {% endcomment %}
 			    {% if request.user.is_authenticated %}
-				<li><a href="{% url 'logout' %}">Log Out</a></li>
-				<li><a href="{% url 'cart' %}"><i class="fa fa-shopping-cart"></i> Cart</a></li>
+				<li><a href="{% url 'logout' %}" onclick="event.preventDefault(); this.nextElementSibling.submit();">Log Out</a><form method="post" action="{% url 'logout' %}" hidden>{% csrf_token %}</form></li>
 			    {% else %}
 				<li><a href="{% url 'signup' %}">Sign Up</a></li>
 				<li><a href="{% url 'login' %}">Log In</a></li>
 			    {% endif %}
+			    <li><a href="{% url 'cart' %}"><i class="fa fa-shopping-cart"></i> Cart</a></li>
 			</ul>
 			<a class='menu-trigger'>
 			    <span>Menu</span>
@@ -117,7 +127,7 @@
 	    <div class="row">
 		<div class="col-lg-12">
 		    {% for message in messages %}
-		    <div class="alert alert-warning" role="alert">{{ message }}</div>
+		    <div class="alert alert-{{ message.tags|default:'warning' }}" role="alert">{{ message }}</div>
 		    {% endfor %}
 		</div>
 	    </div>
@@ -204,24 +214,6 @@
 
     <!-- Global Init -->
     <script src="{% static 'assets/js/custom.js' %}"></script>
-
-    <script>
-
-	$(function() {
-	    var selectedClass = "";
-	    $("p").click(function(){
-	    selectedClass = $(this).attr("data-rel");
-	    $("#portfolio").fadeTo(50, 0.1);
-		$("#portfolio div").not("."+selectedClass).fadeOut();
-	    setTimeout(function() {
-	      $("."+selectedClass).fadeIn();
-	      $("#portfolio").fadeTo(50, 1);
-	    }, 500);
-
-	    });
-	});
-
-    </script>
 
     {% if request|cookie_consent_enabled %}
       {% not_accepted_or_declined_cookie_groups request as undecided_cookie_groups %}

@@ -9,7 +9,6 @@ runs it -- it cannot take the primary down.
 
 import re
 from io import StringIO
-from pathlib import Path
 from unittest import mock
 
 from django.core import mail
@@ -18,10 +17,9 @@ from django.test import TestCase, override_settings
 
 from main.management.commands.check_book_assets import audit_digital_assets
 from main.models import Product
-from main.tests.base import EBOOK_PK, EBOOK_STEM, OWNER_EMAIL, BookAssetRootMixin
+from main.tests.base import EBOOK_PK, EBOOK_STEM, OWNER_EMAIL, BookAssetRootMixin, REPO_ROOT
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 LOGGER = "main.management.commands.check_book_assets"
 
 

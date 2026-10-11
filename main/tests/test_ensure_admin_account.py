@@ -10,7 +10,6 @@ must never appear in the output.
 import os
 import re
 from io import StringIO
-from pathlib import Path
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -18,7 +17,8 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+from main.tests.base import REPO_ROOT
+
 
 USERNAME = "shutterbug"
 PASSWORD = "a-long-vaulted-password"

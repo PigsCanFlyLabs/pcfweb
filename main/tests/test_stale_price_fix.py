@@ -35,9 +35,10 @@ class StalePriceCheckoutFixTest(TestCase):
     def _post_checkout(self, cart):
         request = self.factory.post("/checkout")
         request.user = AnonymousUser()
+        request.session = {}
         view = CheckoutView()
         with mock.patch.object(view, "get_cart", return_value=cart):
-            return view.start_checkout(request)
+            return view.post(request)
 
     @mock.patch("main.payments.stripe.checkout.Session.create")
     @mock.patch("main.payments.stripe.Price.create")

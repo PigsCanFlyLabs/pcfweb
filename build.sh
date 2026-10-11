@@ -123,6 +123,8 @@ fi
 # the India-specific buy links); the image builds fine without it.
 MAXMIND_SECRET_ARGS=()
 if [ -n "${MAXMIND_LICENSE_KEY:-}" ]; then
+  # One argument: buildx's --secret takes a comma-separated spec.
+  # shellcheck disable=SC2054
   MAXMIND_SECRET_ARGS=(--secret id=maxmind,env=MAXMIND_LICENSE_KEY)
 fi
 docker buildx build --platform=linux/amd64,linux/arm64 "${MAXMIND_SECRET_ARGS[@]}" -t "$TAG" . --push

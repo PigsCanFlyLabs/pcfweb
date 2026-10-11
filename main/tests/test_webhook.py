@@ -1081,6 +1081,31 @@ class WebhookFulfilmentClaimTest(OrderTestBase):
         self.assertIsNone(self.order.fulfilment_claimed_at)
         self.assertEqual(len(self.order_emails()), 1)
 
+    def test_a_superseded_worker_does_not_release_the_new_claim(self):
+        # Worker A claims, then outlives the lease; worker B (a redelivery,
+        # or the sweep) re-claims. A finishing late must not clear B's claim,
+        # or a third worker could start alongside B.
+        view = StripeWebhookView()
+        stale = timezone.now() - StripeWebhookView.FULFILMENT_LEASE
+        Order.objects.filter(pk=self.order.pk).update(
+            fulfilment_claimed_at=None)
+        a_claim = view.claim_fulfilment(self.order)
+        Order.objects.filter(pk=self.order.pk).update(
+            fulfilment_claimed_at=stale - timedelta(seconds=1))
+        b_claim = view.claim_fulfilment(self.order)
+        self.assertIsNotNone(a_claim)
+        self.assertIsNotNone(b_claim)
+
+        view.release_fulfilment(self.order, a_claim)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.fulfilment_claimed_at, b_claim)
+
+        view.release_fulfilment(self.order, b_claim)
+
+        self.order.refresh_from_db()
+        self.assertIsNone(self.order.fulfilment_claimed_at)
+
 
 class WebhookReconciliationRetryNotificationTest(OrderTestBase):
     """The owner's e-mail *is* the pick list, so it cannot outlive its facts.

@@ -32,8 +32,7 @@ from newsletter.models import Newsletter, Subscription
 from newsletter.utils import get_default_sites, make_activation_code
 
 from main.models import (
-    ALL_INTEREST_SLUG, DEFAULT_INTEREST_SLUG, Product, SuppressedAddress,
-    mailing_list_from_email)
+    ALL_INTEREST_SLUG, DEFAULT_INTEREST_SLUG, Product, SuppressedAddress)
 from main.utils import normalize_email, smtp_connection
 
 logger = logging.getLogger(__name__)

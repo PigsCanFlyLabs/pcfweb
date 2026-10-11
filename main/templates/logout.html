@@ -1,0 +1,31 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block custom_css %}
+<link rel="stylesheet" href="{% static 'assets/css/signup_form.css' %}">
+{% endblock custom_css %}
+
+{% block content %}
+{% comment %}
+    Only reached without JavaScript: the nav's Log Out link normally submits
+    the POST form in base.html directly. Logging out is a POST so that a
+    link or an image on another site cannot do it.
+{% endcomment %}
+<div class="container">
+    <section class="section">
+	<div class="d-flex justify-content-center mt-4">
+	    <div class="sign-up-form-container col-lg-6">
+		<form method="POST" action="{% url 'logout' %}">
+		  {% csrf_token %}
+		  <div class="section-heading">
+		    <h2>Log Out</h2>
+		  </div>
+		  <div class="main-border-button">
+		    <button type="submit">Log Out</button>
+		  </div>
+		</form>
+	    </div>
+	</div>
+    </section>
+</div>
+{% endblock content %}

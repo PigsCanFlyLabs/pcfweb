@@ -8,16 +8,14 @@ the joined link is not in the body" below is guarding that.
 
 import re
 import time
-from pathlib import Path
 
 import yaml
 from django.test import TestCase, override_settings
 
 from main import captcha
 from main.views import DiscordJoinView
+from main.tests.base import REPO_ROOT
 
-
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 PART_ONE = "https://discord.gg/testInv"
 PART_TWO = "iteCode"
@@ -101,6 +99,13 @@ class DiscordJoinPageTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, PART_TWO)
         self.assertContains(response, "captcha_answer")
+
+    def test_a_superscript_digit_is_a_wrong_answer_not_a_500(self):
+        # "²".isdigit() is True but int("²") raises ValueError.
+        self.client.get("/discord")
+        response = self.client.post("/discord", {"captcha_answer": "²"})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, PART_TWO)
 
     def test_a_wrong_answer_gets_a_fresh_question(self):
         # The old one is spent; without a replacement the page would be a

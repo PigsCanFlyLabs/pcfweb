@@ -88,6 +88,7 @@ from PIL import Image
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
+from main.management.commands.seed_products import FIXTURE_PATH
 from main.models import Product
 
 # (static-relative source path, (width, height)) for every {% static_thumbnail %}
@@ -197,9 +198,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser: Any) -> None:
         parser.add_argument(
             "--fixture",
-            default=os.path.join(
-                settings.BASE_DIR, "main", "fixtures",
-                "initial_products.yaml"),
+            default=FIXTURE_PATH,
             help="Product fixture to read cover names from.")
         parser.add_argument(
             "--check",

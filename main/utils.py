@@ -5,7 +5,7 @@ import logging
 import secrets
 
 from email.utils import parseaddr
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple, Union
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -200,13 +200,66 @@ def generate_username(email: str):
     return username
 
 
+_IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+
+
+@functools.lru_cache(maxsize=4)
+def _parse_networks(ranges: Tuple[str, ...]) -> Tuple[_IPNetwork, ...]:
+    """CLOUDFLARE_IP_RANGES as networks, parsed once per distinct value.
+
+    Keyed on the strings rather than read from settings in here, so a test's
+    override_settings gets its own entry instead of the cached defaults. A bad
+    entry is dropped, not raised: one typo in the env var must not turn every
+    request into a 500.
+    """
+    networks = []
+    for entry in ranges:
+        try:
+            networks.append(ipaddress.ip_network(entry.strip(), strict=False))
+        except (AttributeError, TypeError, ValueError):
+            logger.warning(
+                "Ignoring CLOUDFLARE_IP_RANGES entry %r: not a network.",
+                entry)
+    return tuple(networks)
+
+
+def _is_cloudflare(address: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    ranges = tuple(getattr(settings, "CLOUDFLARE_IP_RANGES", ()))
+    return any(ip in network for network in _parse_networks(ranges))
+
+
 def get_client_ip(request) -> Optional[str]:
-    # The in-pod nginx appends to X-Forwarded-For (see conf/nginx.default),
-    # so the first entry is the client as seen by the ingress.
+    """The visitor's address, as best the proxy chain can say.
+
+    The site sits behind Cloudflare, then the cluster ingress, then the
+    in-pod nginx (conf/nginx.default). The ingress sets X-Forwarded-For to
+    the address that dialled it and nginx appends after that, so the first
+    entry is our peer; REMOTE_ADDR stands in when there is no header (a
+    probe or a test hitting the pod directly).
+
+    Through Cloudflare that peer is an edge address shared by thousands of
+    visitors, so limits keyed on it throttled strangers together. Cloudflare
+    names the real visitor in CF-Connecting-IP, overwriting whatever the
+    client sent -- but only on requests that went through Cloudflare. One
+    that reaches the ingress directly can set it to anything per request and
+    so pick its own throttle bucket, or spend someone else's. It is
+    therefore believed only from a peer inside CLOUDFLARE_IP_RANGES;
+    otherwise the peer is the answer.
+    """
     forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
     if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    return request.META.get("REMOTE_ADDR")
+        peer = forwarded_for.split(",")[0].strip()
+    else:
+        peer = request.META.get("REMOTE_ADDR")
+    if peer and _is_cloudflare(peer):
+        connecting_ip = request.META.get("HTTP_CF_CONNECTING_IP", "").strip()
+        if connecting_ip:
+            return connecting_ip
+    return peer
 
 
 @functools.lru_cache(maxsize=1)

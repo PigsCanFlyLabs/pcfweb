@@ -14,9 +14,8 @@ from pathlib import Path
 from django.test import SimpleTestCase, TestCase
 
 from main.models import Product
+from main.tests.base import REPO_ROOT
 
-
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Django renders whatever it is handed, so an .html-only sweep is too
 # narrow: google_products.xml is a template, and a text email body would

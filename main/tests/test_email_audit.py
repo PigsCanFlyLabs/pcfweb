@@ -8,12 +8,11 @@
 """
 import io
 
-from django.core import mail
 from django.test import TestCase
 
 from main import mailing
 from main.models import (
-    MailingListDelivery, MailingListMessage, SuppressedAddress)
+    MailingListMessage, SuppressedAddress)
 from newsletter.models import Newsletter, Subscription
 
 

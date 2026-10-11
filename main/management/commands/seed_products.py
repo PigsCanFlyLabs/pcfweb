@@ -56,9 +56,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Set, Tuple
 
+import os
+
 import yaml
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
+from django.core.management.color import no_style
+from django.db import connection, models, transaction
 
 from main.launch_stock import apply_launch_stock
 from main.models import Product, ProductGroup
@@ -238,6 +242,41 @@ def _load_fixture(path: str) -> list[dict[str, Any]]:
     return data
 
 
+# Off BASE_DIR rather than the working directory, so the command works from
+# anywhere. pregenerate_thumbnails reads covers from the same file.
+FIXTURE_PATH = os.path.join(
+    settings.BASE_DIR, "main", "fixtures", "initial_products.yaml")
+
+
+def _differs(row: models.Model, fields: Dict[str, Any]) -> bool:
+    """Whether writing `fields` would change anything stored on `row`.
+
+    Values go through to_python, so a fixture's "2024-05-01" compares equal
+    to the date the column holds. Only concrete columns reach here: M2M keys
+    are held aside and FKs were rewritten to their attname.
+    """
+    def stored_differs(name: str, value: Any) -> bool:
+        field = row._meta.get_field(name)
+        assert isinstance(field, models.Field)
+        return getattr(row, field.attname) != field.to_python(value)
+
+    return any(stored_differs(name, value) for name, value in fields.items())
+
+
+def _reset_sequences() -> None:
+    """Move the id sequences past the pks the fixture writes explicitly.
+
+    Postgres does not advance a sequence for an INSERT that names its own
+    id, so after seeding pks 100+ the sequence still stood at 1 -- and the
+    admin's 100th new product (or 200th format group) would have collided
+    with a seeded row. Harmless on sqlite, which has no sequences to reset.
+    """
+    with connection.cursor() as cursor:
+        for sql in connection.ops.sequence_reset_sql(
+                no_style(), [Product, ProductGroup]):
+            cursor.execute(sql)
+
+
 class Command(BaseCommand):
     help = (
         "Upsert fixture-owned products from main/fixtures/initial_products.yaml, "
@@ -284,16 +323,14 @@ class Command(BaseCommand):
                 ProductGroup.objects.create(pk=pk, **fields)
                 self.stdout.write(f"Created product group pk={pk}")
                 created += 1
-            elif any(getattr(existing, name) != value
-                     for name, value in fields.items()):
+            elif _differs(existing, fields):
                 ProductGroup.objects.filter(pk=pk).update(**fields)
                 self.stdout.write(f"Updated product group pk={pk}")
                 updated += 1
         return created, updated
 
     def handle(self, **options: Any) -> None:
-        fixture_path = "main/fixtures/initial_products.yaml"
-        loaded = _load_fixture(fixture_path)
+        loaded = _load_fixture(FIXTURE_PATH)
         entries = [
             entry
             for entry in loaded
@@ -310,7 +347,7 @@ class Command(BaseCommand):
         # from coming up with no products rather than silently serving none.
         if not entries:
             raise CommandError(
-                f"{fixture_path} contains no main.product entries; "
+                f"{FIXTURE_PATH} contains no main.product entries; "
                 "refusing to report a successful seed."
             )
 
@@ -388,12 +425,18 @@ class Command(BaseCommand):
                     fk_field_names,
                 )
 
-                if Product.objects.filter(pk=pk).exists():
+                existing = Product.objects.filter(pk=pk).first()
+                if existing is not None:
                     # Existing row — update ONLY fixture-owned fields via a
                     # queryset .update() so that Product.save() (and the Stripe
                     # API call it triggers) is completely bypassed.
-                    rows = Product.objects.filter(pk=pk).update(**fixture_fields)
-                    if rows:
+                    #
+                    # And only when something differs, for the reason the
+                    # group pass gives: .update() returns rows MATCHED, so
+                    # counting off it reported every row "Updated" on every
+                    # deploy and "unchanged" could never happen.
+                    if _differs(existing, fixture_fields):
+                        Product.objects.filter(pk=pk).update(**fixture_fields)
                         updated += 1
                         self.stdout.write(f"Updated product pk={pk}")
                     else:
@@ -455,6 +498,8 @@ class Command(BaseCommand):
                         getattr(product, field_name).set(targets)
                     linked += 1
                     self.stdout.write(f"Cross-linked product pk={pk}")
+
+        _reset_sequences()
 
         self.stdout.write(
             self.style.SUCCESS(

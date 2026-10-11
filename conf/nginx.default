@@ -2,6 +2,11 @@ server {
     listen 80;
     server_name www.pigscanfly.ca;
 
+    # nginx's default is 1m, which turned a cover image or a mailing-list CSV
+    # over a megabyte into a bare 413 from the admin before Django ever saw
+    # it. The mailing-list import itself stops reading at 5 MB.
+    client_max_body_size 10m;
+
     # The Kubernetes probes hit this on every pod every few seconds; logging
     # them buries the real traffic. Everything else about it is a normal
     # proxied request.
