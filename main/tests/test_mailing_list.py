@@ -10,6 +10,7 @@ up: an open redirect, a way to be mailed without confirming, a way to knock
 somebody off the list.
 """
 
+import csv
 import io
 import json
 import re
@@ -696,6 +697,16 @@ class ConfirmAndUnsubscribeTest(MailingListTestBase):
         self.assertEqual(len(mail.outbox), 1)
 
 
+# Well under the upload size limit, but one field -- a pasted blob in a notes
+# column -- is past the csv module's own per-field limit, so it cannot read
+# the file at all. Readable rows on both sides of it, so a partial import
+# would leave subscriptions behind.
+OVERLONG_FIELD = ("Email,Notes\n"
+                  "ada@example.com,hi\n"
+                  f"grace@example.com,{'x' * (csv.field_size_limit() + 1)}\n"
+                  "kid@example.com,bye\n")
+
+
 class HeadingDetectionTest(TestCase):
     """Which column is which, for files other people's tools produced."""
 
@@ -703,6 +714,22 @@ class HeadingDetectionTest(TestCase):
         upload = io.BytesIO(text.encode("utf-8"))
         upload.name = "export.csv"
         return mailing.parse_addresses(upload)
+
+    def test_an_unreadable_file_raises_its_own_exception(self):
+        # Its own exception, so the form catches exactly this and a real bug
+        # elsewhere in parsing still fails loudly.
+        with self.assertRaises(mailing.UnreadableCSV):
+            self.parse(OVERLONG_FIELD)
+
+    def test_old_mac_line_endings_are_read_not_refused(self):
+        # A "CSV (Macintosh)" export ends lines with a bare CR. Read through
+        # io.StringIO without newline="" that is a csv.Error ("new-line
+        # character seen in unquoted field"), which used to 500 the page.
+        self.assertEqual(
+            self.parse("Email Address,First Name\r"
+                       "ada@example.com,Ada\r"
+                       "grace@example.com,Grace\r"),
+            {"ada@example.com": "Ada", "grace@example.com": "Grace"})
 
     def test_a_surname_column_before_the_given_name_keeps_both(self):
         # Every surname heading contains the substring "name", so the surname
@@ -1600,6 +1627,19 @@ class ImportTest(ImportTestBase):
         self.assertEqual(self.subscribers(),
                          ["ada@example.com", "grace@example.com"])
 
+    def test_a_file_the_csv_module_cannot_read_is_refused_not_a_500(self):
+        # csv.Error used to escape the form and 500 the page. Refused whole,
+        # not skipped past: the reader stops at the bad field, so all it could
+        # import is the file's head -- the partial import the size check
+        # refuses too.
+        self.assertLess(len(OVERLONG_FIELD), mailing.MAX_UPLOAD_BYTES)
+
+        response = self.do_import(OVERLONG_FIELD)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "could not be read as a CSV")
+        self.assertFalse(Subscription.objects.exists())
+
     def test_a_subscriber_import_has_to_say_which_list(self):
         # Importing into the wrong list is the mistake to be afraid of here.
         response = self.client.post(self.IMPORT_URL, {
@@ -1681,6 +1721,16 @@ class SuppressionTest(ImportTestBase):
 
         self.assertContains(response, "larger than 5 MB")
         self.assertFalse(SuppressedAddress.objects.exists())
+
+    def test_a_file_the_csv_module_cannot_read_suppresses_nothing(self):
+        live = self.subscriber("ada@example.com", self.general)
+
+        response = self.suppress(OVERLONG_FIELD)
+
+        self.assertContains(response, "could not be read as a CSV")
+        self.assertFalse(SuppressedAddress.objects.exists())
+        live.refresh_from_db()
+        self.assertFalse(live.unsubscribed)
 
     def test_addresses_are_stored_lower_cased(self):
         SuppressedAddress.objects.create(email="  Loud@Example.COM ")
