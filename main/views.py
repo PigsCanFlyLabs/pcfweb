@@ -1715,6 +1715,12 @@ class StripeWebhookView(View):
                     order.pk, source, session.get("id"))
                 self.fulfil_order(order)
                 return False
+            if order.status == Order.Status.CANCELLED:
+                # Still never overwritten -- it was cancelled here on
+                # purpose, by the owner or a failed checkout -- but no longer
+                # quietly: see the helper.
+                self.alert_paid_but_cancelled(order, fields, source)
+                return False
             logger.info(
                 "Order #%s is already past PENDING (reached by %s); not "
                 "overwriting it from Stripe session %s.",
@@ -1724,6 +1730,60 @@ class StripeWebhookView(View):
         order.refresh_from_db()
         self.fulfil_order(order)
         return True
+
+    @staticmethod
+    def alert_paid_but_cancelled(order: Order, fields: Dict[str, Any],
+                                 source: str) -> None:
+        """Tell ADMINS that Stripe took money for an order cancelled here.
+
+        Loud, unlike every other past-PENDING case, which is an ordinary
+        redelivery for an order already paid and acted on. Here the buyer has
+        been charged and nothing will happen: the order stays CANCELLED, so
+        no download, receipt or pick list ever goes out, and nothing retries.
+        Real ways in: the owner cancels a PENDING order by hand while a
+        delayed payment is still settling, or a payment lands for a checkout
+        cancelled because Session.create failed.
+
+        Not deduplicated, because nothing routinely brings the same payment
+        back here: a 200 stops Stripe redelivering the event, the sweep only
+        queries PENDING orders, and the success page only reconciles PENDING
+        ones. A rare duplicate event, or a manual resend from the Dashboard,
+        costs one more mail.
+
+        `fields` is paid_fields(session), so the session id is the one Stripe
+        reported -- the order may never have recorded one.
+        """
+        amount = "{0:.2f} {1}".format(
+            fields["amount_total"] / 100, fields["currency"].upper())
+        logger.error(
+            "Order #%s is CANCELLED but Stripe session %s reports it paid "
+            "(%s, reached by %s); leaving it cancelled and mailing ADMINS.",
+            order.pk, fields["stripe_session_id"], amount, source)
+        subject = (f"[pcfweb] Order #{order.pk} was paid on Stripe but is "
+                   "cancelled here")
+        body = "\n".join([
+            f"Stripe reports order #{order.pk} as paid, but it is CANCELLED "
+            "here. It was left cancelled, so nothing will be fulfilled: no "
+            "download, receipt or pick list goes out.",
+            "",
+            f"Order:           #{order.pk}",
+            f"Stripe session:  {fields['stripe_session_id']}",
+            f"Amount:          {amount}",
+            f"Customer email:  {fields['customer_email'] or '(none given)'}",
+            f"Reported by:     {source}",
+            "",
+            # A $0 pay-what-you-want checkout also arrives as "paid" (Stripe's
+            # no_payment_required); there is nothing to refund then.
+            ("The buyer has been charged. Either refund the payment in the "
+             "Stripe Dashboard, or honour it" if fields["amount_total"] else
+             "No money was taken (a $0 order), but the buyer completed "
+             "checkout and expects it. Honour it")
+            + " by fulfilling the order by hand -- the admin deliberately "
+            "will not move a CANCELLED order back to PAID, so the site will "
+            "not do it for you. If you already refunded this payment, there "
+            "is nothing more to do.",
+        ])
+        email_admins(subject, body, logger, subject)
 
     def fulfil_order(self, order: Order) -> None:
         """Run only the paid order actions that have not completed yet.

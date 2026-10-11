@@ -208,7 +208,8 @@ class CheckoutCreatesOrderTest(OrderTestBase):
                 self.client.post("/checkout")
         order = Order.objects.get()
 
-        response = self.deliver(self.event_body(order, id="cs_ghost"))
+        with self.assertLogs("main.views", level="ERROR"):
+            response = self.deliver(self.event_body(order, id="cs_ghost"))
 
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
@@ -216,6 +217,14 @@ class CheckoutCreatesOrderTest(OrderTestBase):
         # Not assertEqual(outbox, 0): the failed checkout above mailed
         # ADMINS about the Stripe outage.
         self.assertEqual(self.order_emails(), [])
+        # Cancelled, yet Stripe says the buyer paid: the owner has to refund
+        # or fulfil by hand, so is told -- with the session id, since the
+        # order itself never recorded one.
+        alerts = [m for m in mail.outbox
+                  if "paid on Stripe but is cancelled here" in m.subject]
+        self.assertEqual(len(alerts), 1)
+        self.assertIn(f"Order #{order.pk} was paid", alerts[0].subject)
+        self.assertIn("cs_ghost", alerts[0].body)
 
     def test_multiple_cart_lines_are_all_snapshotted(self):
         self.client.post("/add-to-cart/100/1")

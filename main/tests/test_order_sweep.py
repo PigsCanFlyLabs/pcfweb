@@ -783,6 +783,15 @@ class SweepPendingOrdersTest(OrderTestBase):
         self.assertEqual(self.order.status, Order.Status.CANCELLED,
                          "past PENDING is never overwritten from Stripe")
         self.assertEqual(self.order_emails(), [])
+        # Not an outage, but still an incident: Stripe has the buyer's money
+        # for an order that is now cancelled. ADMINS hear about that under its
+        # own subject, which is why the outage check above still sees none.
+        alerts = [m for m in mail.outbox
+                  if "paid on Stripe but is cancelled here" in m.subject]
+        self.assertEqual(len(alerts), 1)
+        self.assertIn(f"Order #{self.order.pk} was paid", alerts[0].subject)
+        self.assertIn("order sweep", alerts[0].body)
+        self.assertTrue([m for m in logged if m.startswith("ERROR:main.views:")])
 
 
 class OrderSweepIsScheduledTest(SimpleTestCase):
