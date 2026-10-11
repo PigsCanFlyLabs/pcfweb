@@ -793,6 +793,113 @@ class WebhookIdempotencyTest(OrderTestBase):
         self.assertEqual(len(self.order_emails()), 1)
 
 
+class WebhookPaidAfterCancellationTest(OrderTestBase):
+    """Stripe took the money for an order this site has already cancelled.
+
+    The guarded PENDING -> PAID UPDATE rightly refuses to bring it back, and
+    used to stop there: one INFO line, a 200, and a buyer charged for
+    something nobody will send. Leaving the order cancelled is still right --
+    it was cancelled here on purpose -- but the only remedies, a refund or a
+    hand fulfilment, are both the owner's, so the owner has to be told.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.order = self.place_order()
+
+    @staticmethod
+    def alerts():
+        return [m for m in mail.outbox
+                if "paid on Stripe but is cancelled here" in m.subject]
+
+    def cancel_by_hand(self):
+        # What the admin's PENDING -> CANCELLED move writes.
+        Order.objects.filter(pk=self.order.pk).update(
+            status=Order.Status.CANCELLED)
+
+    def test_a_payment_settling_on_a_hand_cancelled_order_mails_admins(self):
+        # The owner cancels a PENDING order while its delayed payment (an
+        # ACH debit, say) is still on its way, and then it settles.
+        self.cancel_by_hand()
+
+        with self.assertLogs("main.views", level="ERROR") as log:
+            response = self.deliver(self.event_body(
+                self.order,
+                event_type="checkout.session.async_payment_succeeded",
+                amount_total=1234))
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.CANCELLED)
+        self.assertIsNone(self.order.paid_at)
+        self.assertEqual(self.order.customer_email, "",
+                         "a cancelled order is never overwritten")
+        self.assertEqual(self.order_emails(), [])
+        # The alert and nothing else: no receipt, no download, no pick list.
+        self.assertEqual(len(mail.outbox), 1)
+        (alert,) = self.alerts()
+        self.assertEqual(alert.to, [OWNER_EMAIL])
+        self.assertIn(f"Order #{self.order.pk} was paid", alert.subject)
+        self.assertNotIn("no webhook recorded", alert.subject)
+        for detail in (f"#{self.order.pk}", "cs_test_session", "12.34 USD",
+                       "buyer@example.com", "webhook delivery",
+                       "Stripe Dashboard"):
+            self.assertIn(detail, alert.body)
+        self.assertTrue(any(f"Order #{self.order.pk}" in line
+                            for line in log.output))
+
+    def test_an_alert_that_cannot_be_sent_still_answers_200(self):
+        # A 500 would have Stripe redeliver for three days, and each retry
+        # would fail the same way. The ERROR line is the record instead.
+        # Broken at the mail backend, so the test holds whichever helper the
+        # alert sends through.
+        self.cancel_by_hand()
+
+        with mock.patch(
+                "django.core.mail.backends.locmem.EmailBackend.send_messages",
+                side_effect=OSError("SMTP is down")) as send:
+            with self.assertLogs("main.views", level="ERROR") as log:
+                response = self.deliver(self.event_body(self.order))
+
+        send.assert_called_once()
+        self.assertTrue(any("Could not email" in line for line in log.output),
+                        "the failed send is logged, not raised")
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.CANCELLED)
+
+    def test_a_cancelled_zero_dollar_order_is_not_called_a_charge(self):
+        # A $0 pay-what-you-want checkout arrives as "paid" too, with
+        # nothing to refund; the alert must not send the owner looking.
+        self.cancel_by_hand()
+
+        with self.assertLogs("main.views", level="ERROR"):
+            self.deliver(self.event_body(
+                self.order, payment_status="no_payment_required",
+                amount_total=0))
+
+        (alert,) = self.alerts()
+        self.assertIn("0.00 USD", alert.body)
+        self.assertIn("No money was taken", alert.body)
+        self.assertNotIn("has been charged", alert.body)
+
+    def test_a_redelivery_for_a_paid_or_fulfilled_order_raises_no_alert(self):
+        # Control: PAID and FULFILLED are past PENDING too, but there the
+        # payment was recorded and acted on, so a redelivery (or the webhook
+        # racing the success page or the sweep) is routine, not an incident.
+        self.deliver(self.event_body(self.order))
+        for status in (Order.Status.PAID, Order.Status.FULFILLED):
+            with self.subTest(status=status):
+                Order.objects.filter(pk=self.order.pk).update(status=status)
+                mail.outbox.clear()
+
+                with self.assertNoLogs("main.views", level="ERROR"):
+                    response = self.deliver(self.event_body(self.order))
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(self.alerts(), [])
+
+
 class WebhookEmailFailureTest(OrderTestBase):
     """Requirement 5: a failing send_mail must not fail the webhook.
 
